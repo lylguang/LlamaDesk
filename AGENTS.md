@@ -18,7 +18,6 @@ apps/
 │   └── src/
 │       ├── bun/          # Main process (RPC, DB, inference runtimes, OCR pipeline, queue)
 │       └── mainview/     # React UI (components, stores, lib)
-└── landing/              # Marketing site (marketing site)
 ```
 
 ## Electrobun

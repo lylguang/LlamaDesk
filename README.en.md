@@ -148,7 +148,6 @@ apps/
 │   └── src/
 │       ├── bun/          # Main process (RPC, DB, inference runtimes, OCR pipeline, queue)
 │       └── mainview/     # React UI
-└── landing/              # Marketing site (marketing site)
 ```
 
 ## 🗺 Roadmap

@@ -158,7 +158,6 @@ apps/
 │       ├── cli/            # `omi` 命令行（bin/omi.ts 入口，复用 bun 数据层与运行时）
 │       ├── mainview/       # React UI（components, stores, lib）
 │       └── shared/         # shared constants, i18n, engine metadata 共享常量 / 国际化 / 引擎元数据
-└── landing/                # marketing site (marketing site) 官网
 ```
 
 ## 🖥 CLI / 命令行（`omi`）

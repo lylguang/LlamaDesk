@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/lylguang/LlamaDesk/releases/latest">下载</a> ·
+  <a href="https://github.com/yuleDI/LlamaDesk/releases/latest">下载</a> ·
   <a href="./CHANGELOG.md">更新日志</a>
 </p>
 

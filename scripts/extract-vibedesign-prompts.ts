@@ -1,6 +1,6 @@
 /**
  * 一次性抽取脚本：把 vibedesign（默认 ~/ai/vibedesign 或当前用户家目录下的 ai/vibedesign）
- * 的三类提示词数据归一化成 JSON 种子文件，供 OmniStudio 首次启动时灌入本地 SQLite：
+ * 的三类提示词数据归一化成 JSON 种子文件，供 LlamaDesk 首次启动时灌入本地 SQLite：
  *
  *   - image：图片提示词（image2hub 97 条 + awesome-gpt-image-2 541 条）
  *   - video：MiniMax H3 视频提示词/案例（2000+ 条）
@@ -17,7 +17,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const VIBE_DIR = `${process.env.HOME || "/Users/jwangkun"}/ai/vibedesign`;
+const VIBE_DIR = `${process.env.HOME || homedir()}/ai/vibedesign`;
 const OUT_DIR = join(HERE, "../apps/studio/src/bun/prompt-library/seed");
 
 // ---------------------------------------------------------------------------

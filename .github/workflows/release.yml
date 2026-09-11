@@ -128,7 +128,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: omnistudio-darwin-arm64
+          name: llamadesk-darwin-arm64
           path: apps/studio/artifacts/
           if-no-files-found: error
 
@@ -203,7 +203,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: omnistudio-win-x64
+          name: llamadesk-win-x64
           path: apps/studio/artifacts/
           if-no-files-found: error
 
@@ -254,7 +254,7 @@ jobs:
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: omnistudio-linux-x64
+          name: llamadesk-linux-x64
           path: apps/studio/artifacts/
           if-no-files-found: error
 
@@ -284,9 +284,9 @@ jobs:
         with:
           tag_name: ${{ env.RELEASE_TAG }}
           files: |
-            omnistudio-darwin-arm64/*
-            omnistudio-win-x64/*
-            omnistudio-linux-x64/*
+            llamadesk-darwin-arm64/*
+            llamadesk-win-x64/*
+            llamadesk-linux-x64/*
           draft: false
           prerelease: ${{ steps.release-env.outputs.prerelease }}
           generate_release_notes: true

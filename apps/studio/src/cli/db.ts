@@ -17,7 +17,7 @@ async function appModules(): Promise<AppModules> {
   if (loaded) return loaded;
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
+  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
   const [modelStore, settings] = await Promise.all([
     import("../bun/model-store"),
     import("../bun/db/settings"),

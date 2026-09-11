@@ -1,8 +1,8 @@
 <p align="center">
-  <img src=".github/assets/logo.png" alt="OmniStudio" width="128" />
+  <img src=".github/assets/logo.png" alt="LlamaDesk" width="128" />
 </p>
 
-<h1 align="center">OmniStudio</h1>
+<h1 align="center">LlamaDesk</h1>
 
 <p align="center">
   <b>A desktop workstation for local LLMs</b><br/>
@@ -14,15 +14,15 @@
 </p>
 
 <p align="center">
-  <a href="https://kunpengtalk.com">Website</a> ·
-  <a href="https://kunpengtalk.com/assets/kunpengtalk-studio-demo.mp4">Demo</a> ·
-  <a href="https://github.com/kunpengtalk/OmniStudio/releases/latest">Download</a> ·
+  <a href="https://github.com/your-company/LlamaDesk/releases/latest">Download</a> ·
   <a href="./CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  ⭐ <a href="https://github.com/kunpengtalk/OmniStudio">Star</a> · License: <a href="LICENSE">MIT</a> · Author: 鲲鹏Talk
+  License: <a href="LICENSE">MIT</a> · Copyright © 2026 Your Company
 </p>
+
+> This project is a fork of [OmniStudio](https://gitee.com/jwangkun/OmniStudio) (MIT License, Copyright © 2026 鲲鹏Talk).
 
 ---
 
@@ -148,7 +148,7 @@ apps/
 │   └── src/
 │       ├── bun/          # Main process (RPC, DB, inference runtimes, OCR pipeline, queue)
 │       └── mainview/     # React UI
-└── landing/              # Marketing site (kunpengtalk.com)
+└── landing/              # Marketing site (marketing site)
 ```
 
 ## 🗺 Roadmap
@@ -160,4 +160,4 @@ apps/
 
 ## 📄 License
 
-MIT — maintained by 鲲鹏Talk. See [LICENSE](LICENSE).
+MIT — maintained by Your Company. See [LICENSE](LICENSE).

@@ -1,8 +1,8 @@
 <p align="center">
-  <img src=".github/assets/logo.png" alt="OmniStudio" width="128" />
+  <img src=".github/assets/logo.png" alt="LlamaDesk" width="128" />
 </p>
 
-<h1 align="center">OmniStudio</h1>
+<h1 align="center">LlamaDesk</h1>
 
 <p align="center">
   <b>本地大模型一体化桌面工作台</b><br/>
@@ -14,15 +14,15 @@
 </p>
 
 <p align="center">
-  <a href="https://kunpengtalk.com">官网</a> ·
-  <a href="https://kunpengtalk.com/assets/kunpengtalk-studio-demo.mp4">演示视频</a> ·
-  <a href="https://github.com/kunpengtalk/OmniStudio/releases/latest">下载</a> ·
+  <a href="https://github.com/your-company/LlamaDesk/releases/latest">下载</a> ·
   <a href="./CHANGELOG.md">更新日志</a>
 </p>
 
 <p align="center">
-  ⭐ <a href="https://github.com/kunpengtalk/OmniStudio">Star</a> · License: <a href="LICENSE">MIT</a> · 作者：鲲鹏Talk
+  License: <a href="LICENSE">MIT</a> · Copyright © 2026 Your Company
 </p>
+
+> 本项目基于 [OmniStudio](https://gitee.com/jwangkun/OmniStudio)（MIT License, Copyright © 2026 鲲鹏Talk）二次开发。
 
 ---
 
@@ -158,12 +158,12 @@ apps/
 │       ├── cli/            # `omi` 命令行（bin/omi.ts 入口，复用 bun 数据层与运行时）
 │       ├── mainview/       # React UI（components, stores, lib）
 │       └── shared/         # shared constants, i18n, engine metadata 共享常量 / 国际化 / 引擎元数据
-└── landing/                # marketing site (kunpengtalk.com) 官网
+└── landing/                # marketing site (marketing site) 官网
 ```
 
 ## 🖥 CLI / 命令行（`omi`）
 
-`omi` 是 OmniStudio 自带的本地命令（参照 [omlx](https://github.com/jundot/omlx) 设计）：启动应用、管理推理服务器、配置云端、唤起模型列表选模型、拉起编码工具。
+`omi` 是 LlamaDesk 自带的本地命令（参照 [omlx](https://github.com/jundot/omlx) 设计）：启动应用、管理推理服务器、配置云端、唤起模型列表选模型、拉起编码工具。
 
 ```bash
 cd apps/studio && bun link   # 安装一次，之后可直接用 `omi`
@@ -190,4 +190,4 @@ omi status / omi models / omi stop / omi serve --port 8090
 
 ## 📄 许可证
 
-MIT — by 鲲鹏Talk。见 [LICENSE](LICENSE)。
+MIT — by Your Company。见 [LICENSE](LICENSE)。

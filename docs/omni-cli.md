@@ -1,6 +1,6 @@
-# omni — OmniStudio 命令行工具
+# omni — LlamaDesk 命令行工具
 
-`omni` 把 OmniStudio 桌面应用的后端能力封装成全局命令行工具，**直接复用 `src/bun/` 的真实代码**（模型库、推理服务器、网关、聊天、设置），不重写一套。模型、配置、数据库与桌面应用完全共享——`omni model set` 激活的模型就是应用里默认的对话模型。
+`omni` 把 LlamaDesk 桌面应用的后端能力封装成全局命令行工具，**直接复用 `src/bun/` 的真实代码**（模型库、推理服务器、网关、聊天、设置），不重写一套。模型、配置、数据库与桌面应用完全共享——`omni model set` 激活的模型就是应用里默认的对话模型。
 
 ## 安装
 
@@ -25,7 +25,7 @@ cd apps/studio && bun unlink
 ## 数据目录
 
 CLI 直接读写桌面应用的数据库，默认自动探测**最新**使用过的 channel 数据目录
-（`~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>/`），
+（`~/Library/Application Support/com.yourcompany.llamadesk/<channel>/`），
 也可显式指定：
 
 ```bash

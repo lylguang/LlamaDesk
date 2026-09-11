@@ -24,7 +24,7 @@ export async function cmdStart(parsed: ParsedArgs) {
 
   const connected = await ensureAppRunning({ appPath });
   if (!connected) fail("未能连接应用（control socket）。请确认应用安装路径或使用 --app-path。");
-  console.log("OmniStudio 已启动。");
+  console.log("LlamaDesk 已启动。");
 
   if (goCloud) {
     await controlRequest("navigate", { path: "settings" });
@@ -111,7 +111,7 @@ export async function cmdStatus() {
 function printStatus(r: ControlResult) {
   const { server, gateway, mode, version } = r.data ?? {};
   const line = (label: string, value: string) => console.log(`  ${label.padEnd(10)} ${value}`);
-  console.log(`OmniStudio ${version ?? ""}  模式：${mode === "remote" ? "云端" : "本地"}`);
+  console.log(`LlamaDesk ${version ?? ""}  模式：${mode === "remote" ? "云端" : "本地"}`);
   console.log("推理服务器");
   line("引擎", server?.engine ?? "-");
   line("状态", server?.status ?? "-");

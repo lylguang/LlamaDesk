@@ -45,7 +45,7 @@ export function getChatModel(): LanguageModel {
   if (isLocal) {
     const port = getSetting("SERVER_PORT");
     const provider = createOpenAICompatible({
-      name: "omni-studio",
+      name: "llama-desk",
       baseURL: `http://localhost:${port}/v1`,
     });
     return provider.languageModel(getChatModelName());
@@ -53,7 +53,7 @@ export function getChatModel(): LanguageModel {
 
   const apiKey = getSetting("VLLM_API_KEY");
   const provider = createOpenAICompatible({
-    name: "omni-studio",
+    name: "llama-desk",
     baseURL: getSetting("VLLM_API_BASE"),
     apiKey: apiKey === "EMPTY" ? undefined : apiKey,
   });

@@ -45,14 +45,14 @@ export async function isAppRunning(): Promise<boolean> {
   return r.connected && r.ok;
 }
 
-/** 唤起已安装的 OmniStudio.app（omlx 同款：`open` + 轮询 socket）。 */
+/** 唤起已安装的 LlamaDesk.app（omlx 同款：`open` + 轮询 socket）。 */
 export async function launchApp(appPath?: string): Promise<boolean> {
   const target = appPath && existsSync(appPath) ? appPath : appBundlePath();
-  const args = target ? ["open", target] : ["open", "-a", "OmniStudio"];
+  const args = target ? ["open", target] : ["open", "-a", "LlamaDesk"];
   const proc = spawn(args, { stdout: "ignore", stderr: "pipe" });
   const code = await proc.exited;
   if (code !== 0) {
-    console.error("无法启动 OmniStudio 应用，请确认已安装，或指定 --app-path <OmniStudio.app>");
+    console.error("无法启动 LlamaDesk 应用，请确认已安装，或指定 --app-path <LlamaDesk.app>");
     return false;
   }
   return true;

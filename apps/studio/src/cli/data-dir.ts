@@ -2,14 +2,14 @@ import { homedir } from "os";
 import { join } from "path";
 import { existsSync, readFileSync } from "fs";
 
-export const APP_NAME = "OmniStudio";
-export const APP_IDENTIFIER = "omni-studio.kunpengtalk.com";
+export const APP_NAME = "LlamaDesk";
+export const APP_IDENTIFIER = "com.yourcompany.llamadesk";
 
 type VersionInfo = { identifier: string; channel: string };
 
 const BUNDLE_CANDIDATES = [
-  "/Applications/OmniStudio.app",
-  join(homedir(), "Applications", "OmniStudio.app"),
+  "/Applications/LlamaDesk.app",
+  join(homedir(), "Applications", "LlamaDesk.app"),
 ];
 
 /** 打包应用会写 `<bundle>/Contents/Resources/version.json`（含 identifier/channel）。 */

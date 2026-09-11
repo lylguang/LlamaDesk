@@ -1,11 +1,11 @@
 {
-  "name": "@omni-studio/monorepo",
+  "name": "@llama-desk/monorepo",
   "version": "0.0.5-canary.0",
   "private": true,
-  "description": "OmniStudio — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs: models, servers, and apps (chat, voice, image, OCR).",
+  "description": "LlamaDesk — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs: models, servers, and apps (chat, voice, image, OCR).",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kunpengtalk/OmniStudio.git"
+    "url": "git+https://github.com/your-company/LlamaDesk.git"
   },
   "workspaces": {
     "packages": [

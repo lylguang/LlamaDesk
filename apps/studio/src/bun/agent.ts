@@ -157,13 +157,13 @@ export function deleteConversationEvents(conversationId: number): void {
 }
 
 /** 当前生效的工作区：未配置时回落到用户主目录。 */
-/** OmniStudio 的隐藏根目录（位于当前用户主目录下）。 */
-export const OMNI_STUDIO_DIR = ".omnistudio";
-/** 默认工作区：~/.omnistudio/workspace */
+/** LlamaDesk 的隐藏根目录（位于当前用户主目录下）。 */
+export const OMNI_STUDIO_DIR = ".llamadesk";
+/** 默认工作区：~/.llamadesk/workspace */
 export const DEFAULT_WORKSPACE_NAME = "workspace";
 
 /**
- * 确保默认工作区存在：~/.omnistudio/workspace。
+ * 确保默认工作区存在：~/.llamadesk/workspace。
  * 用当前用户权限创建（mkdir 继承进程 umask），失败时回落到用户主目录。
  */
 function ensureDefaultWorkspace(): string {
@@ -182,7 +182,7 @@ function ensureDefaultWorkspace(): string {
 /**
  * 当前生效的工作区：
  * 1. 设置里指定的目录（AGENT_WORKSPACE）—— 用户在界面上自己选的，目录不存在时自动创建；
- * 2. 否则用默认工作区 ~/.omnistudio/workspace。
+ * 2. 否则用默认工作区 ~/.llamadesk/workspace。
  */
 export function getAgentWorkspace(): string {
   const configured = getSetting("AGENT_WORKSPACE").trim();
@@ -215,7 +215,7 @@ function buildModel(): Model<"openai-completions"> {
     id,
     name: id,
     api: "openai-completions",
-    provider: "omni-studio",
+    provider: "llama-desk",
     baseUrl,
     // 是否支持 reasoning 由服务端决定；保持 false 以免强行注入 reasoning 参数。
     reasoning: false,
@@ -231,12 +231,12 @@ function createStreamFn() {
   const models = createModels();
   models.setProvider(
     createProvider({
-      id: "omni-studio",
-      name: "OmniStudio",
+      id: "llama-desk",
+      name: "LlamaDesk",
       baseUrl: model.baseUrl,
       auth: {
         apiKey: {
-          name: "OmniStudio inference server",
+          name: "LlamaDesk inference server",
           resolve: async () => {
             const key = getSetting("VLLM_API_KEY");
             return { auth: { apiKey: key && key !== "EMPTY" ? key : "EMPTY" }, source: "env" as const };
@@ -293,7 +293,7 @@ const MODE_INSTRUCTION: Record<AgentMode, string> = {
 
 function buildSystemPrompt(mode: AgentMode, workspace: string): string {
   return [
-    "你是 OmniStudio 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
+    "你是 LlamaDesk 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
     currentTimeLine(),
     `工作区根目录：${workspace}`,
     `运行环境：${os.type()} ${os.release()}（${os.arch()}），shell：${process.env.SHELL ?? "/bin/sh"}。`,
@@ -366,7 +366,7 @@ function historyAsAgentMessages(conversationId: number): AgentMessage[] {
             role: "assistant",
             content: [{ type: "text" as const, text: m.content }],
             api: "openai-completions",
-            provider: "omni-studio",
+            provider: "llama-desk",
             model: getChatModelName(),
             usage: {
               input: 0,

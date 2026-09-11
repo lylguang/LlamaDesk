@@ -521,7 +521,7 @@ function AgentMessages({ conversationId }: { conversationId: number }) {
   });
   const tools = toolsQuery.data?.tools ?? [];
 
-  // 默认工作区（~/.omnistudio/workspace），供选择面板展示。
+  // 默认工作区（~/.llamadesk/workspace），供选择面板展示。
   const defaultWorkspaceQuery = useQuery({
     queryKey: ["agent-workspace"],
     queryFn: () => rpcClient.getAgentWorkspace(undefined),
@@ -979,7 +979,7 @@ export function AgentWindow() {
     queryFn: () => rpcClient.getSettings(undefined),
   });
 
-  // 未指定工作区时向后端要默认的（~/.omnistudio/workspace，不存在会自动创建）。
+  // 未指定工作区时向后端要默认的（~/.llamadesk/workspace，不存在会自动创建）。
   const defaultWorkspaceQuery = useQuery({
     queryKey: ["agent-workspace"],
     queryFn: () => rpcClient.getAgentWorkspace(undefined),

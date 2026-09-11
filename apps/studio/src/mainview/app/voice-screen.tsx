@@ -864,7 +864,7 @@ function TtsTab() {
   useEffect(() => {
     if (provider && !syncedRef.current) {
       syncedRef.current = true;
-      // 地址留空时回退到线上 OmniLabs 默认地址，避免空着。
+      // 地址默认留空：由用户选择厂商预设或手动填写。
       setPBase(provider.base || DEFAULT_VOICE_BASE_URL);
       setPKey(provider.apiKey);
       setModel((m) => m || provider.model);
@@ -2009,7 +2009,7 @@ function AsrTab() {
   useEffect(() => {
     if (provider && !providerSynced.current) {
       providerSynced.current = true;
-      // 地址留空时回退到线上 OmniLabs 默认地址，避免空着。
+      // 地址默认留空：由用户选择厂商预设或手动填写。
       setPBase(provider.base || DEFAULT_VOICE_BASE_URL);
       setPKey(provider.apiKey);
       setPModel(provider.model);

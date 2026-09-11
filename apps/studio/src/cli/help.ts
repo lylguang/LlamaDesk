@@ -1,9 +1,9 @@
-export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台（llama.cpp · vLLM · SGLang）
+export const HELP_TEXT = `LlamaDesk — 本地大模型一体化桌面工作台（llama.cpp · vLLM · SGLang）
 
 用法：omi <command> [options]
 
 命令：
-  start [options]      启动 OmniStudio 应用；--server 同时启动推理服务器，
+  start [options]      启动 LlamaDesk 应用；--server 同时启动推理服务器，
                        --model 打开模型列表，--cloud 打开云端配置
   stop [name]          停止推理服务器
   restart              重启推理服务器
@@ -27,7 +27,7 @@ export const HELP_TEXT = `OmniStudio — 本地大模型一体化桌面工作台
 运行 'omi <command> --help' 查看子命令详情。`;
 
 export const CMD_HELP: Record<string, string> = {
-  start: `启动 OmniStudio 应用；未运行时自动拉起（安装路径或 --app-path）。
+  start: `启动 LlamaDesk 应用；未运行时自动拉起（安装路径或 --app-path）。
 
 用法：omi start [options]
 
@@ -35,7 +35,7 @@ export const CMD_HELP: Record<string, string> = {
   --server      启动后同时启动推理服务器
   --model       启动后打开应用里的模型列表，选择模型
   --cloud       启动后打开云端配置页
-  --app-path    指定 OmniStudio.app 完整路径（默认 /Applications/OmniStudio.app）`,
+  --app-path    指定 LlamaDesk.app 完整路径（默认 /Applications/LlamaDesk.app）`,
   stop: `停止推理服务器（需要应用在运行）。
 
 用法：omi stop [name]
@@ -66,7 +66,7 @@ export const CMD_HELP: Record<string, string> = {
   --model <name|path>  直接指定模型（已装模型名 / 服务名 / 文件路径）；
                        省略时若只有一个模型则自动选中，否则提示选择
   --list               列出可用工具
-  --app-path           指定 OmniStudio.app 完整路径`,
+  --app-path           指定 LlamaDesk.app 完整路径`,
   model: `打开模型列表 / 列出已装模型。
 
 用法：omi model [options]

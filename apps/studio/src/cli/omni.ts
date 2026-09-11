@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * omni — OmniStudio 命令行工具
+ * omni — LlamaDesk 命令行工具
  *
  * 直接复用 src/bun/ 的真实后端（模型库、推理服务器、网关、聊天、配置），
  * 而不是重写一套。独立进程无法读取打包应用里的 `Resources/version.json`
@@ -12,8 +12,8 @@ import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
 
-const APP_SUPPORT = "omni-studio.kunpengtalk.com";
-const DB_FILE = "omni-studio.db";
+const APP_SUPPORT = "com.yourcompany.llamadesk";
+const DB_FILE = "llama-desk.db";
 
 // ---------------------------------------------------------------------------
 // 小工具
@@ -57,7 +57,7 @@ function readVersion(): string {
 // 数据目录解析
 // ---------------------------------------------------------------------------
 
-/** 自动探测最“新”的 channel 数据目录（含 omni-studio.db 且 mtime 最新）。 */
+/** 自动探测最“新”的 channel 数据目录（含 llama-desk.db 且 mtime 最新）。 */
 function autoDetectDataDir(): string | undefined {
   const base = join(homedir(), "Library", "Application Support", APP_SUPPORT);
   try {
@@ -912,7 +912,7 @@ async function cmdConfig(args: string[], ctx: Ctx) {
 // ---------------------------------------------------------------------------
 
 function printHelp() {
-  console.log(`omni ${readVersion()} — OmniStudio 命令行工具
+  console.log(`omni ${readVersion()} — LlamaDesk 命令行工具
 
 用法: omni <命令> [选项]
 

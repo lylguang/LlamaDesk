@@ -182,9 +182,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   TTS_ENABLED_MODELS: "[]",
   TTS_EDGE_VOICE: "zh-CN-XiaoxiaoNeural",
   TTS_PROVIDER: "",
-  // 默认服务地址为线上 OmniLabs 多模态平台（统一接入 TTS / ASR）。
-  // 与 mainview/app/voice-provider-presets.ts 的 DEFAULT_VOICE_BASE_URL 保持一致。
-  TTS_PROVIDER_BASE: "https://omnilabs.vibeadmin.cn/v1",
+  // 默认置空：由用户自行配置任意 OpenAI 兼容服务商地址。
+  TTS_PROVIDER_BASE: "",
   TTS_PROVIDER_API_KEY: "",
   TTS_PROVIDER_MODEL: "",
   TTS_LOCAL_ENGINE: "",
@@ -192,7 +191,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   ASR_PORT: "18081",
   ASR_ENGINE: "whisper",
   ASR_AUDIOCPP_MODEL: "",
-  ASR_PROVIDER_BASE: "https://omnilabs.vibeadmin.cn/v1",
+  ASR_PROVIDER_BASE: "",
   ASR_PROVIDER_API_KEY: "",
   ASR_PROVIDER_MODEL: "",
   OCR_ENGINE: "",

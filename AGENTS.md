@@ -1,4 +1,4 @@
-# OmniStudio
+# LlamaDesk
 
 Desktop workstation for local LLMs — manage models, run inference servers (llama.cpp / vLLM / SGLang), and use Chat / Voice / Image / OCR apps. Built with Electrobun (NOT Electron — do not use Electron APIs).
 
@@ -18,7 +18,7 @@ apps/
 │   └── src/
 │       ├── bun/          # Main process (RPC, DB, inference runtimes, OCR pipeline, queue)
 │       └── mainview/     # React UI (components, stores, lib)
-└── landing/              # Marketing site (kunpengtalk.com)
+└── landing/              # Marketing site (marketing site)
 ```
 
 ## Electrobun

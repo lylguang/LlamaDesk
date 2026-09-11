@@ -108,7 +108,7 @@ export function MainLayout() {
               className="flex items-center gap-1.5 text-sm font-semibold tracking-tight text-muted-foreground transition-colors hover:text-foreground"
             >
               <ChevronLeftIcon className="size-4" />
-              OmniStudio
+              LlamaDesk
             </button>
           )}
           <div className="ml-auto flex items-center gap-2">

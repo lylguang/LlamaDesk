@@ -1,9 +1,9 @@
 {
-  "name": "omni-studio",
-  "description": "OmniStudio — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs.",
+  "name": "llama-desk",
+  "description": "LlamaDesk — 本地大模型一体化桌面工作台 | A desktop workstation for local LLMs.",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/kunpengtalk/OmniStudio.git",
+    "url": "git+https://github.com/your-company/LlamaDesk.git",
     "directory": "apps/studio"
   },
   "bin": {

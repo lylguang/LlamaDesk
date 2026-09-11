@@ -2,7 +2,7 @@ import { APP_NAME } from "../data-dir";
 import { rootVersion } from "../data-dir";
 import { controlRequest } from "../client";
 
-const REPO = "kunpengtalk/OmniStudio";
+const REPO = "your-company/LlamaDesk";
 
 export async function cmdVersion() {
   // 源码运行时读仓库根 package.json；运行中的应用版本与其一致。

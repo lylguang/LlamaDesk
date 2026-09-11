@@ -478,7 +478,7 @@ function buildComfyWorkflow(params: {
     "9": {
       class_type: "SaveImage",
       _meta: { title: "Save Image" },
-      inputs: { filename_prefix: "omnistudio", images: ["8", 0] },
+      inputs: { filename_prefix: "llamadesk", images: ["8", 0] },
     },
   };
 }

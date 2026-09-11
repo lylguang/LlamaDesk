@@ -1,4 +1,4 @@
-# OmniStudio 迭代规划与未完成任务清单
+# LlamaDesk 迭代规划与未完成任务清单
 
 > 更新：2026-09-09　配套：`需求文档.md`（现状核对）、`scripts/create-project-backlog.sh`（一键同步到 GitHub Projects）
 > 图例：P0 核心 / P1 重要 / P2 远期

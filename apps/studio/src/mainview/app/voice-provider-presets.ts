@@ -19,18 +19,10 @@ export type VoiceProviderPreset = {
   note?: string;
 };
 
-/** 默认服务地址：线上 OmniLabs 多模态平台（TTS / ASR / LLM / OCR 统一接入）。 */
-export const DEFAULT_VOICE_BASE_URL = "https://omnilabs.vibeadmin.cn/v1";
+/** 默认服务地址：置空，由用户在界面选择厂商预设或手动填写。 */
+export const DEFAULT_VOICE_BASE_URL = "";
 
 export const VOICE_PROVIDER_PRESETS: readonly VoiceProviderPreset[] = [
-  {
-    id: "omnilabs",
-    label: "OmniLabs",
-    baseUrl: DEFAULT_VOICE_BASE_URL,
-    ttsModels: [],
-    asrModels: [],
-    note: "线上多模态平台，统一接入 TTS / ASR / LLM / OCR，点击「获取模型」拉取全量",
-  },
   {
     id: "openai",
     label: "OpenAI",

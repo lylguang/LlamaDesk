@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "fs";
+import { homedir } from "os";
 import path from "path";
 import { IMAGE_SERVER_PORT } from "../shared/server-info";
 import { getDataDir } from "./paths";
@@ -20,9 +21,7 @@ function migrateLegacyCwdDir(legacyName: string, dest: string): void {
 
 export function getImagesBaseDir(): string {
   const base = getDataDir("images");
-  migrateLegacyCwdDir("vllm-studio-images", base);
-  migrateLegacyCwdDir("kunpengtalk-studio-images", base);
-  migrateLegacyCwdDir("omni-studio-images", base);
+  migrateLegacyCwdDir("llama-desk-images", base);
   return base;
 }
 
@@ -33,7 +32,7 @@ export function getImagesBaseDir(): string {
  */
 export function getPromptLibraryMediaBase(): string | null {
   const base = path.join(
-    process.env.HOME || "/Users/jwangkun",
+    process.env.HOME || homedir(),
     "ai",
     "vibedesign",
     "frontend",
@@ -57,9 +56,7 @@ export function promptLibraryLocalUrl(rel: string): string {
 
 export function getUploadsBaseDir(): string {
   const base = getDataDir("uploads");
-  migrateLegacyCwdDir("vllm-studio-uploads", base);
-  migrateLegacyCwdDir("kunpengtalk-studio-uploads", base);
-  migrateLegacyCwdDir("omni-studio-uploads", base);
+  migrateLegacyCwdDir("llama-desk-uploads", base);
   return base;
 }
 

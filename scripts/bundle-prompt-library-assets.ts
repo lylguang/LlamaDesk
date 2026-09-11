@@ -16,7 +16,7 @@ import { join, dirname } from "path";
 import { fileURLToPath } from "url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const VIBE_DIR = process.env.VIBE_DIR || `${process.env.HOME || "/Users/jwangkun"}/ai/vibedesign`;
+const VIBE_DIR = process.env.VIBE_DIR || `${process.env.HOME || homedir()}/ai/vibedesign`;
 const SRC = join(VIBE_DIR, "frontend", "public", "prompt-library");
 const DEST = join(HERE, "..", "apps", "studio", "public", "prompt-library");
 

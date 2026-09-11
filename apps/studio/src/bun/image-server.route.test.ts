@@ -16,7 +16,7 @@ process.env.HOME = fakeHome;
 mock.module("electrobun/bun", () => ({
   Utils: {
     paths: {
-      userData: join(fakeHome, "Library", "OmniStudio"),
+      userData: join(fakeHome, "Library", "LlamaDesk"),
     },
   },
 }));

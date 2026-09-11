@@ -39,7 +39,7 @@ async function getMainViewUrl(): Promise<string> {
 // 数据库连接在 ./db 打开时已跑过迁移；这里只做首次提示词种子灌入（幂等）。
 seedIfNeeded();
 
-// 确保 Agent 的默认工作区存在（~/.omnistudio/workspace），用当前用户权限创建。
+// 确保 Agent 的默认工作区存在（~/.llamadesk/workspace），用当前用户权限创建。
 getAgentWorkspace();
 
 // serve extracted images over HTTP for the webview

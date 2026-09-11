@@ -11,7 +11,7 @@ const ENGINE_HINTS: Record<string, string> = {
 export async function cmdInstall() {
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
+  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
 
   const { createRuntime } = await import("../../bun/runtimes");
   const engines = ["llama.cpp", "vllm", "sglang"] as const;

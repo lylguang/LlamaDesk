@@ -1,1 +1,1 @@
-export const APP_NAME = "OmniStudio";
+export const APP_NAME = "LlamaDesk";

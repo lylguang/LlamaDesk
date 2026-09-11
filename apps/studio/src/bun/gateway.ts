@@ -1499,11 +1499,11 @@ async function handleListModels(): Promise<Response> {
 
   // 1) 本地推理服务器对话模型（优先，云端同名模型去重）
   for (const m of localModels) {
-    if (typeof m?.id === "string") add(m.id, "omni-studio-local", "chat");
+    if (typeof m?.id === "string") add(m.id, "llama-desk-local", "chat");
   }
   // 2) 云端 OpenAI 兼容 API 对话模型
   for (const m of cloudModels) {
-    if (typeof m?.id === "string") add(m.id, "omni-studio-cloud", "chat");
+    if (typeof m?.id === "string") add(m.id, "llama-desk-cloud", "chat");
   }
   // 3) 本地 audio.cpp TTS 已下载模型
   if (ttsStatus?.active) {
@@ -1523,14 +1523,14 @@ async function handleListModels(): Promise<Response> {
   }
 
   // 7) 网关能力别名（客户端可用固定 ID 调用）
-  add("omni-tts", "omni-studio", "text-to-speech", { description: "TTS 自动路由：本地 audio.cpp → 推理服务器 → 三方 provider → Edge 在线" });
+  add("omni-tts", "llama-desk", "text-to-speech", { description: "TTS 自动路由：本地 audio.cpp → 推理服务器 → 三方 provider → Edge 在线" });
   if (asrStatus?.serverRunning || (asrProvider.base ?? "").trim()) {
-    add("omni-asr", "omni-studio", "automatic-speech-recognition", {
+    add("omni-asr", "llama-desk", "automatic-speech-recognition", {
       description: "ASR 自动路由：whisper-server → 远端 ASR 服务",
     });
   }
   // 文生图后端预留：始终声明，客户端可据此判断能力（调用后返回 501）。
-  add("omni-image", "omni-studio", "text-to-image");
+  add("omni-image", "llama-desk", "text-to-image");
 
   return json({ object: "list", data });
 }
@@ -1544,10 +1544,10 @@ function openApiSpec(): Record<string, unknown> {
   return {
     openapi: "3.0.2",
     info: {
-      title: "OmniStudio Local Gateway",
+      title: "LlamaDesk Local Gateway",
       version: "1.1.0",
       description:
-        "OmniStudio 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
+        "LlamaDesk 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
         "与已配置的云端 OpenAI 兼容 API，提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套对话协议，" +
         "以及 TTS / ASR 端点。设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
     },
@@ -1766,7 +1766,7 @@ function swaggerUiHtml(): string {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>OmniStudio Local Gateway — API Docs</title>
+  <title>LlamaDesk Local Gateway — API Docs</title>
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5/swagger-ui.css"/>
   <style>body { margin: 0; }</style>
 </head>
@@ -1794,7 +1794,7 @@ function redocHtml(): string {
 <head>
   <meta charset="utf-8"/>
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
-  <title>OmniStudio Local Gateway — ReDoc</title>
+  <title>LlamaDesk Local Gateway — ReDoc</title>
   <style>body { margin: 0; padding: 0; }</style>
 </head>
 <body>
@@ -1830,7 +1830,7 @@ async function route(req: Request): Promise<Response> {
   switch (path) {
     case "/":
       return json({
-        name: "OmniStudio Local Gateway",
+        name: "LlamaDesk Local Gateway",
         docs: "/docs",
         redoc: "/redoc",
         openapi: "/openapi.json",

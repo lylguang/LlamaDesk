@@ -15,7 +15,7 @@ type Engine = (typeof ENGINES)[number];
 export async function cmdServe(parsed: ParsedArgs) {
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
+  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
 
   const settingsMod = await import("../../bun/db/settings");
   const modelStore = await import("../../bun/model-store");
@@ -53,7 +53,7 @@ export async function cmdServe(parsed: ParsedArgs) {
   if (Object.keys(updates).length) settingsMod.updateSettings(updates);
 
   const activeEngine = settingsMod.getSetting("INFERENCE_ENGINE") || "llama.cpp";
-  console.log(`OmniStudio serve — ${activeEngine}`);
+  console.log(`LlamaDesk serve — ${activeEngine}`);
   console.log(`数据目录：${dataDir}`);
   console.log("Ctrl+C 停止\n");
 

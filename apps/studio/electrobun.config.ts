@@ -32,8 +32,8 @@ for (const name of nativePackages) {
 
 export default {
   app: {
-    name: "OmniStudio",
-    identifier: "omni-studio.kunpengtalk.com",
+    name: "LlamaDesk",
+    identifier: "com.yourcompany.llamadesk",
     version: pkg.version,
   },
   build: {
@@ -73,7 +73,7 @@ export default {
         // Microphone access (voice recording for ASR). Electrobun maps this
         // entitlement to NSMicrophoneUsageDescription in the generated Info.plist.
         "com.apple.security.device.audio-input":
-          "OmniStudio needs microphone access for voice input and real-time speech-to-text.",
+          "LlamaDesk needs microphone access for voice input and real-time speech-to-text.",
       },
     },
     linux: {
@@ -86,6 +86,6 @@ export default {
     },
   },
   release: {
-    baseUrl: "https://github.com/kunpengtalk/OmniStudio/releases/latest/download",
+    baseUrl: "https://github.com/your-company/LlamaDesk/releases/latest/download",
   },
 } satisfies ElectrobunConfig;

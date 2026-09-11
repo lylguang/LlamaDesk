@@ -10,7 +10,7 @@ type AgentState = {
   conversationId: number | null;
   mode: AgentMode;
   workspace: string;
-  /** 当前工作区是否用的默认目录（~/.omnistudio/workspace）。 */
+  /** 当前工作区是否用的默认目录（~/.llamadesk/workspace）。 */
   workspaceIsDefault: boolean;
   setEvents: (events: AgentEventRow[]) => void;
   setConversationId: (id: number | null) => void;

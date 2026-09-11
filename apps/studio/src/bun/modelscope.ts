@@ -48,9 +48,7 @@ function fileKind(name: string): ModelScopeFile["kind"] {
  */
 export function getModelsBaseDir(): string {
   const base = getDataDir("models");
-  migrateLegacyCwdDir("vllm-studio-models", base);
-  migrateLegacyCwdDir("kunpengtalk-studio-models", base);
-  migrateLegacyCwdDir("omni-studio-models", base);
+  migrateLegacyCwdDir("llama-desk-models", base);
   return base;
 }
 

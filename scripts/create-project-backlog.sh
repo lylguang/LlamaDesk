@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OmniStudio — 把 ROADMAP 任务一键同步到 GitHub Projects (Projects v2)
+# LlamaDesk — 把 ROADMAP 任务一键同步到 GitHub Projects (Projects v2)
 #
 # 用法：
 #   1) 先登录：  gh auth login        （选择 GitHub.com，登录方式任选；默认 token 权限即够）
@@ -10,9 +10,9 @@
 # 幂等：已存在的同名 issue 会跳过。
 set -euo pipefail
 
-OWNER="kunpengtalk"
-REPO="$OWNER/OmniStudio"
-PROJECT_TITLE="OmniStudio 迭代规划"
+OWNER="your-company"
+REPO="$OWNER/LlamaDesk"
+PROJECT_TITLE="LlamaDesk 迭代规划"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DATA="$SCRIPT_DIR/backlog.tsv"
 MODE="issues"   # issues | drafts

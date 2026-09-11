@@ -18,19 +18,7 @@ if (isDev && !process.env.OMNI_DB_PATH && !process.env.OMNI_DATA_DIR) {
   // Ensure data directory exists
   const dataDir = getDataDir();
   if (!existsSync(dataDir)) mkdirSync(dataDir, { recursive: true });
-  dbPath = process.env.OMNI_DB_PATH ?? join(dataDir, "omni-studio.db");
-  for (const legacyName of ["vllm-studio.db", "kunpengtalk-studio.db"]) {
-    if (!existsSync(dbPath)) {
-      const legacyPath = join(dataDir, legacyName);
-      if (existsSync(legacyPath)) {
-        try {
-          renameSync(legacyPath, dbPath);
-        } catch {
-          // ignore — fall back to a fresh database
-        }
-      }
-    }
-  }
+  dbPath = process.env.OMNI_DB_PATH ?? join(dataDir, "llama-desk.db");
 }
 
 const sqlite = new Database(dbPath, { create: true });

@@ -340,7 +340,7 @@ async function configureHermesProvider(
 
   const providers = (cfg.providers as Record<string, any> | undefined) ?? {};
   providers[HERMES_PROVIDER_KEY] = {
-    name: "OmniStudio",
+    name: "LlamaDesk",
     api: baseURL,
     default_model: model,
     models: [model],
@@ -395,7 +395,7 @@ function configureCodex(baseURL: string, model: string): void {
     `model_catalog_json = ${JSON.stringify(catalogPath)}`,
     "",
     `[model_providers.${CODEX_PROFILE_NAME}]`,
-    `name = ${JSON.stringify("OmniStudio")}`,
+    `name = ${JSON.stringify("LlamaDesk")}`,
     `base_url = ${JSON.stringify(baseURL)}`,
     `wire_api = "responses"`,
     "",
@@ -412,7 +412,7 @@ function buildOpenCodeConfig(baseURL: string, apiKey: string, model: string): st
     provider: {
       omni: {
         npm: "@ai-sdk/openai-compatible",
-        name: "OmniStudio",
+        name: "LlamaDesk",
         options,
         models: { [model]: { name: model } },
       },

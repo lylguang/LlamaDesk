@@ -86,6 +86,6 @@ export default {
     },
   },
   release: {
-    baseUrl: "https://github.com/yuleDI/LlamaDesk/releases/latest/download",
+    baseUrl: "https://github.com/lylguang/LlamaDesk/releases/latest/download",
   },
 } satisfies ElectrobunConfig;

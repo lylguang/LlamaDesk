@@ -25,7 +25,7 @@ cd apps/studio && bun unlink
 ## 数据目录
 
 CLI 直接读写桌面应用的数据库，默认自动探测**最新**使用过的 channel 数据目录
-（`~/Library/Application Support/com.yourcompany.llamadesk/<channel>/`），
+（`~/Library/Application Support/com.lylguang.llamadesk/<channel>/`），
 也可显式指定：
 
 ```bash

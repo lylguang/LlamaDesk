@@ -33,7 +33,7 @@ for (const name of nativePackages) {
 export default {
   app: {
     name: "LlamaDesk",
-    identifier: "com.yourcompany.llamadesk",
+    identifier: "com.lylguang.llamadesk",
     version: pkg.version,
   },
   build: {
@@ -86,6 +86,6 @@ export default {
     },
   },
   release: {
-    baseUrl: "https://github.com/your-company/LlamaDesk/releases/latest/download",
+    baseUrl: "https://github.com/lylguang/LlamaDesk/releases/latest/download",
   },
 } satisfies ElectrobunConfig;

@@ -3,7 +3,7 @@ import { join } from "path";
 import { existsSync, readFileSync } from "fs";
 
 export const APP_NAME = "LlamaDesk";
-export const APP_IDENTIFIER = "com.yourcompany.llamadesk";
+export const APP_IDENTIFIER = "com.lylguang.llamadesk";
 
 type VersionInfo = { identifier: string; channel: string };
 

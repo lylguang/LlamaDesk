@@ -2,7 +2,7 @@ import { homedir } from "os";
 import { join } from "path";
 import { readFileSync } from "fs";
 
-const APP_IDENTIFIER = "com.yourcompany.llamadesk";
+const APP_IDENTIFIER = "com.lylguang.llamadesk";
 const FALLBACK_CHANNEL = "dev";
 
 function getAppDataDir(): string {

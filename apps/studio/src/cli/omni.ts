@@ -12,7 +12,7 @@ import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
 
-const APP_SUPPORT = "com.yourcompany.llamadesk";
+const APP_SUPPORT = "com.lylguang.llamadesk";
 const DB_FILE = "llama-desk.db";
 
 // ---------------------------------------------------------------------------

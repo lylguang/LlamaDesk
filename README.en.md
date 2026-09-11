@@ -14,12 +14,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/your-company/LlamaDesk/releases/latest">Download</a> ·
+  <a href="https://github.com/lylguang/LlamaDesk/releases/latest">Download</a> ·
   <a href="./CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  License: <a href="LICENSE">MIT</a> · Copyright © 2026 Your Company
+  License: <a href="LICENSE">MIT</a> · Copyright © 2026 lylguang
 </p>
 
 > This project is a fork of [OmniStudio](https://gitee.com/jwangkun/OmniStudio) (MIT License, Copyright © 2026 鲲鹏Talk).
@@ -160,4 +160,4 @@ apps/
 
 ## 📄 License
 
-MIT — maintained by Your Company. See [LICENSE](LICENSE).
+MIT — maintained by lylguang. See [LICENSE](LICENSE).

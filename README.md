@@ -14,12 +14,12 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/your-company/LlamaDesk/releases/latest">下载</a> ·
+  <a href="https://github.com/lylguang/LlamaDesk/releases/latest">下载</a> ·
   <a href="./CHANGELOG.md">更新日志</a>
 </p>
 
 <p align="center">
-  License: <a href="LICENSE">MIT</a> · Copyright © 2026 Your Company
+  License: <a href="LICENSE">MIT</a> · Copyright © 2026 lylguang
 </p>
 
 > 本项目基于 [OmniStudio](https://gitee.com/jwangkun/OmniStudio)（MIT License, Copyright © 2026 鲲鹏Talk）二次开发。
@@ -190,4 +190,4 @@ omi status / omi models / omi stop / omi serve --port 8090
 
 ## 📄 许可证
 
-MIT — by Your Company。见 [LICENSE](LICENSE)。
+MIT — by lylguang。见 [LICENSE](LICENSE)。

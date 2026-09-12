@@ -244,9 +244,9 @@ export function DownloadsButton() {
               </Button>
             )}
           </div>
-          {/* type="always"：Radix 默认 hover —— 不悬停时压根不渲染滑轨，用户看不出
-              还能往下拉（历史记录一屏放不下）。列表类弹层要常驻滚动条。 */}
-          <ScrollArea type="always" className="h-[min(20rem,calc(100vh-8rem))] min-h-0">
+          {/* scrollbarVisibility="always"：默认 hover 才显示滑轨，用户看不出还能往下拉
+              （历史记录一屏放不下）。列表类弹层要常驻滚动条。 */}
+          <ScrollArea scrollbarVisibility="always" className="h-[min(20rem,calc(100vh-8rem))] min-h-0">
             <div className="flex flex-col gap-2 p-2">
               {tasks.length === 0 ? (
                 <div className="flex flex-col items-center gap-1.5 py-10 text-center">

@@ -567,7 +567,7 @@ export function clearServedModelLogs(id: string): void {
 }
 
 /** 该模型的启动命令（命令预览 / 复制用；不会起进程）。 */
-export function buildServedCommandLine(id: string): string {
+export async function buildServedCommandLine(id: string): Promise<string> {
   const entry = entries.get(id);
   if (!entry) return "";
   return entry.runtime.buildCommandLine(entry.info.modelRef);

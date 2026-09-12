@@ -100,7 +100,7 @@ export async function getLaunchCommand(modelOverride?: string): Promise<{ comman
   }
   const servedId = Served.getActiveServedId();
   if (servedId) {
-    const command = Served.buildServedCommandLine(servedId);
+    const command = await Served.buildServedCommandLine(servedId);
     const model = Served.getServedModel(servedId);
     if (command) return { command, engine: model?.engine ?? active };
   }

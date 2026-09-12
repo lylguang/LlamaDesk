@@ -1,10 +1,20 @@
 import { randomBytes } from "crypto";
+import { readFileSync } from "fs";
+import path from "path";
 import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
+import { getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { mergeSystemMessages } from "./chat-messages";
+import * as Memory from "./memory";
+import type { MemoryCategory } from "../shared/memory";
+import { handleMcpRequest } from "./kb-mcp";
+import { searchMediaAssetsFromQuery } from "./media-api";
+import * as Img from "./gateway-images";
+import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 
 /**
  * 本地 API 网关。
@@ -21,6 +31,7 @@ import { listInstalledModels, slugModelFileName } from "./model-store";
  *   - POST /v1/messages                Anthropic Messages API（流式 + 非流式）
  *   - POST /v1/audio/speech            语音合成 TTS（本地 → 推理服务器 → 云端 provider → Edge 在线）
  *   - POST /v1/audio/transcriptions    语音识别 ASR（whisper-server → 远端 ASR）
+ *   - POST /v1/images/generations      文本生图（MLX 本地引擎 → OpenAI 兼容 API → ComfyUI）
  *   - GET  /health       健康检查
  *
  * 鉴权：设置 GATEWAY_API_KEY 后，所有 /v1/* 端点需要
@@ -117,8 +128,34 @@ function authOk(req: Request): boolean {
   if (!key) return true;
   const auth = req.headers.get("authorization") ?? "";
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const xApiKey = (req.headers.get("x-api-key") ?? "").trim();
+  const xApiKey = req.headers.get("x-api-key") ?? "";
+
   return bearer === key || xApiKey === key;
+}
+
+/**
+ * 浏览器来源防护：网关无 Key 时对任何本地进程开放（curl / agent 不带 Origin），
+ * 但外部网页一律拒绝 —— 否则用户随便打开一个网页，页面里的 fetch 就能读记忆库、
+ * 写持久记忆（等于注入 Agent 提示词）、或用用户配置的云端 Key 跑推理。
+ * 外部页面只有在配置了 Key 且带上正确 Key 时才放行（等于用户显式授权）。
+ */
+function browserOriginAllowed(req: Request): boolean {
+  const origin = (req.headers.get("origin") ?? "").trim();
+  if (!origin) return true; // 非浏览器请求
+  if (isLocalOrigin(origin)) return true;
+  return getGatewayApiKey().length > 0 && authOk(req);
+}
+
+/**
+ * Host 头校验：绑在回环时只接受回环 Host，挡住 DNS rebinding
+ * （网页把自己的域名解析到 127.0.0.1，Host 仍是攻击者域名）。
+ * 用户显式把 GATEWAY_HOST 绑到非回环地址时视为有意对外服务，不做限制。
+ */
+function hostHeaderAllowed(req: Request): boolean {
+  const host = req.headers.get("host");
+  if (!host) return true;
+  if (isLoopbackHost(host)) return true;
+  return !isLoopbackHost(boundHost);
 }
 
 function unauthorized(): Response {
@@ -332,11 +369,38 @@ class UpstreamError extends Error {
   }
 }
 
+/**
+ * 发往后端前的请求规整。
+ *
+ * 1) 本地后端：把请求里的模型 id 换成推理服务器实际认的那个。
+ *    客户端（编码工具 / 第三方）填的是我们写进配置的服务名 slug；llama.cpp / vLLM /
+ *    SGLang 用 `--alias` / `--served-model-name` 起服务，slug 就是 id；MLX 没有别名机制，
+ *    mlx_lm.server 对本地目录暴露的 id 是解析后的绝对路径 —— 填 slug 会被它当成 HF repo
+ *    id 去下载，请求就一直没有响应。只改「客户端要的正是当前活动本地模型」的情况。
+ * 2) 本地后端：把多条 system 合并成开头一条 —— Qwen 系 chat template 只允许一条，
+ *    多出来的（客户端自带 + 我们注入）会让整个请求被模板拒掉。
+ */
+function normalizeLocalPayload(backend: ChatBackend, params: Record<string, unknown>): Record<string, unknown> {
+  if (backend.kind !== "local") return params;
+  const out = { ...params };
+  if (Array.isArray(out.messages)) {
+    out.messages = mergeSystemMessages(out.messages as { role: string; content: unknown }[]);
+  }
+  const requested = typeof params.model === "string" ? params.model.trim() : "";
+  const target = getLocalRequestModelId();
+  if (!target || target === requested) return out;
+  const activeIds = new Set(
+    [getChatModelName(), getSetting("LOCAL_MODEL_NAME"), getSetting("LOCAL_MODEL_PATH")].filter(Boolean),
+  );
+  if (requested && activeIds.has(requested)) out.model = target;
+  return out;
+}
+
 async function callUpstreamChat(backend: ChatBackend, params: Record<string, unknown>): Promise<Response> {
   return await fetch(`${backend.base}/v1/chat/completions`, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...backend.headers },
-    body: JSON.stringify(params),
+    body: JSON.stringify(normalizeLocalPayload(backend, params)),
     signal: AbortSignal.timeout(600_000),
   });
 }
@@ -1295,6 +1359,8 @@ async function handleSpeech(req: Request): Promise<Response> {
         text,
         voice: body.voice,
         model: useModel,
+        // 走网关的都是程序调用（外部 agent / 第三方客户端），与界面手工生成区分开。
+        source: "agent",
       });
       if (record.audioUrl) {
         const audio = await fetch(record.audioUrl, { signal: AbortSignal.timeout(120_000) });
@@ -1380,7 +1446,7 @@ async function handleSpeech(req: Request): Promise<Response> {
 
   // 4) Edge 在线 TTS（免费、无需 Key，最终兜底；输出为 mp3）
   try {
-    const record = await runTTSEdge({ text, voice: body.voice ?? "" });
+    const record = await runTTSEdge({ text, voice: body.voice ?? "", source: "agent" });
     if (!record.audioUrl) return apiError(500, "Edge TTS 完成但无法定位音频文件", "tts_error");
     const audio = await fetch(record.audioUrl, { signal: AbortSignal.timeout(120_000) });
     if (!audio.ok) return apiError(502, `Edge TTS 音频读取失败 (${audio.status})`, "tts_error");
@@ -1463,6 +1529,109 @@ async function handleTranscriptions(req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// 文本生图（/v1/images/generations，OpenAI Images API）
+// ---------------------------------------------------------------------------
+
+/** OpenAI 生图响应里的 data 项：url 或 b64_json 二选一。 */
+type ImageGenDataItem = Record<string, string>;
+
+/**
+ * 解析 size 字符串（OpenAI 格式 "1024x1024"）为宽高；非法时返回 null。
+ */
+function parseImageSize(size: string): { width: number; height: number } | null {
+  const m = /^\s*(\d+)\s*[xX]\s*(\d+)\s*$/.exec(size);
+  if (!m) return null;
+  const width = Number(m[1]);
+  const height = Number(m[2]);
+  if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return null;
+  return { width, height };
+}
+
+/** 从 imageUrl 逆向出 images 根目录下的相对路径（chatImageUrl 的 ref）。 */
+function refFromImageUrl(imageUrl: string): string | null {
+  const m = /^https?:\/\/[^/]+\/(.+)$/.exec(imageUrl);
+  return m ? decodeURIComponent(m[1]!) : null;
+}
+
+async function handleImageGeneration(req: Request): Promise<Response> {
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return apiError(400, "请求体必须是合法 JSON", "invalid_request_error");
+  }
+
+  const prompt = typeof body.prompt === "string" ? body.prompt.trim() : "";
+  if (!prompt) return apiError(400, "缺少 prompt 字段（文生图提示词）", "invalid_request_error");
+
+  const rawModel = typeof body.model === "string" ? body.model.trim() : "";
+  const n = typeof body.n === "number" && Number.isFinite(body.n) ? Math.max(1, Math.min(Math.floor(body.n), 8)) : 1;
+  const size = typeof body.size === "string" ? body.size : "1024x1024";
+  const parsedSize = parseImageSize(size);
+  if (!parsedSize) return apiError(400, `无效的 size：${size}（应为 WxH，如 1024x1024）`, "invalid_request_error");
+  const responseFormat = body.response_format === "b64_json" ? "b64_json" : "url";
+  const negativePrompt = typeof body.negative_prompt === "string" ? body.negative_prompt.trim() : undefined;
+  const seed = typeof body.seed === "number" && Number.isFinite(body.seed) && body.seed >= 0 ? body.seed : undefined;
+  const steps = typeof body.steps === "number" && Number.isFinite(body.steps) ? body.steps : undefined;
+
+  // 模型路由：
+  // - omni-image 别名 / 空 → 走已配置的生图后端（IMG_BACKEND + IMG_MODEL，即“当前模型”）；
+  // - 明确的 MLX 模型 id → 强制 mlx 后端；
+  // - 其它模型 id → 透传给已配置后端（api / comfyui 的模型名 / checkpoint）。
+  const cfg = Img.getImageGenConfig();
+  let backend: Img.ImageGenBackend = cfg.backend;
+  let model: string | undefined;
+  if (rawModel && rawModel !== "omni-image" && Img.lookupMlxModel(rawModel)) {
+    backend = "mlx";
+    model = rawModel;
+  } else if (rawModel && rawModel !== "omni-image") {
+    model = rawModel;
+  } else {
+    model = cfg.model || undefined;
+  }
+
+  const result = await Img.generateImage({
+    prompt,
+    negativePrompt,
+    width: parsedSize.width,
+    height: parsedSize.height,
+    count: n,
+    seed,
+    steps,
+    model,
+    config: { ...cfg, backend, model: model ?? cfg.model },
+    // 网关不落盘配置，避免 API 调用改写用户保存的生图设置。
+    persistConfig: false,
+    // 走网关的都是程序调用（外部 agent / 第三方客户端）。
+    source: "agent",
+  });
+
+  if (result.error) {
+    return apiError(502, result.error, "image_generation_error");
+  }
+
+  const created = Math.floor(Date.now() / 1000);
+  const data: ImageGenDataItem[] = [];
+  for (const record of result.records) {
+    if (responseFormat === "b64_json" && record.imagePath) {
+      const abs = path.join(Img.imagesBaseDir(), record.imagePath);
+      try {
+        data.push({ b64_json: readFileSync(abs).toString("base64") });
+        continue;
+      } catch {
+        // 文件缺失时回退到 url（若可用）。
+      }
+    }
+    if (record.imageUrl) data.push({ url: record.imageUrl });
+  }
+
+  if (data.length === 0) {
+    return apiError(502, "生图完成但未拿到可返回的图片", "image_generation_error");
+  }
+  return json({ created, data });
+}
+
+// ---------------------------------------------------------------------------
 // 模型列表（本地 + 云端 + TTS/ASR 能力模型）
 // ---------------------------------------------------------------------------
 
@@ -1529,8 +1698,16 @@ async function handleListModels(): Promise<Response> {
       description: "ASR 自动路由：whisper-server → 远端 ASR 服务",
     });
   }
-  // 文生图后端预留：始终声明，客户端可据此判断能力（调用后返回 501）。
-  add("omni-image", "llama-desk", "text-to-image");
+  // 文生图后端：MLX 本地模型（mflux）+ 能力别名。始终声明，客户端可据此发现/调用。
+  for (const m of Img.IMAGE_MODELS) {
+    add(m.id, "llama-desk", "text-to-image", {
+      name: m.label,
+      description: `${m.description}；本地 MLX（mflux），调用 /v1/images/generations`,
+    });
+  }
+  add("omni-image", "llama-desk", "text-to-image", {
+    description: "文生图自动路由：MLX 本地引擎 → OpenAI 兼容 API → ComfyUI（走已配置的 IMG_BACKEND / IMG_MODEL）",
+  });
 
   return json({ object: "list", data });
 }
@@ -1549,7 +1726,8 @@ function openApiSpec(): Record<string, unknown> {
       description:
         "LlamaDesk 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
         "与已配置的云端 OpenAI 兼容 API，提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套对话协议，" +
-        "以及 TTS / ASR 端点。设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
+        "以及 TTS / ASR 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
+        "设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
     },
     servers: [{ url: `http://${host}:${port}` }],
     security: [{ bearerAuth: [] }],
@@ -1566,6 +1744,69 @@ function openApiSpec(): Record<string, unknown> {
           summary: "列出可用模型",
           description: "聚合返回本地推理服务器、云端 API、本地/三方 TTS、ASR 的全部可用模型及网关能力别名（omni-tts / omni-asr / omni-image）。",
           responses: { "200": { description: "模型列表" } },
+        },
+      },
+      "/v1/memories": {
+        get: {
+          summary: "检索共享记忆",
+          description: "按关键词检索（`q`，命中累计热度）或按分类列出（`category`）。所有 Agent（OmniStudio 内置 / CLI / MCP 接入方）共享同一份记忆库。",
+          parameters: [
+            { name: "q", in: "query", schema: { type: "string" }, description: "关键词（与 category 二选一）" },
+            { name: "category", in: "query", schema: { type: "string", enum: ["fact", "preference", "experience", "skill", "other"] } },
+            { name: "limit", in: "query", schema: { type: "integer", default: 20 } },
+          ],
+          responses: { "200": { description: "记忆列表" } },
+        },
+        post: {
+          summary: "写入一条记忆",
+          description: "写入共享记忆库（source 标记为 agent；重复内容自动合并）。供外部程序写回记忆的主通道。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["content"],
+                  properties: {
+                    content: { type: "string", description: "记忆内容，一句话" },
+                    category: { type: "string", enum: ["fact", "preference", "experience", "skill", "other"] },
+                    tags: { type: "array", items: { type: "string" } },
+                  },
+                },
+              },
+            },
+          },
+          responses: { "201": { description: "已创建" } },
+        },
+      },
+      "/v1/memories/{id}": {
+        delete: {
+          summary: "删除一条记忆",
+          parameters: [{ name: "id", in: "path", required: true, schema: { type: "integer" } }],
+          responses: { "200": { description: "已删除" } },
+        },
+      },
+      "/v1/media": {
+        get: {
+          summary: "检索本地素材库",
+          description:
+            "查询用户在本机生成过的图片 / 语音 / 视频 —— 界面手工生成的与 Agent 生成的都在内，`source` 区分。" +
+            "同时返回结构化列表（含 images 目录下的绝对路径与可播放 URL）与一份可读文本。只读。",
+          parameters: [
+            { name: "q", in: "query", schema: { type: "string" }, description: "关键词（提示词 / 语音文本 / 模型名），省略则按时间倒序列出最近的" },
+            { name: "kind", in: "query", schema: { type: "string", enum: ["image", "video", "audio"] } },
+            { name: "source", in: "query", schema: { type: "string", enum: ["manual", "agent"] } },
+            { name: "days", in: "query", schema: { type: "integer" }, description: "只看最近 N 天生成的" },
+            { name: "limit", in: "query", schema: { type: "integer", default: 12 } },
+          ],
+          responses: { "200": { description: "素材列表（assets / count / text）" } },
+        },
+      },
+      "/mcp": {
+        post: {
+          summary: "OmniStudio MCP 端点（Streamable HTTP）",
+          description: "JSON-RPC 2.0：initialize / tools/list / tools/call。工具：kb_search / kb_list（知识库检索）+ memory_search / memory_save / memory_forget / memory_list（共享记忆读写，写入自动判重合并）+ media_search（本地素材库检索，只读）。任何 MCP 客户端把本端点配置为远程（type=http）服务器即可使用；浏览器直接打开（GET）为调试工作台。",
+          responses: { "200": { description: "JSON-RPC 响应" } },
         },
       },
       "/v1/chat/completions": {
@@ -1711,10 +1952,23 @@ function openApiSpec(): Record<string, unknown> {
       },
       "/v1/images/generations": {
         post: {
-          summary: "文本生图（预留）",
-          description: "文生图接口，网关侧尚未接入，当前返回 501。",
+          summary: "文本生图（OpenAI Images API）",
+          description:
+            "OpenAI 兼容文生图接口。模型自动路由：明确的 MLX 模型 id（z-image-turbo / flux-schnell / flux2-klein-9b / flux-dev）走本地 MLX 引擎，" +
+            "omni-image 别名或留空走已配置的生图后端（IMG_BACKEND + IMG_MODEL），其它模型 id 透传已配置的 API / ComfyUI 后端。" +
+            "response_format 支持 url（默认）与 b64_json。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/ImageGenerationRequest" },
+              },
+            },
+          },
           responses: {
-            "501": { description: "尚未实现" },
+            "200": { description: "生成的图片（created + data[]，url 或 b64_json）" },
+            "400": { description: "缺少 prompt / size 非法" },
+            "502": { description: "生图后端不可用或生成失败" },
           },
         },
       },
@@ -1753,6 +2007,24 @@ function openApiSpec(): Record<string, unknown> {
             voice: { type: "string", description: "音色（可选）" },
             response_format: { type: "string", enum: ["wav", "mp3"], default: "wav" },
             speed: { type: "number", default: 1 },
+          },
+        },
+        ImageGenerationRequest: {
+          type: "object",
+          required: ["prompt"],
+          properties: {
+            model: {
+              type: "string",
+              description:
+                "生图模型。omni-image 或留空=当前配置的后端模型（IMG_BACKEND+IMG_MODEL）；MLX 模型 id（z-image-turbo 等）走本地引擎；其它透传已配置后端",
+            },
+            prompt: { type: "string", description: "文生图提示词" },
+            negative_prompt: { type: "string", description: "反向提示词（可选）" },
+            n: { type: "integer", minimum: 1, maximum: 8, default: 1, description: "生成数量" },
+            size: { type: "string", default: "1024x1024", description: "输出尺寸 WxH，如 1024x1024 / 512x512" },
+            response_format: { type: "string", enum: ["url", "b64_json"], default: "url" },
+            seed: { type: "integer", description: "随机种子（可选）" },
+            steps: { type: "integer", description: "采样步数（可选，MLX 后端）" },
           },
         },
       },
@@ -1814,6 +2086,56 @@ function htmlResponse(html: string): Response {
 // 路由
 // ---------------------------------------------------------------------------
 
+
+// ---------------------------------------------------------------------------
+// 记忆 REST / MCP 端点：任何程序经网关即可读写共享记忆（REST 服务开发者，
+// MCP 服务 Agent —— 与 OpenMemory/Mem0 的对外形式一致）。
+// ---------------------------------------------------------------------------
+
+async function handleMemoryList(url: URL): Promise<Response> {
+  const q = url.searchParams.get("q") ?? url.searchParams.get("query") ?? "";
+  const category = (url.searchParams.get("category") ?? undefined) as MemoryCategory | undefined;
+  const status = (url.searchParams.get("status") ?? "open") as "open" | "active" | "pending" | "archived" | "all";
+  const limit = Number(url.searchParams.get("limit") ?? 0) || undefined;
+  if (q) {
+    // 有查询词时走排序检索（相关度/重要度/新鲜度），便于外部程序直接消费。
+    const hits = await Memory.searchMemories(q, { limit: limit ?? 20, category });
+    return json({ memories: hits, count: hits.length });
+  }
+  const memories = Memory.listMemories({ category, status, scope: "all", limit: limit ?? 500 });
+  return json({ memories, count: memories.length });
+}
+
+/**
+ * 素材库 REST：程序侧查询用户在本机生成过的图片 / 语音 / 视频
+ * （界面手工生成的与 Agent 生成的都在内，`source` 区分）。
+ * 与内置 Agent 的 media_search、网关 MCP 的 media_search 共用同一份检索实现。
+ */
+async function handleMediaSearch(url: URL): Promise<Response> {
+  const { assets, count, text } = searchMediaAssetsFromQuery(url);
+  return json({ assets, count, text });
+}
+
+async function handleMemoryCreate(req: Request): Promise<Response> {
+  let body: { content?: unknown; category?: unknown; tags?: unknown; supersedes?: unknown };
+  try {
+    body = await req.json();
+  } catch {
+    return apiError(400, "请求体必须是 JSON", "invalid_request_error");
+  }
+  const content = typeof body.content === "string" ? body.content.trim() : "";
+  if (!content) return apiError(400, "content is required", "invalid_request_error");
+  const outcome = await Memory.saveAgentMemory({
+    content,
+    category: typeof body.category === "string" ? (body.category as MemoryCategory) : undefined,
+    tags: Array.isArray(body.tags) ? body.tags.map(String) : undefined,
+    supersedes: Array.isArray(body.supersedes) ? body.supersedes.map(Number).filter(Number.isFinite) : undefined,
+    sourceRef: "rest",
+  });
+  if (!outcome.ok) return apiError(400, outcome.error, "invalid_request_error");
+  return json({ memory: outcome.result.memory, action: outcome.result.action }, 201);
+}
+
 async function route(req: Request): Promise<Response> {
   if (req.method === "OPTIONS") {
     return new Response(null, { status: 204, headers: CORS });
@@ -1822,8 +2144,19 @@ async function route(req: Request): Promise<Response> {
   const url = new URL(req.url);
   const path = url.pathname;
 
-  // API Key 鉴权：仅 /v1/* 端点需要（元信息端点保持开放）。
-  if (path.startsWith("/v1/") && !authOk(req)) {
+  // 浏览器来源 / DNS rebinding 防护（在鉴权之前，未配置 Key 时同样生效）。
+  if (!browserOriginAllowed(req) || !hostHeaderAllowed(req)) {
+    return apiError(
+      403,
+      "该请求来自外部网页。网关只接受本机进程调用，或在配置 GATEWAY_API_KEY 后携带正确 Key 调用。",
+      "forbidden",
+    );
+  }
+
+  // API Key 鉴权：/v1/* 与 /mcp 端点需要（元信息端点保持开放）。
+  // 例外：浏览器 GET /mcp 返回静态调试工作台（无秘密，页面里的调用仍需 Key）。
+  const mcpPlaygroundGet = req.method === "GET" && path === "/mcp";
+  if ((path.startsWith("/v1/") || (path === "/mcp" && !mcpPlaygroundGet)) && !authOk(req)) {
     return unauthorized();
   }
 
@@ -1845,6 +2178,7 @@ async function route(req: Request): Promise<Response> {
           "POST /v1/audio/speech",
           "POST /v1/audio/transcriptions",
           "POST /v1/images/generations",
+          "POST /mcp (knowledge base MCP server)",
           "GET  /health",
         ],
       });
@@ -1882,9 +2216,30 @@ async function route(req: Request): Promise<Response> {
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleTranscriptions(req);
     case "/v1/images/generations":
-      return apiError(501, "文本生图后端尚未接入", "not_implemented");
-    default:
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleImageGeneration(req);
+    // 共享记忆 REST（Mem0 风格）：任何程序经网关读写记忆库。
+    case "/v1/memories":
+      if (req.method === "GET") return await handleMemoryList(url);
+      if (req.method === "POST") return handleMemoryCreate(req);
+      return apiError(405, "Method Not Allowed");
+    // 本地素材库 REST（只读）：外部程序 / Agent 查询本机生成过的图片 / 语音 / 视频。
+    case "/v1/media":
+      if (req.method !== "GET") return apiError(405, "Method Not Allowed");
+      return await handleMediaSearch(url);
+    // OmniStudio MCP 服务（Streamable HTTP）：知识库检索 + 共享记忆读写 + 素材检索。
+    case "/mcp":
+      return handleMcpRequest(req);
+    default: {
+      // /v1/memories/{id} DELETE
+      const memMatch = path.match(/^\/v1\/memories\/(\d+)$/);
+      if (memMatch) {
+        if (req.method !== "DELETE") return apiError(405, "Method Not Allowed");
+        Memory.deleteMemory(Number(memMatch[1]));
+        return json({ ok: true });
+      }
       return apiError(404, `未知路径 ${path}`, "not_found");
+    }
   }
 }
 

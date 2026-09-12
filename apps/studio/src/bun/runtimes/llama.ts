@@ -3,19 +3,21 @@ import { existsSync } from "fs";
 import { getModelProfile, type ServerArgs } from "../../shared/model-profiles";
 import { getSetting } from "../db/settings";
 import { resolveLlamaBinary } from "../llama-engine";
+import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
+import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
 } from "./types";
 
-const MAX_LOG_CHARS = 200_000;
 const DOWNLOAD_PATTERN = /download|fetch|pulling|(\d+(\.\d+)?)\s*%/i;
 
 const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
@@ -31,38 +33,13 @@ const DEFAULT_CUSTOM_SERVER_ARGS: ServerArgs = {
   noMmprojOffload: true,
 };
 
-function collapseCarriageReturns(text: string): string {
-  if (!text.includes("\r")) return text;
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.includes("\r")) return normalized;
-  return normalized
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("\r")) return line;
-      const parts = line.split("\r").filter(Boolean);
-      return parts.length > 0 ? parts[parts.length - 1] : "";
-    })
-    .join("\n");
-}
 
-async function pipeStream(stream: ReadableStream<Uint8Array>, appendLog: (text: string) => void) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const text = collapseCarriageReturns(decoder.decode(value, { stream: true }));
-      if (text) appendLog(text);
-    }
-  } catch {
-    // stream closed
-  }
-}
 
 export class LlamaRuntime implements Runtime {
   readonly id = "llama.cpp";
   readonly label = "llama-server";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -127,10 +104,23 @@ export class LlamaRuntime implements Runtime {
   }
 
   /**
-   * Resolve the active model for the local runtime.
-   * Priority: locally installed GGUF path → HF model reference (CUSTOM_HF_MODEL → profile).
+   * Resolve the model this instance serves.
+   * Priority: explicit override (served-model registry) → locally installed GGUF path
+   * → HF model reference (CUSTOM_HF_MODEL → profile).
    */
   private resolveModel(): { kind: "local"; path: string; alias: string } | { kind: "hf"; ref: string } {
+    const target = this.overrides.model;
+    if (target) {
+      if (existsSync(target)) {
+        return {
+          kind: "local",
+          path: target,
+          alias: this.overrides.servedName ?? slugModelFileName(modelNameForPath(target)),
+        };
+      }
+      return { kind: "hf", ref: target };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const name = getSetting("LOCAL_MODEL_NAME");
@@ -158,7 +148,7 @@ export class LlamaRuntime implements Runtime {
         model = {
           kind: "local",
           path: modelOverride,
-          alias: slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model"),
+          alias: slugModelFileName(modelNameForPath(modelOverride)),
         };
       } else {
         model = { kind: "hf", ref: modelOverride };
@@ -175,7 +165,8 @@ export class LlamaRuntime implements Runtime {
     | { kind: "local"; path: string; alias: string }
     | { kind: "hf"; ref: string },
     serverArgs: ServerArgs): string[] {
-    const port = getSetting("SERVER_PORT");
+    // llama.cpp 的端口设置键就是 SERVER_PORT（见 shared/engines.ts）。
+    const port = this.overrides.port ?? (getSetting("SERVER_PORT") || "8080");
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const ctxSize = getSetting("SERVER_CTX_SIZE") || String(serverArgs.ctxSize);
     const imageMaxTokens = getSetting("SERVER_IMAGE_MAX_TOKENS") || String(serverArgs.imageMaxTokens);
@@ -268,15 +259,8 @@ export class LlamaRuntime implements Runtime {
         ? ["script", "-q", "/dev/null", llamaPath, ...args]
         : [llamaPath, ...args];
 
-      this.serverProcess = Bun.spawn(cmd, {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      const { stdout, stderr } = this.serverProcess;
-      const appendLog = this.appendLog.bind(this);
-      if (stdout && typeof stdout !== "number") pipeStream(stdout, appendLog);
-      if (stderr && typeof stderr !== "number") pipeStream(stderr, appendLog);
+      this.serverProcess = spawnServerProcess(cmd);
+      pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;
       this.serverProcess.exited
@@ -299,7 +283,7 @@ export class LlamaRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getSetting("SERVER_PORT");
+      const port = this.overrides.port ?? (getSetting("SERVER_PORT") || "8080");
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 120;
       let idleCount = 0;
@@ -360,15 +344,12 @@ export class LlamaRuntime implements Runtime {
     this.setStatus("stopped");
     this.appendLog("\n[stopping server...]\n");
 
-    proc.kill("SIGTERM");
+    killProcessTree(proc, "SIGTERM");
 
-    const exited = await Promise.race([
-      proc.exited.then(() => true),
-      Bun.sleep(5000).then(() => false),
-    ]);
+    const exited = await waitExit(proc, 5000);
 
     if (!exited) {
-      proc.kill("SIGKILL");
+      killProcessTree(proc, "SIGKILL");
       await proc.exited.catch(() => {});
     }
 
@@ -383,7 +364,7 @@ export class LlamaRuntime implements Runtime {
   forceKill() {
     if (this.serverProcess) {
       try {
-        this.serverProcess.kill("SIGKILL");
+        killProcessTree(this.serverProcess, "SIGKILL");
       } catch {
         // already dead
       }

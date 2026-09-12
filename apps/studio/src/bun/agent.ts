@@ -18,9 +18,13 @@ import { db } from "./db";
 import { agentEvents, conversations, messages } from "./db/schema";
 import { getSetting } from "./db/settings";
 import { getChatBaseUrl, getHistory, ensureServerReady } from "./chat";
-import { getChatModelName } from "./chat-model";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
 import { recordUsage } from "./stats";
 import { buildAgentTools, buildReadOnlyTools } from "./agent-tools";
+import { buildMediaGenTools, buildMediaReadTools } from "./media-tools";
+import { cancelMediaSetup } from "./media-setup";
+import { buildMcpAgentTools } from "./mcp";
+import { buildMemoryAgentTools, memoryEnabled, memoryPromptSection, memoryRecallSection } from "./memory";
 import * as Chat from "./chat";
 
 /** Agent 的三种工作模式（对齐 PI-Desktop 的 Agent / Plan / Goal）。 */
@@ -205,15 +209,16 @@ export function getAgentMode(): AgentMode {
   return AGENT_MODES.includes(mode) ? mode : "agent";
 }
 
-/** 构造指向当前推理服务（本地 llama.cpp / vLLM / SGLang 或远端 OpenAI 兼容 API）的 pi-ai Model。 */
+/** 构造指向当前推理服务（本地 llama.cpp / vLLM / SGLang / MLX 或远端 OpenAI 兼容 API）的 pi-ai Model。 */
 function buildModel(): Model<"openai-completions"> {
   const base = getChatBaseUrl().replace(/\/+$/, "");
   const baseUrl = /\/v1$/i.test(base) ? base : `${base}/v1`;
-  const id = getChatModelName();
+  // id 是发请求用的（MLX 下是它认的绝对路径），name 只用于展示。
+  const id = getChatRequestModelId();
   const contextWindow = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
   return {
     id,
-    name: id,
+    name: getChatModelLabel() || id,
     api: "openai-completions",
     provider: "llama-desk",
     baseUrl,
@@ -292,30 +297,61 @@ const MODE_INSTRUCTION: Record<AgentMode, string> = {
 };
 
 function buildSystemPrompt(mode: AgentMode, workspace: string): string {
-  return [
+  const guidelines = [
+    "1. 路径尽量用相对工作区的相对路径；绝对路径只允许落在工作区内用于写操作。",
+    "2. 一次只调用当下最需要的工具，拿到结果再决定下一步，不要成批猜测。",
+    "3. 修改既有代码前先读取相关片段，保证 old_str 精确匹配。",
+    "4. 最终回答用简洁的中文总结：做了什么、改了哪些文件、如何验证。",
+  ];
+  // Plan 模式不给生成类工具，"先找现成素材"的引导也只对能动手的模式有意义。
+  if (mode !== "plan") {
+    guidelines.push(
+      "5. 应用里存着用户和 Agent 生成过的图片 / 语音 / 视频：写文档要配图配声时，先用 media_search 找现成的复用" +
+        "（用 media_export 复制到工作区后按相对路径引用），确实没有再 generate_image / generate_speech / generate_video 生成。",
+    );
+  }
+  const sections = [
     "你是 LlamaDesk 内置的 Pi Agent —— 一个在用户本机工作区里执行任务的 AI 智能体。",
     currentTimeLine(),
     `工作区根目录：${workspace}`,
     `运行环境：${os.type()} ${os.release()}（${os.arch()}），shell：${process.env.SHELL ?? "/bin/sh"}。`,
     "",
     "工作准则：",
-    "1. 路径尽量用相对工作区的相对路径；绝对路径只允许落在工作区内用于写操作。",
-    "2. 一次只调用当下最需要的工具，拿到结果再决定下一步，不要成批猜测。",
-    "3. 修改既有代码前先读取相关片段，保证 old_str 精确匹配。",
-    "4. 最终回答用简洁的中文总结：做了什么、改了哪些文件、如何验证。",
-    "",
-    MODE_INSTRUCTION[mode],
-  ].join("\n");
+    ...guidelines,
+  ];
+  // 常驻记忆（启用且有内容时）：置顶/高热记忆作为核心上下文注入。
+  const memorySection = memoryPromptSection();
+  if (memorySection) sections.push("", memorySection);
+  sections.push("", MODE_INSTRUCTION[mode]);
+  return sections.join("\n");
 }
 
-function toolsForMode(mode: AgentMode, workspace: string): AgentTool<any>[] {
+/**
+ * 工具集 = 内置工具 + 素材工具 + 记忆工具 + 已启用 MCP 服务器的工具
+ * （连接失败的服务器自动跳过）。Plan 模式只保留内置只读工具与素材检索：
+ * 生成 / 导出与记忆 / MCP 工具都可能有副作用，不参与"先出方案"阶段。
+ */
+async function toolsForMode(mode: AgentMode, workspace: string, conversationId?: number): Promise<AgentTool<any>[]> {
   const allowShell = getSetting("AGENT_ALLOW_SHELL") !== "0";
   const ctx = { workspace, allowShell: allowShell && mode !== "plan" };
-  return mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
+  const base = mode === "plan" ? buildReadOnlyTools(ctx) : buildAgentTools(ctx);
+  // 素材检索是只读的（看看用户和 Agent 都生成过什么），三模式都给。
+  const mediaRead = buildMediaReadTools();
+  if (mode === "plan") return [...base, ...mediaRead];
+  // 记忆工具带上下文：写入记项目作用域（按工作区隔离）与审计来源（哪个会话写的）。
+  const extras = memoryEnabled()
+    ? buildMemoryAgentTools({
+        scope: workspace,
+        sourceRef: conversationId ? `agent:conv-${conversationId}` : "agent",
+      })
+    : [];
+  const mcpTools = await buildMcpAgentTools();
+  return [...base, ...mediaRead, ...buildMediaGenTools(ctx), ...extras, ...mcpTools];
 }
 
-export function listAgentTools(mode: AgentMode = getAgentMode()): AgentToolInfo[] {
-  return toolsForMode(mode, getAgentWorkspace()).map((t) => ({
+export async function listAgentTools(mode: AgentMode = getAgentMode()): Promise<AgentToolInfo[]> {
+  const tools = await toolsForMode(mode, getAgentWorkspace());
+  return tools.map((t) => ({
     name: t.name,
     label: t.label,
     description: t.description ?? "",
@@ -349,6 +385,8 @@ export function resetAgentSession(conversationId: number): void {
     }
     sessions.delete(conversationId);
   }
+  // 生图弹窗还在等用户确认时，会话被重置就把等待一并收尾。
+  cancelMediaSetup();
 }
 
 /** 把库里的历史消息（仅 user / assistant 正文）回填成 Pi Agent 的 transcript。 */
@@ -367,7 +405,7 @@ function historyAsAgentMessages(conversationId: number): AgentMessage[] {
             content: [{ type: "text" as const, text: m.content }],
             api: "openai-completions",
             provider: "llama-desk",
-            model: getChatModelName(),
+            model: getChatModelLabel(),
             usage: {
               input: 0,
               output: 0,
@@ -382,7 +420,7 @@ function historyAsAgentMessages(conversationId: number): AgentMessage[] {
     );
 }
 
-function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: string): Session {
+async function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: string): Promise<Session> {
   const existing = sessions.get(conversationId);
   if (existing && existing.mode === mode && existing.workspace === workspace) return existing;
   if (existing) resetAgentSession(conversationId);
@@ -393,7 +431,7 @@ function getOrCreateSession(conversationId: number, mode: AgentMode, workspace: 
     initialState: {
       systemPrompt: buildSystemPrompt(mode, workspace),
       model,
-      tools: toolsForMode(mode, workspace),
+      tools: await toolsForMode(mode, workspace, conversationId),
       messages: historyAsAgentMessages(conversationId),
     },
   });
@@ -445,6 +483,7 @@ function withAttachments(
   content: string,
   files: { name: string; content: string }[],
   imagePaths: string[],
+  recall?: string | null,
 ): string {
   const parts: string[] = [];
   const text = content.trim();
@@ -456,6 +495,8 @@ function withAttachments(
   for (const p of imagePaths) {
     parts.push(`--- 附件图片（本地路径）：${p} ---`);
   }
+  // 召回的记忆随用户消息一起进来（会随会话正文保留，便于回溯"当时它知道什么"）。
+  if (recall) parts.push(`--- 自动召回的相关记忆（仅供参考） ---\n${recall}\n--- 记忆结束 ---`);
   return parts.join("\n\n") || content;
 }
 
@@ -483,7 +524,7 @@ export async function runAgentTurn(opts: {
   if (!conv) return { ok: false, error: "Conversation not found" };
   if (!content.trim()) return { ok: false, error: "Empty message" };
 
-  const modelName = getChatModelName();
+  const modelName = getChatModelLabel();
   if (!modelName) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
@@ -538,7 +579,7 @@ export async function runAgentTurn(opts: {
     .get();
   const assistantId = assistant.id;
 
-  const session = getOrCreateSession(conversationId, mode, workspace);
+  const session = await getOrCreateSession(conversationId, mode, workspace);
   const { agent } = session;
 
   let fullText = "";
@@ -605,7 +646,13 @@ export async function runAgentTurn(opts: {
   try {
     agent.shouldStopAfterTurn = () => step >= maxSteps;
 
-    await agent.prompt(withAttachments(content, files, imagePaths));
+    // 每轮开始刷新系统提示：核心记忆（置顶 / 高重要度）可能在上几轮里变了，
+    // 一轮之内保持稳定，不影响本地推理的前缀缓存。
+    agent.state.systemPrompt = buildSystemPrompt(mode, workspace);
+    // 按当前问题召回相关记忆，拼进本轮用户消息（不改系统提示，故缓存友好）。
+    const recall = await memoryRecallSection(content, { scope: workspace }).catch(() => null);
+
+    await agent.prompt(withAttachments(content, files, imagePaths, recall));
 
     if (step >= maxSteps) {
       recordEvent({
@@ -657,6 +704,8 @@ export async function runAgentTurn(opts: {
 
 /** 中断当前运行（UI 的"停止"按钮）。 */
 export function stopAgentRun(conversationId: number): { ok: boolean } {
+  // 正在等用户确认的生图弹窗先收尾，否则工具会一直挂到超时。
+  cancelMediaSetup();
   const session = sessions.get(conversationId);
   if (!session) return { ok: false };
   try {

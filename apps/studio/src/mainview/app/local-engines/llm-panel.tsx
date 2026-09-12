@@ -9,10 +9,12 @@ import {
   CpuIcon,
   DownloadIcon,
   ExternalLinkIcon,
+  FolderIcon,
   FolderOpenIcon,
   HardDriveIcon,
   Loader2Icon,
   PlayIcon,
+  RocketIcon,
   SparklesIcon,
   SquareIcon,
   StarIcon,
@@ -21,6 +23,8 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -36,6 +40,8 @@ import {
   ENGINE_OPTIONS,
   ENGINE_PORT_KEYS,
   ENGINE_EXTRA_ARGS_KEYS,
+  ENGINE_SHORT_NAMES,
+  MODEL_CATEGORIES,
   MODEL_PRESETS,
   fileKind,
   engineSupports,
@@ -43,8 +49,10 @@ import {
   safeRepoId,
   type ChatPreset,
   type InferenceEngine,
+  type MarketFile,
   type ModelCategory,
-  type ModelScopeFile,
+  type ModelFileKind,
+  type ModelSource,
 } from "@/shared/modelscope";
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "../setup-screen/constants";
@@ -68,6 +76,7 @@ const ENGINE_TAB_LABEL: Record<InferenceEngine, string> = {
   "llama.cpp": "llama.cpp",
   vllm: "vLLM",
   sglang: "SGLang",
+  mlx: "MLX",
 };
 
 // ---------------------------------------------------------------------------
@@ -115,6 +124,9 @@ const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_CONTEXT_LENGTH", labelKey: "models.params.ctx" },
     { key: "SGLANG_TP_SIZE", labelKey: "models.params.tp" },
     { key: "SGLANG_MEM_FRACTION_STATIC", labelKey: "models.params.memFraction", step: "0.02" },
+  ],
+  mlx: [
+    { key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" },
   ],
 };
 
@@ -320,40 +332,104 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
   });
 
   const fields = PARAM_FIELDS[engine];
+  const mlxPresets = MODEL_PRESETS.filter((p) => p.engine === "mlx" && p.app === "chat");
 
   return (
     <PanelCard title={t("engine.modelSection")} icon={<HardDriveIcon className="size-4" />}>
       <div className="grid gap-3 sm:grid-cols-2">
-        <label className="flex flex-col gap-1">
-          <span className="text-[11px] text-muted-foreground">{t("engine.modelNamePath")}</span>
-          <Select
-            value={activePath || undefined}
-            onValueChange={(v) => setActiveMutation.mutate(v)}
-            disabled={setActiveMutation.isPending || busy}
-          >
-            <SelectTrigger className="h-8 text-xs">
-              <SelectValue placeholder={t("engine.modelPlaceholder")} />
-            </SelectTrigger>
-            <SelectContent className="max-h-72 max-w-sm">
-              {installedModels.map((m) => {
-                const kind = fileKind(m.fileName);
-                return (
-                  <SelectItem key={m.path} value={m.path}>
-                    <span className="flex min-w-0 items-center gap-2">
-                      <span className="truncate">{m.fileName}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
-                        {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
-                        {m.isActive ? ` · ${t("models.inUse")}` : ""}
+        {engine === "mlx" ? (
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">{t("engine.mlxModel")}</span>
+            <Select
+              value={mlxPresets.some((p) => p.repo === settings.MLX_MODEL) ? settings.MLX_MODEL : undefined}
+              onValueChange={(v) => patch.mutate({ MLX_MODEL: v })}
+              disabled={busy}
+            >
+              <SelectTrigger className="h-9 w-full text-xs">
+                <SelectValue placeholder={t("engine.mlxSelectPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
+                {mlxPresets.map((p) => (
+                  <SelectItem key={p.repo} value={p.repo}>
+                    <span className="min-w-0 flex-1 truncate">{p.label}</span>
+                    <span className="flex shrink-0 items-center gap-1.5">
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {ENGINE_SHORT_NAMES.mlx}
+                      </span>
+                      <span className="max-w-44 truncate text-[10px] text-muted-foreground/70">
+                        {p.repo}
                       </span>
                     </span>
                   </SelectItem>
-                );
-              })}
-            </SelectContent>
-          </Select>
-        </label>
+                ))}
+              </SelectContent>
+            </Select>
+          </label>
+        ) : (
+          <label className="flex flex-col gap-1">
+            <span className="text-[11px] text-muted-foreground">{t("engine.modelNamePath")}</span>
+            <Select
+              value={activePath || undefined}
+              onValueChange={(v) => setActiveMutation.mutate(v)}
+              disabled={setActiveMutation.isPending || busy}
+            >
+              <SelectTrigger className="h-9 w-full text-xs">
+                <SelectValue placeholder={t("engine.modelPlaceholder")} />
+              </SelectTrigger>
+              <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
+                {installedModels
+                  // 目录条目（vLLM / SGLang / MLX 的整个仓库）文件名没有扩展名，
+                  // 格式要按目录内容判定，否则 safetensors 仓库会被当成 other 漏掉。
+                  .filter((m) => engineSupports(engine, m.kind ?? fileKind(m.fileName)))
+                  .map((m) => {
+                    const kind = m.kind ?? fileKind(m.fileName);
+                    return (
+                      <SelectItem key={m.path} value={m.path}>
+                        <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                          {m.isDir && (
+                            <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                          )}
+                          <span className="truncate">{m.fileName}</span>
+                        </span>
+                        <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground/70">
+                          {m.isActive && <span className="text-primary">{t("models.inUse")}</span>}
+                          <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                            {kind === "gguf"
+                              ? "GGUF"
+                              : kind === "safetensors"
+                                ? "safetensors"
+                                : t("models.format.other")}
+                          </span>
+                          <span className="max-w-44 truncate">{m.repo}</span>
+                        </span>
+                      </SelectItem>
+                    );
+                  })}
+              </SelectContent>
+            </Select>
+          </label>
+        )}
         <CommitInput label={t("engine.endpoint")} value={endpoint} readOnly mono />
       </div>
+
+      {engine === "mlx" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <CommitInput
+            label={t("engine.mlxModelRepo")}
+            value={settings.MLX_MODEL ?? ""}
+            placeholder="user/Model-MLX 或本地目录路径"
+            mono
+            onCommit={(v) => patch.mutate({ MLX_MODEL: v.trim() })}
+          />
+          <CommitInput
+            label={t("engine.mlxHfEndpoint")}
+            value={settings.MLX_HF_ENDPOINT ?? ""}
+            placeholder="https://hf-mirror.com"
+            mono
+            onCommit={(v) => patch.mutate({ MLX_HF_ENDPOINT: v.trim() })}
+          />
+        </div>
+      )}
 
       {fields.length > 0 && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
@@ -403,7 +479,7 @@ function ModelConfigCard({ engine }: { engine: InferenceEngine }) {
 // 支持的模型（按引擎过滤的精选模型 + 下载 / 使用）
 // ---------------------------------------------------------------------------
 
-function pickRecommendedFile(files: ModelScopeFile[], defaultQuant?: string): ModelScopeFile | null {
+function pickRecommendedFile(files: MarketFile[], defaultQuant?: string): MarketFile | null {
   if (files.length === 0) return null;
   const weights = files.filter((f) => f.isWeight);
   const pool = weights.length > 0 ? weights : files;
@@ -411,12 +487,13 @@ function pickRecommendedFile(files: ModelScopeFile[], defaultQuant?: string): Mo
     const hit = pool.find((f) => matchQuant(f.name, defaultQuant));
     if (hit) return hit;
   }
-  return pool.reduce<ModelScopeFile | null>((best, f) => (best === null || best.size < f.size ? f : best), null);
+  return pool.reduce<MarketFile | null>((best, f) => (best === null || best.size < f.size ? f : best), null);
 }
 
 function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEngine }) {
   const t = useT();
   const queryClient = useQueryClient();
+  const settingsBlob = useSettingsBlob();
   const { data: installedData } = useQuery({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
@@ -424,10 +501,11 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
   const installed = (installedData?.models ?? []).filter((m) => m.repo === safeRepoId(preset.repo));
   const installedAny = installed.length > 0;
 
+  // 精选模型默认从 ModelScope 列文件 + 下载（DownloadControls 的 source 默认值一致）。
   const filesQuery = useQuery({
-    queryKey: ["modelscope-files", preset.repo],
-    queryFn: () => rpcClient.listModelScopeFiles({ repo: preset.repo }),
-    enabled: !installedAny,
+    queryKey: ["market-files", "modelscope", preset.repo],
+    queryFn: () => rpcClient.listModelFiles({ repo: preset.repo, source: "modelscope" }),
+    enabled: !installedAny && preset.engine !== "mlx",
   });
   const recommended = pickRecommendedFile(filesQuery.data?.files ?? [], preset.defaultQuant);
 
@@ -437,6 +515,36 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     },
+  });
+
+  // MLX 预设没有单文件下载：一键部署 = 切换 MLX 引擎 + 写入 repo + 启动服务
+  // （首次启动由 mlx-lm 自动经 HF 下载到本地缓存，日志可见进度）。
+  const mlxSettings = settingsBlob.data?.settings ?? {};
+  const mlxActive =
+    preset.engine === "mlx" &&
+    mlxSettings.INFERENCE_ENGINE === "mlx" &&
+    mlxSettings.MLX_MODEL === preset.repo;
+  const [deployError, setDeployError] = useState<string | null>(null);
+  const deployMutation = useMutation({
+    mutationFn: async () => {
+      setDeployError(null);
+      await rpcClient.updateSettings({
+        settings: { INFERENCE_ENGINE: "mlx", MLX_MODEL: preset.repo, SERVER_MODE: "local" },
+      });
+      await queryClient.invalidateQueries({ queryKey: ["settings"] });
+      const st = useServerStore.getState().status;
+      const res =
+        st === "running" || st === "starting" || st === "downloading"
+          ? await rpcClient.restartServer()
+          : await rpcClient.startServer();
+      if (!res.ok) throw new Error(res.error || "Failed to start MLX server");
+      return res;
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+    },
+    onError: (err: unknown) =>
+      setDeployError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
   });
 
   const openDetail = () => {
@@ -457,21 +565,42 @@ function PresetRow({ preset, engine }: { preset: ChatPreset; engine: InferenceEn
             </Badge>
           )}
           <span className="text-[11px] text-muted-foreground">
-            {engineSupports(engine, preset.engine === "vllm" ? "safetensors" : "gguf")
-              ? preset.engine === "vllm"
-                ? "safetensors"
-                : "GGUF"
-              : "·"}
+            {preset.engine === "mlx" ? "MLX" : preset.engine === "vllm" ? "safetensors" : "GGUF"}
           </span>
+          {mlxActive && (
+            <Badge variant="default" className="gap-1 text-[10px]">
+              <CheckCircle2Icon className="size-3" /> {t("engine.inUse")}
+            </Badge>
+          )}
         </div>
         <p className="mt-0.5 truncate text-[11px] text-muted-foreground">{preset.description}</p>
         <p className="mt-0.5 truncate font-mono text-[10px] text-muted-foreground/60">{preset.repo}</p>
+        {deployError && (
+          <p className="mt-1 text-[11px] text-destructive/80">{deployError}</p>
+        )}
       </div>
       <div className="flex shrink-0 items-center gap-1.5">
         <Button variant="ghost" size="icon-sm" tooltip={t("engine.details")} onClick={openDetail}>
           <ExternalLinkIcon className="size-3.5" />
         </Button>
-        {installedAny && bestInstalled ? (
+        {preset.engine === "mlx" ? (
+          <Button
+            variant={mlxActive ? "default" : "outline"}
+            size="sm"
+            className="h-7 text-xs"
+            disabled={deployMutation.isPending}
+            onClick={() => deployMutation.mutate()}
+          >
+            {deployMutation.isPending ? (
+              <Loader2Icon data-icon="inline-start" className="animate-spin" />
+            ) : mlxActive ? (
+              <CheckIcon data-icon="inline-start" />
+            ) : (
+              <RocketIcon data-icon="inline-start" />
+            )}
+            {mlxActive ? t("engine.inUse") : t("engine.deploy")}
+          </Button>
+        ) : installedAny && bestInstalled ? (
           <>
             <Badge variant="secondary" className="gap-1 text-[10px]">
               <CheckCircle2Icon className="size-3" /> {t("engine.installed")}
@@ -511,6 +640,7 @@ function SupportedModels({ engine }: { engine: InferenceEngine }) {
   const presets = MODEL_PRESETS.filter((p) => {
     if (p.app !== "chat") return false;
     if (engine === "llama.cpp") return p.engine === "llama.cpp";
+    if (engine === "mlx") return p.engine === "mlx";
     return p.engine === "vllm";
   });
   if (presets.length === 0) return null;
@@ -533,14 +663,6 @@ function SupportedModels({ engine }: { engine: InferenceEngine }) {
 // 已安装模型管理（沿用原 InstalledModels）
 // ---------------------------------------------------------------------------
 
-const CAT_BADGE_CLASSES: Record<string, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
 function InstalledModelRow({
   model,
   engine,
@@ -554,13 +676,18 @@ function InstalledModelRow({
     isChatModel: boolean;
     category: ModelCategory;
     favorite: boolean;
+    /** 下载来源平台（老数据可能没有）。 */
+    source?: ModelSource;
+    /** path 是目录（整仓库模型）时为 true；格式按目录内容判定。 */
+    isDir?: boolean;
+    kind?: ModelFileKind;
   };
   engine: InferenceEngine;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
   const serverStatus = useServerStore((s) => s.status);
-  const kind = fileKind(model.fileName);
+  const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
 
@@ -621,37 +748,31 @@ function InstalledModelRow({
     <div className="flex items-center gap-3 rounded-lg border p-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {model.isDir && (
+            <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
-          <span
-            className={cn(
-              "inline-flex h-5 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[model.category],
-            )}
-          >
-            {t(`models.cat.${model.category}`)}
-          </span>
-          <span
-            className={cn(
-              "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
+          <ModelCategoryBadge
+            category={model.category}
+            label={t(`models.cat.${model.category}`)}
+          />
+          <ModelFormatBadge
+            kind={kind}
+            label={
               kind === "gguf"
-                ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                ? t("models.format.gguf")
                 : kind === "safetensors"
-                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-                  : "bg-muted text-muted-foreground",
-            )}
-          >
-            {kind === "gguf"
-              ? t("models.format.gguf")
-              : kind === "safetensors"
-                ? t("models.format.safetensors")
-                : t("models.format.other")}
-          </span>
+                  ? t("models.format.safetensors")
+                  : t("models.format.other")
+            }
+          />
           {!compatible && (
             <span className="inline-flex h-5 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-3" />
               {t("models.autoSwitchEngine")}
             </span>
           )}
+          {model.source && <SourceBadge source={model.source} />}
           {model.isActive && (
             <Badge variant="default" className="gap-1 text-[10px]">
               <SparklesIcon className="size-3" /> {t("models.inUse")}
@@ -756,17 +877,12 @@ export function InstalledModels({ engine }: { engine: InferenceEngine }) {
   }
 
   const allModels = (data?.models ?? []).filter(
-    (m) => fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
+    (m) => (m.kind ?? fileKind(m.fileName)) === "other" || engineSupports(engine, m.kind ?? fileKind(m.fileName)),
   );
   const models = tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
 
-  const TABS: { value: "all" | ModelCategory; labelKey: string }[] = [
-    { value: "all", labelKey: "models.cat.all" },
-    { value: "chat", labelKey: "models.cat.chat" },
-    { value: "tts", labelKey: "models.cat.tts" },
-    { value: "asr", labelKey: "models.cat.asr" },
-    { value: "image", labelKey: "models.cat.image" },
-  ];
+  // 分类 tab 与模型库 / 本机模型页同一套口径（other 不单独成 tab）。
+  const TABS = MODEL_CATEGORIES.filter((c) => c.value !== "other");
 
   return (
     <div className="flex flex-col gap-3">
@@ -993,12 +1109,21 @@ export function DefaultModelConfig() {
 export function LlmPanel() {
   const t = useT();
   const { engine: activeEngine } = useEngine();
+  const settingsBlob = useSettingsBlob();
+  // MLX 只面向 macOS（mlx-lm 基于 Apple Silicon），非 mac 上不提供该引擎标签。
+  const isMac = settingsBlob.data?.platform === "darwin";
+  const engineOptions = ENGINE_OPTIONS.filter((o) => o.value !== "mlx" || isMac);
   const [tab, setTab] = useState<InferenceEngine>(activeEngine);
+
+  // 当前引擎若是非 mac 上不可用的 MLX（如旧配置残留），回退到默认标签。
+  useEffect(() => {
+    if (!engineOptions.some((o) => o.value === tab)) setTab("llama.cpp");
+  }, [engineOptions, tab]);
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-wrap items-center gap-1.5">
-        {ENGINE_OPTIONS.map((o) => (
+        {engineOptions.map((o) => (
           <button
             key={o.value}
             type="button"

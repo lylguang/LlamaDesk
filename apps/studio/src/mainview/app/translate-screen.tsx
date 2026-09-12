@@ -28,13 +28,14 @@ import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { cn } from "@/mainview/lib/utils";
 import type { TranslationRecordRow } from "../../bun/translate";
+import { LiveTranslateTab } from "./live-translate";
 import {
   TRANSLATION_LANGUAGES,
   TRANSLATION_SOURCE_AUTO,
 } from "../../shared/translate";
 
 /** 翻译引擎：model = 当前对话模型；google = 谷歌浏览器同款免费接口。 */
-function useTranslationEngine(): "model" | "google" {
+export function useTranslationEngine(): "model" | "google" {
   const { data: settingsData } = useQuery({
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
@@ -43,7 +44,7 @@ function useTranslationEngine(): "model" | "google" {
 }
 
 /** 翻译引擎选择（与生图页后端切换同款样式）：模型翻译 / Google 免费引擎 + 模型下拉。 */
-function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
+export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
   const [pendingType, setPendingType] = useState<"local" | "api" | null>(null);
@@ -65,8 +66,19 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const activePath = settings?.LOCAL_MODEL_PATH ?? "";
   const engineKey = isGoogle ? "google" : "model";
 
-  const options = modelsQuery.data?.models ?? [];
-  const current = mode === "remote" ? apiModel || chatModel || "" : activePath || chatModel || "";
+  const allOptions = modelsQuery.data?.models ?? [];
+  // 本地只给已启动的实例（与对话一致）：翻译要的是一个正在跑的本地服务，
+  // 没启动的模型选进来只会报「没模型在跑」。
+  const localOptions = allOptions.filter(
+    (o) =>
+      o.type === "local" &&
+      (o.state === "running" || o.state === "starting" || o.state === "downloading"),
+  );
+  const apiOptions = allOptions.filter((o) => o.type === "api");
+  const current =
+    mode === "remote"
+      ? apiOptions.find((o) => o.isActive)?.value ?? apiModel ?? chatModel ?? ""
+      : localOptions.find((o) => o.isActive)?.value ?? "";
 
   const switchEngine = useMutation({
     mutationFn: (engine: "model" | "google") =>
@@ -93,7 +105,7 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   });
 
   const pickModel = (value: string) => {
-    const option = options.find((o) => o.value === value);
+    const option = [...localOptions, ...apiOptions].find((o) => o.value === value);
     if (!option || option.value === current) return;
     setPendingType(option.type);
     selectMutation.mutate({ type: option.type, value: option.value });
@@ -156,12 +168,10 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
               <SelectValue placeholder={t("chat.modelEmpty")} />
             </SelectTrigger>
             <SelectContent className="max-w-80">
-              {options.filter((o) => o.type === "local").length > 0 && (
+              {localOptions.length > 0 && (
                 <SelectGroup>
-                  <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
-                  {options
-                    .filter((o) => o.type === "local")
-                    .map((o) => (
+                  <SelectLabel>{t("chat.modelLocalRunning")}</SelectLabel>
+                  {localOptions.map((o) => (
                       <SelectItem key={`local-${o.value}`} value={o.value}>
                         <span className="truncate">{o.label}</span>
                         <span className="flex min-w-0 items-center gap-1">
@@ -180,12 +190,10 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                     ))}
                 </SelectGroup>
               )}
-              {options.filter((o) => o.type === "api").length > 0 && (
+              {apiOptions.length > 0 && (
                 <SelectGroup>
                   <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-                  {options
-                    .filter((o) => o.type === "api")
-                    .map((o) => (
+                  {apiOptions.map((o) => (
                       <SelectItem key={`api-${o.value}`} value={o.value}>
                         <span className="truncate">{o.label}</span>
                         {o.detail && (
@@ -197,7 +205,7 @@ function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                     ))}
                 </SelectGroup>
               )}
-              {options.length === 0 && (
+              {localOptions.length === 0 && apiOptions.length === 0 && (
                 <div className="px-2 py-3 text-center text-xs text-muted-foreground">
                   {t("chat.modelEmpty")}
                 </div>
@@ -247,7 +255,7 @@ function CopyTextButton({ text }: { text: string }) {
   );
 }
 
-export function TranslateScreen() {
+function TextTranslateTab() {
   const t = useT();
   const queryClient = useQueryClient();
   const [sourceLang, setSourceLang] = useState(TRANSLATION_SOURCE_AUTO);
@@ -466,4 +474,13 @@ export function TranslateScreen() {
       </main>
     </div>
   );
+}
+
+// ---------------------------------------------------------------------------
+// 应用入口：左侧栏工具入口切换（文本翻译 / 同传翻译）
+// ---------------------------------------------------------------------------
+
+export function TranslateScreen() {
+  const tool = useTranslateStore((s) => s.tool);
+  return tool === "live" ? <LiveTranslateTab /> : <TextTranslateTab />;
 }

@@ -11,6 +11,7 @@
 import { existsSync, readFileSync, readdirSync, statSync } from "fs";
 import { homedir } from "os";
 import { basename, join, resolve } from "path";
+import type { InferenceEngine } from "../shared/engines";
 
 const APP_SUPPORT = "com.lylguang.llamadesk";
 const DB_FILE = "llama-desk.db";
@@ -161,7 +162,9 @@ function ensureActiveModel(model: string, backend: Backend): string {
   if (!path) return model; // 未匹配到本地文件 → 当作远端模型 id 透传
   const res = backend.modelStore.setActiveModel(path);
   if (!res.ok) fail(res.error ?? "激活模型失败");
-  return backend.modelStore.slugModelFileName(basename(path));
+  // 用与 setActiveModel 同一套解析：分批 GGUF 落到第一个分片、仓库目录落到目录，
+  // 算出来的名字必须和服务器实际提供的模型 id 一致。
+  return backend.modelStore.servedNameForModelPath(path);
 }
 
 // ---------------------------------------------------------------------------
@@ -257,7 +260,7 @@ async function cmdModel(ctx: Ctx, args: string[]) {
       if (!path) fail(`找不到模型「${ref}」。先 \`omni model list\` 看可用的文件名。`);
       const res = backend.modelStore.setActiveModel(path);
       if (!res.ok) fail(res.error ?? "激活失败");
-      const slug = backend.modelStore.slugModelFileName(basename(path));
+      const slug = backend.modelStore.servedNameForModelPath(path);
       json
         ? console.log(JSON.stringify({ ok: true, path, model: slug }, null, 2))
         : console.log(`已激活: ${slug}\n路径: ${path}`);
@@ -466,10 +469,10 @@ async function cmdChat(args: string[], ctx: Ctx) {
   }
   if (!modelName) fail("没有可用的对话模型：先 \`omni model set <模型>\`，或在设置里配置 VLLM_MODEL_NAME。");
 
-  // 本地模式：确保推理服务器已就绪（自动拉起）。
+  // 本地模式：确保推理服务器已就绪（CLI 没有控制台，按设置后台拉起）。
   const base = backend.chat.getChatBaseUrl();
   if (mode === "local") {
-    const ready = await backend.chat.ensureServerReady();
+    const ready = await backend.chat.ensureServerReady({ autoStart: true });
     if (!ready.ok) {
       // 应用自身的推理服务器可能已占用同一端口（此时再拉起必然失败），
       // 探测到端口上有活着的 OpenAI 兼容服务就直接复用。
@@ -726,7 +729,7 @@ async function cmdServe(args: string[], ctx: Ctx) {
   if (mode === "local") {
     console.log("正在确保本地推理服务器就绪…");
     const base = backend.chat.getChatBaseUrl();
-    const ready = await backend.chat.ensureServerReady();
+    const ready = await backend.chat.ensureServerReady({ autoStart: true });
     if (!ready.ok && !(await probeServer(base))) {
       fail(`推理服务器未就绪: ${ready.error}`);
     }
@@ -776,10 +779,7 @@ async function cmdDoctor(ctx: Ctx) {
   });
 
   // 推理引擎二进制
-  const engine = backend.settings.getSetting("INFERENCE_ENGINE") as
-    | "llama.cpp"
-    | "vllm"
-    | "sglang";
+  const engine = backend.settings.getSetting("INFERENCE_ENGINE") as InferenceEngine;
   const bin = await backend.runtimes.createRuntime(engine).checkBinary();
   checks.push({
     name: `引擎二进制 (${engine})`,

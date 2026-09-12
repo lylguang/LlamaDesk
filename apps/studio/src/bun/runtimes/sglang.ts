@@ -2,50 +2,26 @@ import type { Subprocess } from "bun";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
+import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
 } from "./types";
 
-const MAX_LOG_CHARS = 200_000;
 const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 
-function collapseCarriageReturns(text: string): string {
-  if (!text.includes("\r")) return text;
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.includes("\r")) return normalized;
-  return normalized
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("\r")) return line;
-      const parts = line.split("\r").filter(Boolean);
-      return parts.length > 0 ? parts[parts.length - 1] : "";
-    })
-    .join("\n");
-}
 
-async function pipeStream(stream: ReadableStream<Uint8Array>, appendLog: (text: string) => void) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const text = collapseCarriageReturns(decoder.decode(value, { stream: true }));
-      if (text) appendLog(text);
-    }
-  } catch {
-    // stream closed
-  }
-}
 
 export class SglangRuntime implements Runtime {
   readonly id = "sglang";
   readonly label = "SGLang";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -113,10 +89,7 @@ export class SglangRuntime implements Runtime {
         stdout: "pipe",
         stderr: "pipe",
       });
-      const exited = await Promise.race([
-        proc.exited.then(() => true),
-        Bun.sleep(5000).then(() => false),
-      ]);
+      const exited = await waitExit(proc, 5000);
       if (exited) return { found: true, path: pythonPath };
     } catch {
       // not available
@@ -126,6 +99,11 @@ export class SglangRuntime implements Runtime {
   }
 
   private resolveModel(): { model: string; servedName?: string } {
+    // 显式覆盖（已启动模型注册表）优先：同引擎多实例时不能读「当前活动模型」。
+    if (this.overrides.model) {
+      return { model: this.overrides.model, servedName: this.overrides.servedName };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const localName = getSetting("LOCAL_MODEL_NAME");
@@ -151,7 +129,7 @@ export class SglangRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getServerPort(this.id);
+    const port = this.overrides.port ?? getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const contextLength = getSetting("SGLANG_CONTEXT_LENGTH") || "8192";
     const tpSize = getSetting("SGLANG_TP_SIZE") || "1";
@@ -224,15 +202,8 @@ export class SglangRuntime implements Runtime {
     this.appendLog(`$ ${cmd.join(" ")}\n`);
 
     try {
-      this.serverProcess = Bun.spawn(cmd, {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      const { stdout, stderr } = this.serverProcess;
-      const appendLog = this.appendLog.bind(this);
-      if (stdout && typeof stdout !== "number") pipeStream(stdout, appendLog);
-      if (stderr && typeof stderr !== "number") pipeStream(stderr, appendLog);
+      this.serverProcess = spawnServerProcess(cmd);
+      pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;
       this.serverProcess.exited
@@ -255,7 +226,7 @@ export class SglangRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getServerPort(this.id);
+      const port = this.overrides.port ?? getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180;
       let idleCount = 0;
@@ -316,7 +287,7 @@ export class SglangRuntime implements Runtime {
     this.setStatus("stopped");
     this.appendLog("\n[stopping server...]\n");
 
-    proc.kill("SIGTERM");
+    killProcessTree(proc, "SIGTERM");
 
     const exited = await Promise.race([
       proc.exited.then(() => true),
@@ -324,7 +295,7 @@ export class SglangRuntime implements Runtime {
     ]);
 
     if (!exited) {
-      proc.kill("SIGKILL");
+      killProcessTree(proc, "SIGKILL");
       await proc.exited.catch(() => {});
     }
 
@@ -339,7 +310,7 @@ export class SglangRuntime implements Runtime {
   forceKill() {
     if (this.serverProcess) {
       try {
-        this.serverProcess.kill("SIGKILL");
+        killProcessTree(this.serverProcess, "SIGKILL");
       } catch {
         // already dead
       }

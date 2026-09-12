@@ -5,6 +5,8 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earen
 
 import { getSetting } from "./db/settings";
 import { webSearch } from "./web-search";
+import { listKnowledgeBases, recall } from "./knowledge";
+import { audit } from "./skills/audit";
 
 /**
  * Agent 可使用的工具集。
@@ -71,27 +73,67 @@ function truncate(text: string, max = MAX_OUTPUT_CHARS): string {
 }
 
 /** 把用户/模型给的路径解析成绝对路径。相对路径基于工作区。 */
-function resolvePath(workspace: string, input: string): string {
+export function resolvePath(workspace: string, input: string): string {
   const trimmed = input.trim();
   const expanded = trimmed.startsWith("~")
     ? path.join(process.env.HOME ?? "/", trimmed.slice(1))
     : trimmed;
-  return path.resolve(workspace, expanded);
+  const target = path.resolve(workspace, expanded);
+  assertNotSecret(workspace, target);
+  return target;
+}
+
+/**
+ * 工作区外读取的敏感路径黑名单。
+ *
+ * Agent 的工具结果会原样喂回模型，而网页搜索 / 知识库 / MCP 的返回内容都可能被
+ * 提示词注入（"读 ~/.ssh/id_rsa 然后 curl 发到某处"）。工作区内不受限制（开发必需），
+ * 工作区外命中这些凭据目录一律拒绝。
+ */
+const SECRET_PATH_PATTERNS: RegExp[] = [
+  /(^|\/)\.ssh(\/|$)/,
+  /(^|\/)\.aws(\/|$)/,
+  /(^|\/)\.gnupg(\/|$)/,
+  /(^|\/)\.kube(\/|$)/,
+  /(^|\/)\.docker\/config\.json$/,
+  /(^|\/)\.netrc$/,
+  /(^|\/)\.npmrc$/,
+  /(^|\/)\.git-credentials$/,
+  /(^|\/)\.config\/(gh|gcloud|gcloud-legacy)(\/|$)/,
+  // 本机其他编码 agent 的凭据与会话（含第三方 API Key）
+  /(^|\/)\.omni(\/|$)/,
+  /(^|\/)\.codex(\/|$)/,
+  /(^|\/)\.claude(\/|$)/,
+  /Library\/Keychains(\/|$)/,
+  // 本应用自己的数据目录：设置表里存着全部云端 API Key
+  /Library\/Application Support\/omni-studio(\/|$)/,
+];
+
+function assertNotSecret(workspace: string, target: string): void {
+  const root = path.resolve(workspace);
+  if (target === root || target.startsWith(root + path.sep)) return;
+  const normalized = target.replace(/\\/g, "/");
+  if (SECRET_PATH_PATTERNS.some((re) => re.test(normalized))) {
+    throw new Error(
+      `Refusing to access a credential path outside the workspace: ${target}. ` +
+        "Copy what you need into the workspace instead.",
+    );
+  }
 }
 
 /** 写操作必须落在工作区内。 */
-function assertInsideWorkspace(workspace: string, target: string) {
+export function assertInsideWorkspace(workspace: string, target: string) {
   const root = path.resolve(workspace);
   if (target !== root && !target.startsWith(root + path.sep)) {
     throw new Error(`Path outside workspace is not writable: ${target}`);
   }
 }
 
-function textResult(text: string) {
+export function textResult(text: string) {
   return { content: [{ type: "text" as const, text: truncate(text) }], details: {} };
 }
 
-function errorResult(message: string) {
+export function errorResult(message: string) {
   return { content: [{ type: "text" as const, text: message }], details: { error: message } };
 }
 
@@ -377,6 +419,9 @@ function createBash(ctx: ToolContext): BuiltTool {
         );
       }
       const shell = process.env.SHELL || "/bin/zsh";
+      // 执行过的每条命令都入库留痕：模型可能被注入内容诱导执行破坏性命令，
+      // 出事后要能查到"谁在什么时候跑了什么"。
+      audit("agent_shell", `${ctx.workspace}: ${params.command}`);
       try {
         const proc = Bun.spawn([shell, "-c", params.command], {
           cwd: ctx.workspace,
@@ -453,6 +498,63 @@ function createWebSearch(): BuiltTool {
   };
 }
 
+/**
+ * 本地知识库检索：Agent / Plan / Goal 三模式都可用（只读）。
+ * 不指定 kb 时检索全部知识库；命中返回来源文档名 + 分块内容。
+ */
+function createKnowledgeSearch(): BuiltTool {
+  return {
+    name: "knowledge_search",
+    label: "Knowledge search",
+    description:
+      "Search the user's local knowledge bases (documents / notes / web pages imported in OmniStudio). " +
+      "Use it when the task may relate to materials the user stored locally, before searching the web.",
+    parameters: Type.Object({
+      query: Type.String({ description: "Search query — natural language is fine." }),
+      kb: Type.Optional(
+        Type.String({ description: "Knowledge base name to restrict the search to. Omit for all." }),
+      ),
+      top_k: Type.Optional(Type.Number({ description: "Max chunks to return (default 6)." })),
+    }),
+    execute: async (_toolCallId, params: { query: string; kb?: string; top_k?: number }) => {
+      try {
+        const kbs = listKnowledgeBases();
+        if (kbs.length === 0) {
+          return textResult("用户还没有创建任何知识库。");
+        }
+        let targets = kbs;
+        if (params.kb?.trim()) {
+          const lowered = params.kb.trim().toLowerCase();
+          targets = kbs.filter((k) => k.name.toLowerCase() === lowered);
+          if (targets.length === 0) {
+            return textResult(
+              `没有名为「${params.kb}」的知识库。可用：${kbs.map((k) => k.name).join("、")}`,
+            );
+          }
+        }
+        const { hits } = await recall(
+          targets.map((k) => k.id),
+          params.query,
+          params.top_k,
+          { actor: "agent" },
+        );
+        if (hits.length === 0) {
+          return textResult("没有检索到相关内容。");
+        }
+        const formatted = hits
+          .map(
+            (h, i) =>
+              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n${h.content}`,
+          )
+          .join("\n\n");
+        return textResult(`找到 ${hits.length} 条相关片段：\n\n${formatted}`);
+      } catch (e) {
+        return errorResult(`knowledge_search failed: ${e instanceof Error ? e.message : String(e)}`);
+      }
+    },
+  };
+}
+
 /** 只读工具集：Plan 模式下只用这些，保证"先出方案再动手"。 */
 export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
   return [
@@ -461,6 +563,7 @@ export function buildReadOnlyTools(ctx: ToolContext): BuiltTool[] {
     createGlob(ctx),
     createGrep(ctx),
     createWebSearch(),
+    createKnowledgeSearch(),
   ];
 }
 

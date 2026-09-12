@@ -204,6 +204,10 @@ See [docs/architecture.md](./docs/architecture.md) for the full architecture (pr
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload
 - [ ] Menu bar / Dock indicators, API key encryption
 
+## 🙏 Acknowledgements
+
+LlamaDesk is built on [OmniStudio](https://gitee.com/jwangkun/OmniStudio), an open-source project by Kunpeng Talk (jwangkun) — also on GitHub as [kunpengtalk/OmniStudio](https://github.com/kunpengtalk/OmniStudio). Heartfelt thanks to the original author; most of the core capabilities in this project come from upstream.
+
 ## 📄 License
 
 MIT — maintained by lylguang. See [LICENSE](LICENSE).

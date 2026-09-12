@@ -7,6 +7,7 @@ import {
   ExternalLinkIcon,
   FolderOpenIcon,
   GlobeIcon,
+  HeartHandshakeIcon,
   MessageSquareIcon,
   RefreshCwIcon,
   RssIcon,
@@ -24,6 +25,8 @@ import { cn } from "@/mainview/lib/utils";
 import logoUrl from "@/mainview/assets/omni-logo.png";
 
 const WEBSITE_URL = "https://github.com/lylguang/LlamaDesk";
+const UPSTREAM_GITHUB_URL = "https://github.com/kunpengtalk/OmniStudio";
+const UPSTREAM_GITEE_URL = "https://gitee.com/jwangkun/OmniStudio";
 
 export function AboutTab() {
   const t = useT();
@@ -323,6 +326,27 @@ export function AboutTab() {
           <p className="truncate font-mono text-xs" title={about?.dataDir}>
             {about?.dataDir ?? "—"}
           </p>
+        </div>
+      </div>
+
+      {/* 致敬原作者 */}
+      <div className="rounded-2xl border p-5">
+        <div className="flex items-center gap-2">
+          <HeartHandshakeIcon className="size-4 text-muted-foreground" />
+          <h3 className="text-sm font-medium">{t("settings.aboutTab.tribute")}</h3>
+        </div>
+        <p className="mt-1.5 text-xs leading-relaxed text-muted-foreground">
+          {t("settings.aboutTab.tributeDesc")}
+        </p>
+        <div className="mt-3 flex flex-wrap gap-2">
+          <Button variant="outline" size="sm" onClick={() => openUrlMutation.mutate(UPSTREAM_GITHUB_URL)}>
+            <ExternalLinkIcon data-icon="inline-start" />
+            OmniStudio · GitHub
+          </Button>
+          <Button variant="outline" size="sm" onClick={() => openUrlMutation.mutate(UPSTREAM_GITEE_URL)}>
+            <ExternalLinkIcon data-icon="inline-start" />
+            OmniStudio · Gitee
+          </Button>
         </div>
       </div>
     </div>

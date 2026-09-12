@@ -219,6 +219,10 @@ omi status / omi models / omi stop / omi serve --port 8090
 - [ ] Memory lifecycle (idle unload, prefault protection), KV cache tiering with SSD offload 内存生命周期与 KV 缓存分层
 - [ ] Menu bar / Dock indicators, API key encryption 菜单栏指标 / Key 加密
 
+## 🙏 致谢
+
+LlamaDesk 基于鲲鹏Talk（jwangkun）的开源项目 [OmniStudio](https://gitee.com/jwangkun/OmniStudio) 构建（GitHub：[kunpengtalk/OmniStudio](https://github.com/kunpengtalk/OmniStudio)），感谢原作者的杰出开源贡献——本项目的绝大多数核心能力都来自上游。
+
 ## 📄 许可证
 
 MIT — by lylguang。见 [LICENSE](LICENSE)。

@@ -110,7 +110,7 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
 
     case "launchCommand": {
       const modelOverride = typeof payload.model === "string" ? payload.model : undefined;
-      const result = ServerManager.getLaunchCommand(modelOverride);
+      const result = await ServerManager.getLaunchCommand(modelOverride);
       return { ok: true, data: result };
     }
 

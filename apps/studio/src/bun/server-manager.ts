@@ -93,15 +93,15 @@ export function checkBinaryExists() {
  * engine — built with a fresh unattached runtime so the live server is
  * untouched); otherwise the active model with the active engine.
  */
-export function getLaunchCommand(modelOverride?: string): { command: string; engine: InferenceEngine } {
+export async function getLaunchCommand(modelOverride?: string): Promise<{ command: string; engine: InferenceEngine }> {
   const active = getActiveEngine();
   if (modelOverride && existsSync(modelOverride)) {
     const fileName = modelOverride.split(/[\\/]/).pop() ?? modelOverride;
     const engine = resolveEngineForModel(fileName, active);
     const runtime = engine === active ? getBoundRuntime() : createRuntime(engine);
-    return { command: runtime.buildCommandLine(modelOverride), engine };
+    return { command: await runtime.buildCommandLine(modelOverride), engine };
   }
-  return { command: getBoundRuntime().buildCommandLine(modelOverride), engine: active };
+  return { command: await getBoundRuntime().buildCommandLine(modelOverride), engine: active };
 }
 
 export async function startServer() {

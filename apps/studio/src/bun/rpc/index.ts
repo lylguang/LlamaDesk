@@ -40,6 +40,8 @@ import * as AsrAudioCpp from "../asr-audiocpp";
 import type { AsrAudioCppModelInfo, AsrAudioCppStatus } from "../asr-audiocpp";
 import * as WhisperEngine from "../whisper-engine";
 import type { WhisperEngineInfo } from "../whisper-engine";
+import * as LlamaEngine from "../llama-engine";
+import type { LlamaEngineInfo } from "../llama-engine";
 import * as TTSModels from "../tts-models";
 import type { TTSModelInfo } from "../tts-models";
 import * as TTSLocal from "../tts-local";
@@ -136,6 +138,14 @@ export type AppRPC = {
       startServer: {
         params: undefined;
         response: { ok: boolean; error?: string };
+      };
+      getLlamaEngineInfo: {
+        params: undefined;
+        response: LlamaEngineInfo;
+      };
+      downloadLlamaEngine: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
       };
       stopServer: {
         params: undefined;
@@ -1015,6 +1025,17 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       startServer: async () => {
         return ServerManager.startServer();
+      },
+      getLlamaEngineInfo: async () => {
+        return LlamaEngine.getLlamaEngineInfo();
+      },
+
+      downloadLlamaEngine: async () => {
+        try {
+          return await LlamaEngine.downloadLlamaEngine();
+        } catch (e) {
+          return { ok: false, error: e instanceof Error ? e.message : String(e) };
+        }
       },
 
       stopServer: async () => {

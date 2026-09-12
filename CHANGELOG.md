@@ -4,14 +4,24 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
-## [未发布] / Unreleased
+## [0.0.7] - 2026-09-12
 
 ### Added / 新增
 
+- **同步上游 OmniStudio 36 个提交**：多实例控制台（可同时启动多个模型，各自端口）、备份与恢复（`.omnibackup` 打包 + 密码加密 + S3/WebDAV 远端）、在线模型市场双平台检索（HuggingFace + ModelScope）与格式筛选、知识库 / 记忆 / 技能管理 / MCP、视频生成、Agent 素材工具（`media_search` / `generate_image` / `generate_speech` / `generate_video`）、MLX 引擎修复等——逐条明细见下方 [0.0.7-canary.0] 小节。
+- **llama.cpp 引擎一键下载（LlamaDesk）**：设置 → 本地模型新增「引擎状态」安装行——自动解析 llama.cpp 最新带二进制的 nightly release，下载解压到用户引擎目录；启动时按 内置引擎 → 用户目录安装 → PATH 顺序解析二进制。
+- **安装包资产**：GitHub Release 新增免解压 `*-win-x64-LlamaDesk-Setup.exe` 独立安装器与三平台下载指引；发布说明改由平台指引 + CHANGELOG 对应版本小节生成。
+- **大模型基准测试（独立应用，重做）**（随上游）：
 - **大模型基准测试（独立应用，重做）**：从设置页标签升级为图标栏「基准测试」应用——左侧参数面板（模型快选 / 生成长度 / 并发请求数 / 上下文档位 1k–32k 扫描）+ 右侧结果区，侧栏沉淀**历史测试记录**（模型 · 平均 TPS · 时间，点击回放、可单删 / 清空）；测试改为**异步任务 + 轮询**模式（实时进度、可随时停止，取消时已完成档位仍入历史）；指标从 3 项扩到 9 项——TTFT / TPOT / 单流 TPS / 并发聚合吞吐 / Prefill 吞吐 / 精确输入输出 tokens（`stream_options.include_usage` + 预热请求，回退 chunk 计数）/ 成功失败数 / 总耗时，汇总卡展示平均与峰值；结果落库 `benchmark_records`（迁移 `0025_add_benchmark_records`，`kind` 字段为后续 MMLU / GSM8K 等本地能力评测脚本预留）。
 - **基准测试 · 能力评测（MMLU / CMMLU / GSM8K / MMLU-Pro）**：基准测试页新增「能力评测」模式——四个主流评测套件：MMLU（英文综合，57 科目 4 选 1，5-shot）、CMMLU（中文综合，67 科目，5-shot 中文指令）、GSM8K（数学推理，5-shot CoT + `####` 数字答案）、MMLU-Pro（14 科目 10 选 1，0-shot，2048 tokens 预算），题面构造与判分遵循各数据集官方评测协议；题库 JSONL（HuggingFace 公开数据集打包）首次使用时自动下载缓存到 `userData/eval-data`（双镜像源、字节数校验），之后离线可用；抽样按固定种子做类别配额（同题数结果可对比，0 = 全量），并发跑题 worker 池 + 实时正确率进度 + 可取消；结果区展示综合准确率大卡、答对 / 已答 / 失败数 / 耗时、**分科目得分条形列表**（≥60% 绿 / ≥30% 主色 / 其余红）；评测记录入同一历史库（`kind='eval'`，侧栏显示套件名 + 准确率），与速度记录并列回放；`<think>` 推理段自动剥离、中文「答案：X」提取兼容。
 - **能力评测 · 垂类套件（编程 / 写作 / 长上下文）**：新增四个垂类评测——**HumanEval 代码补全**（164 题，函数签名 + docstring 补全，提取生成代码后在本机 python3 沙箱执行单元测试判 pass@1，15 秒超时、临时文件即删、无 python3 时任务级报错）、**MBPP 编程实现**（500 题，自然语言题面 + assert 用例，同款沙箱执行判分）、**IFEval 指令写作**（540 题官方题库，25 种可编程校验指令——字数 / 句数 / 段落 / 禁词 / 词频 / 字母频次 / 大小写 / 引号包裹 / markdown 高亮 / bullet / JSON 整体 / 多段 Section / 占位符 / P.S. / 结尾短语 / 双响应 / 重复题面 / 约束选项 / 响应语言等，strict 口径全部指令通过才算对，HF 官方 + hf-mirror 双源下载）、**长文多针检索**（本地合成约 8k tokens 噪声长文埋 5 支「魔数」针，答案子串精确判分，**按针深度 ≤30% / 31–60% / ≥61% 分档统计**，直指 lost-in-the-middle 现象，无需下载题库）；套件列表数据驱动渲染，垂类附加说明随选中套件展示。
 - **基准测试 · 云端直连测速 + CLI**：测试目标支持「云端 API」——直接选择 `cloud_providers` 里的任一服务商按 id 直连（无需全局激活），模型列表联动填充；云 API 参数自适应（首 400 按错误文案降级 `max_tokens`→`max_completion_tokens`、去 `stream_options`，结果按 base 缓存）；新增 `omi benchmark` CLI——终端跑测速并与应用内共用同一任务单例与历史表（应用运行走控制 socket 实时显示进度，未运行时进程内直连 SQLite 兜底）。
+- **Windows 安装包修复（随上游）**：平台原生包声明到 optionalDependencies（Windows/Linux 载荷不再缺 sharp binding）；字体资源路径收敛（修复 Windows 安装包解包中断）。
+
+### Fixed / 修复
+
+- 上游：本地模型按仓库目录聚合（权重分片不再被当成独立模型）、新建知识库弹窗白屏、MLX 回复空白（思考流字段名 + 生成上限）、多条 system 消息合并（兼容 Qwen 模板）、云端模型列表逐个挑选。
+- LlamaDesk：合并后类型修复（`buildServedCommandLine` 改 async、ScrollArea 换 Appica `scrollbarVisibility`、i18n `engine.*` 重复 key 去重）。
 
 ## [0.0.7-canary.0] - 2026-09-12
 

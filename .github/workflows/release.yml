@@ -288,23 +288,31 @@ jobs:
             echo "prerelease=false" >> $GITHUB_OUTPUT
           fi
 
-      # 发布说明取 CHANGELOG 里对应版本的小节。仓库把 CHANGELOG 当成唯一真源在维护
-      # （中英双语、逐条写清"改了什么、为什么"），而此前 release 只挂一条自动生成的
-      # compare 链接，用户点进 Release 页看不到任何内容。
+      # 发布说明 = 平台下载指引 + CHANGELOG 里对应版本的小节。仓库把 CHANGELOG 当成
+      # 唯一真源在维护（中英双语、逐条写清"改了什么、为什么"），指引放在最前面方便用户直达安装包。
       - name: Build release notes from CHANGELOG
         id: notes
         run: |
           set -euo pipefail
           NOTES="$RUNNER_TEMP/release-notes.md"
+          {
+            echo "## 下载安装"
+            echo "- 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`"
+            echo "- 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）"
+            echo "- 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`"
+            echo ""
+          } > "$NOTES"
           VERSION="${RELEASE_TAG#v}"
+          SECTION="$RUNNER_TEMP/section.md"
           awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { inside = 1; next }
             inside && /^## \[/ { exit }
             inside { print }
-          ' CHANGELOG.md > "$NOTES" || true
-          if [ ! -s "$NOTES" ]; then
-            echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" > "$NOTES"
+          ' CHANGELOG.md > "$SECTION" || true
+          if [ ! -s "$SECTION" ]; then
+            echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" >> "$NOTES"
           fi
+          cat "$SECTION" >> "$NOTES"
           {
             echo ""
             echo "---"
@@ -317,11 +325,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          body: |
-            ## 下载安装
-            - 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`
-            - 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）
-            - 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`
           files: |
             llamadesk-darwin-arm64/*
             llamadesk-win-x64/*

@@ -3,15 +3,22 @@ import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
 import path from "path";
 import { existsSync, rmSync, copyFileSync, mkdirSync, appendFileSync } from "fs";
 
-import { db } from "../db";
+import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
 import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
 import { getImagesBaseDir, getUploadsBaseDir } from "../image-server";
 import { chatImageDir, chatImageUrl } from "../image-server";
+import { safeBaseName, safeJoin } from "../path-safety";
 import { processDocumentPages } from "../queue";
-import { updateState, type UpdateInfo } from "../updates";
+import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
+import * as ReleaseCheck from "../release-check";
+import type { ReleaseCheckResult } from "../../shared/release";
+import { getUserDataDir } from "../paths";
 import * as ServerManager from "../server-manager";
 import type { ServerStatus } from "../server-manager";
+import * as Served from "../model-servers";
+import type { ServedModelInfo, ServedModelsSnapshot } from "../../shared/served-models";
+import type { InferenceEngine } from "../../shared/engines";
 import * as Gateway from "../gateway";
 import type { GatewayStatus } from "../gateway";
 import { getSetupEnvironment, type SetupEnvironment } from "../setup-env";
@@ -19,18 +26,44 @@ import * as Chat from "../chat";
 import type { Conversation, ChatMessage, ChatStats } from "../chat";
 import * as Agent from "../agent";
 import type { AgentEventRow, AgentMode } from "../agent";
+import * as Mcp from "../mcp";
+import type { McpServerConfig } from "../mcp";
+import * as Memory from "../memory";
+import * as MemorySync from "../memory-sync";
+import type { MemoryCategory, MemoryEntry, MemoryEventEntry, MemoryStats, MemoryStatus } from "../../shared/memory";
+import type { MemorySyncResult, MemorySyncStatus } from "../memory-sync";
 import * as VoiceCall from "../voice-call";
 import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
 import * as RealtimeVoice from "../realtime-voice";
 import type { RealtimeProviderConfig } from "../realtime-voice";
 import * as Translate from "../translate";
 import { listChatModels, selectChatModel, type ChatModelOption } from "../chat-model";
+import * as CloudProviders from "../cloud-providers";
+import type { CloudModelEntry, CloudProviderInfo } from "../../shared/cloud-providers";
 import * as ModelScope from "../modelscope";
-import type { ModelScopeModel, ModelScopeFile } from "../modelscope";
+import * as HuggingFace from "../huggingface";
+import * as ModelScan from "../model-scan";
+import type {
+  MarketFile,
+  MarketSearchResult,
+  ModelSource,
+  SearchFormat,
+} from "../../shared/modelscope";
 import * as ModelStore from "../model-store";
 import type { InstalledModel } from "../model-store";
 import { getServerStats, type ServerStats } from "../stats";
-import { runBenchmark, type BenchmarkParams, type BenchmarkResult } from "../benchmark";
+import {
+  startBenchmark,
+  getBenchmarkRun,
+  cancelBenchmark,
+  listBenchmarkRecords,
+  deleteBenchmarkRecord,
+  clearBenchmarkRecords,
+  type BenchmarkParams,
+  type BenchmarkRunState,
+  type BenchmarkRecordRow,
+} from "../benchmark";
+import { listEvalSuites, type EvalSuiteInfo } from "../eval";
 import { downloadManager, type DownloadTask } from "../download-manager";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
@@ -52,6 +85,14 @@ import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
+import * as MediaSetup from "../media-setup";
+import type { MediaSetupCandidate, MediaSetupPayload } from "../media-setup";
+import * as VideoGen from "../video-gen";
+import type {
+  VideoGenConfig,
+  VideoRecordRow,
+  VideoGenBackend,
+} from "../video-gen";
 import * as PromptLib from "../prompt-library";
 import * as Up from "../user-prompt";
 import * as MlxGen from "../mlx-gen";
@@ -63,7 +104,38 @@ import type {
   MlxGenPhase,
 } from "../mlx-gen";
 import type { EdgeVoice } from "../edge-tts";
-import type { ModelCategory } from "../../shared/modelscope";
+import { filterModelIds, MODEL_CATEGORY_SETS, type ModelCategory } from "../../shared/modelscope";
+import * as Skills from "../skills";
+import type {
+  ToolInfo,
+  ManagedSkill,
+  SkillsShSkill,
+  PresetView,
+  ProjectView,
+  ProjectSkillView,
+  DiscoveredSkillGroup,
+  SkillsInstallProgress,
+} from "../../shared/skills";
+import type { BackupStatus as SkillsBackupStatus } from "../skills/git-backup";
+import type { SkillUpdateStatus as SkillUpdateStatusView } from "../skills/installer";
+import type { CentralInfo as SkillsCentralInfo } from "../skills/central-repo";
+import * as Knowledge from "../knowledge";
+import type { KbCitation, KbEventEntry, KbHit, KbIndexStats } from "../../shared/knowledge";
+import * as Backup from "../backup";
+import type {
+  BackupCreateRequest,
+  BackupDownloadRequest,
+  BackupEstimate,
+  BackupFinishedEvent,
+  BackupInspectResult,
+  BackupProgress,
+  BackupRemoteConfig,
+  BackupRemoteEntry,
+  BackupRestoreRequest,
+  BackupSummary,
+} from "../../shared/backup";
+
+export type GitPreviewItem = { relPath: string; name: string; description: string | null };
 
 /** 聊天附件允许的文本文件类型与大小上限（超限直接跳过）。 */
 const CHAT_TEXT_FILE_RE =
@@ -113,7 +185,7 @@ export type AppRPC = {
     requests: {
       getSettings: {
         params: undefined;
-        response: { configured: boolean; settings: Record<string, string> };
+        response: { configured: boolean; settings: Record<string, string>; platform: string };
       };
       updateSettings: {
         params: { settings: Record<string, string> };
@@ -126,6 +198,37 @@ export type AppRPC = {
       listRemoteModels: {
         params: { baseUrl?: string; apiKey?: string } | undefined;
         response: { ok: boolean; models: string[]; error?: string };
+      };
+      /** 模型云服务商管理（cloud_providers 表；激活行同步写回 VLLM_* 槽位）。 */
+      cloudProviderList: {
+        params: undefined;
+        response: { providers: CloudProviderInfo[]; activeId: string | null };
+      };
+      cloudProviderCreate: {
+        params: { presetId?: string; name?: string; baseUrl?: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      cloudProviderUpdate: {
+        params: {
+          id: string;
+          name?: string;
+          baseUrl?: string;
+          apiKey?: string;
+          models?: CloudModelEntry[];
+        };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderDelete: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderActivate: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      cloudProviderDeactivate: {
+        params: undefined;
+        response: { ok: boolean };
       };
       checkLlamaServer: {
         params: undefined;
@@ -157,7 +260,14 @@ export type AppRPC = {
       };
       getServerStatus: {
         params: undefined;
-        response: { status: ServerStatus; pid?: number; logs: string; error?: string };
+        response: {
+          status: ServerStatus;
+          pid?: number;
+          logs: string;
+          error?: string;
+          /** 端口上有没有活着的推理服务（外部启动的也算）：UI 据此决定要不要提示去控制台启动。 */
+          reachable: boolean;
+        };
       };
       getServerStats: {
         params: undefined;
@@ -165,6 +275,35 @@ export type AppRPC = {
       };
       clearServerLogs: {
         params: undefined;
+        response: { ok: boolean };
+      };
+      // 已启动模型（可同时驻留多个）：控制台列表 / 启动 / 卸载 / 单模型日志
+      listServedModels: {
+        params: undefined;
+        response: ServedModelsSnapshot;
+      };
+      startServedModel: {
+        params: { path: string; engine?: InferenceEngine };
+        response: { ok: boolean; error?: string; model?: ServedModelInfo };
+      };
+      stopServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      restartServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string; model?: ServedModelInfo };
+      };
+      setActiveServedModel: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      getServedModelLogs: {
+        params: { id: string };
+        response: { logs: string };
+      };
+      clearServedModelLogs: {
+        params: { id: string };
         response: { ok: boolean };
       };
       getGatewayStatus: {
@@ -214,7 +353,15 @@ export type AppRPC = {
         response: { document: DocumentFull | null };
       };
       openFileDialog: {
-        params: { allowedFileTypes?: string } | undefined;
+        params:
+          | {
+              allowedFileTypes?: string;
+              /** 选择目录（知识库批量导入等场景）。 */
+              canChooseDirectory?: boolean;
+              canChooseFiles?: boolean;
+              allowsMultipleSelection?: boolean;
+            }
+          | undefined;
         response: { paths: string[] };
       };
       addDocument: {
@@ -253,6 +400,26 @@ export type AppRPC = {
         params: undefined;
         response: undefined;
       };
+      /** 检查 GitHub 仓库最新 release（10 分钟缓存，force 跳过）。 */
+      checkReleaseUpdate: {
+        params: { force?: boolean };
+        response: ReleaseCheckResult;
+      };
+      /** 返回上次 release 检查结果（首屏展示用，从未检查为 null）。 */
+      getReleaseCheck: {
+        params: undefined;
+        response: ReleaseCheckResult | null;
+      };
+      /** 触发内置更新器检查 + 自动下载（状态经 updateStatus 广播）。 */
+      startAutoUpdate: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /** 用系统默认程序打开文件/目录（Finder / 资源管理器）。 */
+      openPath: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
       // Chat
       listConversations: {
         params: { app?: string } | undefined;
@@ -285,6 +452,8 @@ export type AppRPC = {
           images?: string[];
           webSearch?: boolean;
           files?: { name: string; content: string }[];
+          /** 挂载的知识库（检索注入 + 引用溯源）。 */
+          kbIds?: number[];
         };
         response: { ok: boolean; error?: string };
       };
@@ -306,6 +475,7 @@ export type AppRPC = {
           sourceLang?: string;
           targetLang: string;
           engine?: "model" | "google";
+          save?: boolean;
         };
         response: { text?: string; id?: number; error?: string };
       };
@@ -372,8 +542,8 @@ export type AppRPC = {
         response: { models: ChatModelOption[] };
       };
       selectChatModel: {
-        params: { type: "local" | "api"; value: string };
-        response: { ok: boolean; error?: string; restarting?: boolean };
+        params: { type: "local" | "api"; value: string; providerId?: string };
+        response: { ok: boolean; error?: string; needsStart?: boolean };
       };
       // Agent（Pi Agent Harness）
       sendAgentMessage: {
@@ -402,6 +572,127 @@ export type AppRPC = {
       listAgentTools: {
         params: { mode?: string } | undefined;
         response: { tools: { name: string; label: string; description: string }[] };
+      };
+
+      // -----------------------------------------------------------------
+      // MCP 服务器管理
+      // -----------------------------------------------------------------
+      /** 服务器列表 + 当前连接状态（缓存里活着的才算已连接）。 */
+      mcpListServers: {
+        params: undefined;
+        response: {
+          servers: (McpServerConfig & { status?: { connected: boolean; toolCount: number } })[];
+        };
+      };
+      /** 新建 / 编辑（带 id 为编辑）。 */
+      mcpSaveServer: {
+        params: { server: McpServerConfig };
+        response: { ok: boolean; server: McpServerConfig };
+      };
+      mcpDeleteServer: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      mcpSetServerEnabled: {
+        params: { id: number; enabled: boolean };
+        response: { ok: boolean };
+      };
+      /** 连接并枚举工具。带 id 用库内配置，否则用传入的临时配置（保存前预检）。 */
+      mcpTestServer: {
+        params: { server: McpServerConfig };
+        response: {
+          ok: boolean;
+          tools: { name: string; description: string }[];
+          error?: string;
+        };
+      };
+      /** 解析 Claude Desktop / Cursor 风格 mcp.json 文本，预览待导入服务器。 */
+      mcpParseJson: {
+        params: { text: string };
+        response: { ok: boolean; servers: McpServerConfig[]; error?: string };
+      };
+
+      // -----------------------------------------------------------------
+      // 记忆（所有 Agent 共享的长期记忆库）
+      // -----------------------------------------------------------------
+      /** 记忆列表（可按关键词 / 分类 / 状态过滤，置顶与重要度优先）。 */
+      memoryList: {
+        params:
+          | {
+              query?: string;
+              category?: MemoryCategory;
+              status?: MemoryStatus | "all" | "open";
+              limit?: number;
+            }
+          | undefined;
+        response: { memories: MemoryEntry[] };
+      };
+      /** 新建 / 编辑（带 id 为编辑）。 */
+      memorySave: {
+        params: {
+          memory: {
+            id?: number;
+            content: string;
+            category?: MemoryCategory;
+            tags?: string[];
+            pinned?: boolean;
+            importance?: number;
+          };
+        };
+        response: { ok: boolean; memory: MemoryEntry };
+      };
+      memoryDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      memorySetPinned: {
+        params: { id: number; pinned: boolean };
+        response: { ok: boolean };
+      };
+      /** 更改生命周期状态：确认待确认记忆 / 归档 / 恢复。 */
+      memorySetStatus: {
+        params: { id: number; status: MemoryStatus };
+        response: { ok: boolean };
+      };
+      /** 待用户确认的 Agent 写入（开启「写入需确认」后出现）。 */
+      memoryPending: {
+        params: undefined;
+        response: { memories: MemoryEntry[] };
+      };
+      /** 记忆统计（条数分布、检索命中率、合并与拦截次数、向量化进度）。 */
+      memoryStats: {
+        params: undefined;
+        response: { stats: MemoryStats };
+      };
+      /** 记忆审计流水（写入 / 合并 / 取代 / 归档 / 删除）。 */
+      memoryEvents: {
+        params: { limit?: number; memoryId?: number } | undefined;
+        response: { events: MemoryEventEntry[] };
+      };
+      /** 生命周期维护：归档过期 / 长期未用的低价值记忆，补向量。 */
+      memoryMaintain: {
+        params: undefined;
+        response: { hashed: number; expired: number; archived: number; consolidated: number; embedded: number };
+      };
+      /** 导出全部记忆（JSON，可备份 / 迁移）。 */
+      memoryExport: {
+        params: undefined;
+        response: { version: number; exportedAt: number; memories: MemoryEntry[] };
+      };
+      /** 导入记忆（逐条判重合并）。 */
+      memoryImport: {
+        params: { payload: unknown };
+        response: { imported: number; merged: number; rejected: number; errors: string[] };
+      };
+      /** 外部 Agent 同步状态（各工具上下文文件是否已含托管区块）。 */
+      memorySyncStatus: {
+        params: undefined;
+        response: { targets: MemorySyncStatus[] };
+      };
+      /** 一键同步 / 移除：把记忆写入（或从）目标工具的上下文文件托管区块。 */
+      memorySyncApply: {
+        params: { tools: string[]; remove?: boolean };
+        response: { results: MemorySyncResult[] };
       };
       getAgentWorkspace: {
         params: undefined;
@@ -475,21 +766,31 @@ export type AppRPC = {
         params: { ref: string };
         response: { ok: boolean };
       };
-      // ModelScope search / install
-      searchModelScope: {
-        params: { query: string; page?: number };
-        response: { models: ModelScopeModel[]; total: number };
+      // 模型市场：检索 / 列仓库文件（ModelScope 与 HuggingFace 共用同一组接口，
+      // 由 `source` 决定请求打到哪个平台，返回值里的 source/formats 决定 UI 怎么标注）。
+      searchMarketModels: {
+        params: { query: string; page?: number; source?: ModelSource; format?: SearchFormat };
+        response: MarketSearchResult;
       };
-      listModelScopeFiles: {
-        params: { repo: string };
-        response: { files: ModelScopeFile[] };
+      listModelFiles: {
+        params: { repo: string; source?: ModelSource };
+        response: { files: MarketFile[] };
       };
       listDownloads: {
         params: undefined;
         response: { tasks: DownloadTask[] };
       };
       startModelDownload: {
-        params: { repo: string; fileName: string; category?: ModelCategory; source?: "modelscope" | "huggingface" };
+        params: {
+          repo: string;
+          fileName: string;
+          category?: ModelCategory;
+          source?: ModelSource;
+          /** 市场列表已知的字节数：用于「小文件先下」排队，省一次探测。 */
+          size?: number | null;
+          /** 用户单独点的文件插队优先（批量下载不传）。 */
+          explicit?: boolean;
+        };
         response: { task: DownloadTask };
       };
       pauseModelDownload: {
@@ -522,7 +823,7 @@ export type AppRPC = {
       };
       deleteLocalModel: {
         params: { path: string };
-        response: { ok: boolean };
+        response: { ok: boolean; error?: string; freed?: number };
       };
       importModelFile: {
         params: { sourcePath: string };
@@ -530,15 +831,69 @@ export type AppRPC = {
       };
       getModelDirs: {
         params: undefined;
-        response: { dirs: string[] };
+        response: {
+          dirs: string[];
+          /** 每个扫描目录的详情（模型数 / 体积），用于"本地模型目录"管理。 */
+          entries: { path: string; kind: "primary" | "extra" | "hf-cache"; exists: boolean; count: number; size: number }[];
+        };
+      };
+      scanModelDir: {
+        params: { dir: string };
+        response: {
+          ok: boolean;
+          error?: string;
+          count: number;
+          totalSize: number;
+          files: { name: string; repo: string; size: number; kind: string }[];
+        };
+      };
+      addModelDir: {
+        params: { dir: string };
+        response: { ok: boolean; error?: string; count?: number };
+      };
+      removeModelDir: {
+        params: { dir: string };
+        response: { ok: boolean; error?: string };
       };
       getAboutInfo: {
         params: undefined;
-        response: { version: string; channel: string; sessionStartedAt: number; basePath: string };
+        response: {
+          version: string;
+          channel: string;
+          sessionStartedAt: number;
+          basePath: string;
+          dataDir: string;
+        };
       };
-      runBenchmark: {
+      // Benchmark（速度扫描 + 能力评测：异步任务 + 历史记录）
+      startBenchmark: {
         params: BenchmarkParams;
-        response: BenchmarkResult;
+        response: { runId: string } | { error: string };
+      };
+      getBenchmarkRun: {
+        params: { runId: string };
+        response: { run: BenchmarkRunState | null };
+      };
+      cancelBenchmark: {
+        params: { runId: string };
+        response: { ok: boolean };
+      };
+      listBenchmarkRecords: {
+        params: undefined;
+        response: { records: BenchmarkRecordRow[] };
+      };
+      deleteBenchmarkRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      clearBenchmarkRecords: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /** 能力评测套件清单（含题库下载状态）。 */
+      getEvalSuites: {
+        params: undefined;
+        response: { suites: EvalSuiteInfo[] };
       };
       // Voice (TTS / ASR / voice cloning)
       listVoiceRecords: {
@@ -613,8 +968,9 @@ export type AppRPC = {
         response: { ok: boolean };
       };
       listProviderModels: {
-        params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        /**: `kind` = 这个场景要的模型分类（tts / asr / image / chat）：只列该类模型。 */
+        params: { base?: string; apiKey?: string; kind?: ModelCategory } | undefined;
+        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       // Local ASR (whisper.cpp engine + remote fallback)
       listAsrModels: {
@@ -765,7 +1121,7 @@ export type AppRPC = {
       };
       listOcrProviderModels: {
         params: { base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        response: { models: string[]; relaxed?: boolean; error?: string };
       };
       // PaddleOCR（本地 PP-OCRv6 引擎）
       getPpOcrStatus: {
@@ -853,7 +1209,74 @@ export type AppRPC = {
       };
       listImageGenModels: {
         params: { backend?: ImageGenBackend; base?: string; apiKey?: string } | undefined;
-        response: { models: string[]; error?: string };
+        response: { models: string[]; relaxed?: boolean; error?: string };
+      };
+      /** Agent 生图弹窗：用户点了确认 / 取消后回传，主进程继续那次工具调用。 */
+      resolveMediaSetup: {
+        params: {
+          id: string;
+          action: "confirm" | "cancel";
+          backend?: string;
+          model?: string;
+          apiBase?: string;
+          apiKey?: string;
+          comfyBase?: string;
+        };
+        response: { ok: boolean };
+      };
+      /** Agent 生图弹窗里的「扫描模型」：用表单当前值探测，不落盘配置。 */
+      scanMediaSetupCandidates: {
+        params: { kind?: string; backend?: string; base?: string; apiKey?: string } | undefined;
+        response: { candidates: MediaSetupCandidate[]; error?: string };
+      };
+      // AI 视频生成（comfyui 本地 / minimax / seedance 云端，提交任务 + 轮询）
+      submitVideoGeneration: {
+        params: {
+          prompt: string;
+          negativePrompt?: string;
+          duration?: number;
+          ratio?: string;
+          resolution?: string;
+          seed?: number;
+          steps?: number;
+          cfg?: number;
+          model?: string;
+          /** 图生视频首帧（images 目录内 ref，仅云端后端支持）。 */
+          firstFrameRef?: string;
+          watermark?: boolean;
+          config?: Partial<VideoGenConfig>;
+        };
+        response: { record?: VideoRecordRow; error?: string };
+      };
+      pollVideoRecords: {
+        params: { ids: number[] };
+        response: { records: VideoRecordRow[] };
+      };
+      listVideoRecords: {
+        params: { limit?: number } | undefined;
+        response: { records: VideoRecordRow[] };
+      };
+      deleteVideoRecord: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      getVideoGenConfig: {
+        params: undefined;
+        response: { config: VideoGenConfig };
+      };
+      saveVideoGenConfig: {
+        params: Partial<VideoGenConfig>;
+        response: { ok: boolean };
+      };
+      listVideoGenModels: {
+        params: { backend?: VideoGenBackend; base?: string } | undefined;
+        response: {
+          models: string[];
+          checkpoints: string[];
+          clips: string[];
+          vaes: string[];
+          error?: string;
+        };
       };
       // MLX 本地生图引擎（mflux）
       getMlxGenStatus: {
@@ -897,6 +1320,480 @@ export type AppRPC = {
         params: undefined;
         response: { active: { modelId: string; quantize: number } | null };
       };
+
+      // -----------------------------------------------------------------
+      // Skills 管理（参照 skills-manager 移植）
+      // -----------------------------------------------------------------
+      /** 工具列表（53 内置 + 自定义，含安装检测/启停/中央库同根标记）。 */
+      skillsGetTools: {
+        params: undefined;
+        response: { tools: ToolInfo[] };
+      };
+      skillsSetToolEnabled: {
+        params: { tool: string; enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSetAllToolsEnabled: {
+        params: { enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSetCustomToolPath: {
+        params: { tool: string; path: string | null };
+        response: { ok: boolean };
+      };
+      skillsAddCustomTool: {
+        params: { key: string; name: string; skillsDir: string; projectSkillsDir?: string; category: "coding" | "lobster" };
+        response: { ok: boolean; error?: string };
+      };
+      skillsRemoveCustomTool: {
+        params: { key: string };
+        response: { ok: boolean };
+      };
+      /** 中央库信息（路径 / 技能数 / 体积 / 警告）。 */
+      skillsGetCentralInfo: {
+        params: undefined;
+        response: SkillsCentralInfo;
+      };
+      skillsSetCentralPath: {
+        params: { path: string };
+        response: { ok: boolean; info: SkillsCentralInfo };
+      };
+      /** 重建索引（磁盘 → DB 收编，git pull 恢复后调用）。 */
+      skillsReindex: {
+        params: undefined;
+        response: { added: string[]; removed: string[] };
+      };
+      /** 我的技能列表（含 target 实时同步状态）。 */
+      skillsList: {
+        params: undefined;
+        response: { skills: ManagedSkill[] };
+      };
+      skillsGetDoc: {
+        params: { skillId: string };
+        response: { markdown: string | null };
+      };
+      skillsDelete: {
+        params: { ids: string[] };
+        response: { ok: boolean; errors: string[] };
+      };
+      skillsSetTags: {
+        params: { skillId: string; tags: string[] };
+        response: { ok: boolean };
+      };
+      skillsGetAllTags: {
+        params: undefined;
+        response: { tags: string[] };
+      };
+      skillsRenameTag: {
+        params: { from: string; to: string };
+        response: { ok: boolean };
+      };
+      skillsDeleteTag: {
+        params: { tag: string };
+        response: { ok: boolean };
+      };
+      /** skills.sh 市场：榜单（alltime/trending/hot）。 */
+      skillsMarketLeaderboard: {
+        params: { board: "alltime" | "trending" | "hot" };
+        response: { skills: SkillsShSkill[] };
+      };
+      skillsMarketSearch: {
+        params: { query: string; limit?: number };
+        response: { skills: SkillsShSkill[] };
+      };
+      skillsInstallFromMarket: {
+        params: { source: string; skillId: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsCancelInstall: {
+        params: { ref: string };
+        response: { ok: boolean };
+      };
+      /** Git URL 导入：预览仓库内的全部 skill 目录。 */
+      skillsGitPreview: {
+        params: { url: string };
+        response: { ok: boolean; tempDir?: string; skills?: GitPreviewItem[]; error?: string };
+      };
+      skillsGitConfirm: {
+        params: { url: string; tempDir: string; items: { relPath: string; name: string }[] };
+        response: { ok: boolean; installed: string[]; errors: string[] };
+      };
+      skillsGitCancelPreview: {
+        params: { tempDir: string };
+        response: { ok: boolean };
+      };
+      /** 本地导入：目录 / .zip / .skill。 */
+      skillsInstallLocal: {
+        params: { path: string; name?: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsBatchImportFolder: {
+        params: { path: string };
+        response: { installed: string[]; errors: string[] };
+      };
+      skillsCheckUpdates: {
+        params: { ids?: string[] };
+        response: { statuses: SkillUpdateStatusView[] };
+      };
+      skillsUpdateSkill: {
+        params: { skillId: string };
+        response: { ok: boolean; error?: string; unchanged?: boolean };
+      };
+      /** 扫描已启用工具目录里已有的技能（收编用）。 */
+      skillsScanDiscovered: {
+        params: undefined;
+        response: { groups: DiscoveredSkillGroup[] };
+      };
+      skillsImportDiscovered: {
+        params: { name: string; paths: string[]; removeOriginal: boolean };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsImportAllDiscovered: {
+        params: { groups: DiscoveredSkillGroup[]; removeOriginal: boolean };
+        response: { installed: string[]; errors: string[] };
+      };
+      /** 同步：技能 → 工具（needConfirm = 目标被外部目录占用）。 */
+      skillsSyncToTool: {
+        params: { skillId: string; tool: string; overwrite?: boolean };
+        response: { ok: boolean; error?: string; needConfirm?: boolean };
+      };
+      skillsUnsyncFromTool: {
+        params: { skillId: string; tool: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsGetSyncMode: {
+        params: undefined;
+        response: { mode: "symlink" | "copy" };
+      };
+      skillsSetSyncMode: {
+        params: { mode: "symlink" | "copy" };
+        response: { ok: boolean };
+      };
+      /** 场景（预设）。 */
+      skillsListPresets: {
+        params: undefined;
+        response: { presets: PresetView[] };
+      };
+      skillsCreatePreset: {
+        params: { name: string; description?: string | null; icon?: string | null };
+        response: { id: string };
+      };
+      skillsUpdatePreset: {
+        params: { id: string; name: string; description?: string | null; icon?: string | null };
+        response: { ok: boolean };
+      };
+      skillsDeletePreset: {
+        params: { id: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsAddSkillsToPreset: {
+        params: { presetId: string; skillIds: string[] };
+        response: { ok: boolean };
+      };
+      skillsRemoveSkillFromPreset: {
+        params: { presetId: string; skillId: string };
+        response: { ok: boolean };
+      };
+      skillsApplyPreset: {
+        params: { presetId: string };
+        response: { ok: boolean; deployed: number; undeployed: number; errors: string[] };
+      };
+      skillsApplyPresetToAgents: {
+        params: { presetId: string; mode: "add" | "remove" };
+        response: { ok: boolean; count: number; errors: string[] };
+      };
+      skillsTogglePresetSkillTool: {
+        params: { presetId: string; skillId: string; tool: string; enabled: boolean };
+        response: { ok: boolean; error?: string };
+      };
+      skillsSetActivePreset: {
+        params: { presetId: string };
+        response: { ok: boolean };
+      };
+      /** Git 备份。 */
+      skillsBackupStatus: {
+        params: undefined;
+        response: { status: SkillsBackupStatus };
+      };
+      skillsBackupInit: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupSetRemote: {
+        params: { url: string; pat?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupCommit: {
+        params: { message?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupPush: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupPull: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      skillsBackupSetAuto: {
+        params: { enabled: boolean };
+        response: { ok: boolean };
+      };
+      skillsSnapshots: {
+        params: undefined;
+        response: { snapshots: { tag: string; date: string; subject: string }[] };
+      };
+      skillsCreateSnapshot: {
+        params: { name?: string };
+        response: { ok: boolean; tag?: string; error?: string };
+      };
+      skillsRestoreSnapshot: {
+        params: { tag: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsResolveConflict: {
+        params: { keep: "local" | "remote" };
+        response: { ok: boolean; error?: string };
+      };
+      skillsSizeReport: {
+        params: undefined;
+        response: { totalBytes: number; oversized: { id: string; bytes: number }[] };
+      };
+      /** 项目级管理。 */
+      skillsListProjects: {
+        params: undefined;
+        response: { projects: ProjectView[] };
+      };
+      skillsAddProject: {
+        params: { path: string };
+        response: { ok: boolean; id?: string; error?: string; created?: string[] };
+      };
+      skillsRemoveProject: {
+        params: { id: string };
+        response: { ok: boolean };
+      };
+      skillsScanProjects: {
+        params: { root: string };
+        response: { projects: { path: string; agentDirs: string[] }[] };
+      };
+      skillsGetProjectSkills: {
+        params: { projectId: string };
+        response: { skills: ProjectSkillView[]; agentDirs: string[] };
+      };
+      skillsProjectImportToCenter: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsProjectExportFromCenter: {
+        params: { projectId: string; skillId: string; agentRel?: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsProjectUpdateToCenter: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; id?: string; error?: string };
+      };
+      skillsProjectToggleSkill: {
+        params: { projectId: string; relDir: string; enabled: boolean };
+        response: { ok: boolean; error?: string };
+      };
+      skillsProjectDeleteSkill: {
+        params: { projectId: string; relDir: string };
+        response: { ok: boolean; error?: string };
+      };
+      skillsGetProjectSkillDoc: {
+        params: { projectId: string; relDir: string };
+        response: { markdown: string | null };
+      };
+      /** 在系统文件管理器中打开目录（path="central" 时打开中央库内 skillId 子目录）。 */
+      skillsOpenFolder: {
+        params: { path: string; skillId?: string };
+        response: { ok: boolean };
+      };
+      // ---- 知识库（本地 RAG） ----
+      kbList: {
+        params: undefined;
+        response: { kbs: Knowledge.KbView[] };
+      };
+      kbCreate: {
+        params: { name: string; description?: string; embeddingModel?: string; rerankModel?: string };
+        response: { kb: Knowledge.KbView };
+      };
+      kbUpdate: {
+        params: { id: number; patch: Knowledge.KbUpdatePatch };
+        response: { kb: Knowledge.KbView; embeddingsReset: boolean };
+      };
+      kbDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbDocList: {
+        params: { kbId: number };
+        response: { docs: Knowledge.KbDocView[] };
+      };
+      kbAddFiles: {
+        params: { kbId: number; paths: string[] };
+        response: { docs: Knowledge.KbDocView[] };
+      };
+      kbAddFolder: {
+        params: { kbId: number; path: string };
+        response: { docs: Knowledge.KbDocView[]; skipped: number };
+      };
+      kbAddNote: {
+        params: { kbId: number; title: string; content: string };
+        response: { doc: Knowledge.KbDocView };
+      };
+      kbAddWeb: {
+        params: { kbId: number; url: string };
+        response: { doc: Knowledge.KbDocView };
+      };
+      kbDocDelete: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbDocReingest: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      kbChunks: {
+        params: { docId: number };
+        response: { chunks: Knowledge.KbChunkView[] };
+      };
+      kbEmbedMissing: {
+        params: { kbId: number };
+        response: { ok: boolean; embedded?: number; error?: string };
+      };
+      kbRecall: {
+        params: { kbIds: number[]; query: string; topK?: number };
+        response: { hits: KbHit[]; notes: string[] };
+      };
+      kbTestEmbedding: {
+        params: { base?: string; apiKey?: string; model: string };
+        response: { ok: boolean; dim?: number; error?: string };
+      };
+      kbEmbeddingModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: Knowledge.KbModelCandidates;
+      };
+      kbTestRerank: {
+        params: { base?: string; apiKey?: string; model: string };
+        response: { ok: boolean; error?: string };
+      };
+      kbRerankModels: {
+        params: { base?: string; apiKey?: string } | undefined;
+        response: Knowledge.KbModelCandidates;
+      };
+      /** 审计流水（谁在什么时候导入/删除/检索了什么）+ 各动作计数。 */
+      kbEvents: {
+        params: { kbId?: number; limit?: number } | undefined;
+        response: { events: KbEventEntry[]; counts: Record<string, number> };
+      };
+      /** 摄取队列概览：排队 / 执行中 / 已失败。 */
+      kbQueueStats: {
+        params: undefined;
+        response: { queued: number; running: number; failed: number };
+      };
+      /** 已加载检索索引的规模与内存占用（治理页展示）。 */
+      kbIndexStats: {
+        params: undefined;
+        response: { indexes: KbIndexStats[] };
+      };
+      /** 整库导出到数据目录 kb-exports/（可选带向量）。 */
+      kbExport: {
+        params: { kbId: number; includeEmbeddings?: boolean };
+        response: { path: string; bytes: number; docs: number; chunks: number };
+      };
+      /** 从导出 JSON 导入为新库（不覆盖既有数据）。 */
+      kbImport: {
+        params: { json: string; name?: string };
+        response: { kb: Knowledge.KbView; docs: number; chunks: number; embedded: number };
+      };
+      /** 失败文档重新入队（沿用原作业，不清零重试次数）。 */
+      kbDocRetry: {
+        params: { id: number };
+        response: { ok: boolean };
+      };
+      /** 在系统文件管理器中打开导出目录。 */
+      kbOpenExportDir: {
+        params: undefined;
+        response: { ok: boolean; path: string };
+      };
+      /** 全局备份 / 恢复（设置 → 数据 → 备份与恢复）。 */
+      backupList: {
+        params: { dir?: string } | undefined;
+        response: { dir: string; backups: BackupSummary[] };
+      };
+      /** 各作用域当前体积 / 行数估算，创建前预览用。 */
+      backupEstimate: {
+        params: undefined;
+        response: BackupEstimate;
+      };
+      /** 备份目录 + 进行中的任务（刷新页面后仍能显示进度）。 */
+      backupOverview: {
+        params: undefined;
+        response: { dir: string; appVersion: string; active: BackupProgress | null };
+      };
+      backupChooseDir: {
+        params: undefined;
+        response: { dir: string | null; error?: string; freeBytes?: number };
+      };
+      /** 选一个 .omnibackup 文件（恢复来源）。 */
+      backupChooseFile: {
+        params: undefined;
+        response: { path: string | null };
+      };
+      /** 预览备份内容；不落地、不改动任何数据。 */
+      backupInspect: {
+        params: { path: string };
+        response: BackupInspectResult;
+      };
+      /** 启动创建任务：立即返回 taskId，进度与结果走 backupProgress / backupFinished 事件。 */
+      backupCreate: {
+        params: BackupCreateRequest;
+        response: { taskId: string };
+      };
+      /** 启动恢复任务（破坏性：覆盖所选作用域，默认先自动备份当前数据）。 */
+      backupRestore: {
+        params: BackupRestoreRequest;
+        response: { taskId: string };
+      };
+      backupCancel: {
+        params: { taskId: string };
+        response: { ok: boolean };
+      };
+      backupDelete: {
+        params: { path: string; dir?: string };
+        response: { ok: boolean; error?: string };
+      };
+      backupReveal: {
+        params: { path: string };
+        response: { ok: boolean };
+      };
+      /** 远端存储（S3 / WebDAV）配置。 */
+      backupRemoteGet: {
+        params: undefined;
+        response: { config: BackupRemoteConfig; configured: boolean };
+      };
+      backupRemoteSave: {
+        params: { config: BackupRemoteConfig };
+        response: { ok: boolean; error?: string };
+      };
+      backupRemoteTest: {
+        params: undefined;
+        response: { ok: boolean; error?: string; detail?: string };
+      };
+      backupRemoteList: {
+        params: undefined;
+        response: { entries: BackupRemoteEntry[]; error?: string };
+      };
+      /** 远端备份下载到本地（长任务，进度走 backupProgress 事件）。 */
+      backupRemoteDownload: {
+        params: BackupDownloadRequest;
+        response: { taskId: string };
+      };
+      backupRemoteDelete: {
+        params: { fileName: string };
+        response: { ok: boolean; error?: string };
+      };
     };
     messages: {};
   }>;
@@ -907,6 +1804,10 @@ export type AppRPC = {
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
+      /** 已启动模型列表变化（启动 / 就绪 / 出错 / 卸载）：整份快照推送。 */
+      servedModelsChanged: ServedModelsSnapshot;
+      /** 某个已启动模型的日志增量（按 id 区分，控制台里各自一个日志窗口）。 */
+      servedModelLog: { id: string; text: string };
       chatChunk: {
         conversationId: number;
         messageId: number;
@@ -919,9 +1820,15 @@ export type AppRPC = {
         content: string;
         reasoning?: string;
         error?: string;
+        /** 知识库引用溯源（挂了知识库的回答才有）。 */
+        citations?: KbCitation[];
       };
+      /** 知识库数据变化（摄取进度/删除/向量补齐），前端据此刷新列表。 */
+      knowledgeChanged: { kbId?: number; docId?: number };
       chatStats: ChatStats;
       agentEvent: AgentEventRow;
+      /** Agent 生图前需要用户介入（配后端 / 选模型）：界面弹窗，用户点确认后回传结果。 */
+      mediaSetup: MediaSetupPayload;
       voicecallPartial: { conversationId: number; text: string };
       voicecallUtterance: { conversationId: number; messageId: number; text: string };
       voicecallState: { conversationId: number; phase: VoiceCallPhase };
@@ -956,8 +1863,17 @@ export type AppRPC = {
       ppOcrModelProgress: PpOcr.PpOcrModelProgress;
       /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
       tesseractInstallLog: { text: string };
+      /** Skills 安装进度（市场/Git/更新），实时推送。 */
+      skillsInstallProgress: SkillsInstallProgress;
+      /** Skills 中央库发生变化（外部编辑/git pull/安装同步完成），前端刷新列表。 */
+      skillsChanged: { reason?: string };
       /** CLI（`omi`）请求跳转到某个页面：models / settings / server / stats / chat / index。 */
       navigate: { path: string };
+      /** 全局备份 / 恢复进度（节流推送）与终态。 */
+      backupProgress: BackupProgress;
+      backupFinished: BackupFinishedEvent;
+      /** 备份文件列表发生变化（创建 / 删除 / 恢复完成）。 */
+      backupChanged: { reason?: string };
     };
   }>;
 };
@@ -971,6 +1887,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getSettings: async () => ({
         configured: isConfigured(),
         settings: getAllSettings(),
+        // 主进程平台信息，供 UI 做 macOS 专属引擎（MLX）的门控。
+        platform: process.platform,
       }),
 
       updateSettings: async ({ settings }) => {
@@ -1015,6 +1933,19 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         }
       },
 
+      cloudProviderList: async () => CloudProviders.listCloudProviders(),
+
+      cloudProviderCreate: async (params) => CloudProviders.createCloudProvider(params ?? {}),
+
+      cloudProviderUpdate: async (params) =>
+        CloudProviders.updateCloudProvider(params.id, params ?? {}),
+
+      cloudProviderDelete: async ({ id }) => CloudProviders.deleteCloudProvider(id),
+
+      cloudProviderActivate: async ({ id }) => CloudProviders.activateCloudProvider(id),
+
+      cloudProviderDeactivate: async () => CloudProviders.deactivateCloudProvider(),
+
       checkLlamaServer: async () => {
         return ServerManager.checkBinaryExists();
       },
@@ -1048,11 +1979,14 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getServerStatus: async () => {
+        const status = ServerManager.getStatus();
         return {
-          status: ServerManager.getStatus(),
+          status,
           pid: ServerManager.getPid(),
           logs: ServerManager.getLogs(),
           error: ServerManager.getLastError() || undefined,
+          // 有实例在跑就不用探测；否则探一次端口，区分「没启动」和「外部服务在跑」。
+          reachable: status === "running" ? true : await ServerManager.probeLocalServer(),
         };
       },
 
@@ -1066,6 +2000,37 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       clearServerLogs: async () => {
         ServerManager.clearLogs();
+        return { ok: true };
+      },
+
+      listServedModels: async () => {
+        return Served.getServedModels();
+      },
+
+      startServedModel: async ({ path, engine }) => {
+        const result = await Served.startServedModel({ model: path, engine });
+        return { ok: result.ok, error: result.error, model: result.model };
+      },
+
+      stopServedModel: async ({ id }) => {
+        return Served.stopServedModel(id);
+      },
+
+      restartServedModel: async ({ id }) => {
+        const result = await Served.restartServedModel(id);
+        return { ok: result.ok, error: result.error, model: result.model };
+      },
+
+      setActiveServedModel: async ({ id }) => {
+        return Served.setActiveServedId(id);
+      },
+
+      getServedModelLogs: async ({ id }) => {
+        return { logs: Served.getServedModelLogs(id) };
+      },
+
+      clearServedModelLogs: async ({ id }) => {
+        Served.clearServedModelLogs(id);
         return { ok: true };
       },
 
@@ -1230,12 +2195,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       openFileDialog: async (params) => {
-        const allowedFileTypes = params?.allowedFileTypes;
+        const canChooseDirectory = params?.canChooseDirectory === true;
         const paths = await Utils.openFileDialog({
-          allowedFileTypes: allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif",
-          canChooseFiles: true,
-          canChooseDirectory: false,
-          allowsMultipleSelection: true,
+          allowedFileTypes: canChooseDirectory ? undefined : (params?.allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif"),
+          canChooseFiles: params?.canChooseFiles ?? true,
+          canChooseDirectory,
+          allowsMultipleSelection: params?.allowsMultipleSelection ?? true,
         });
         return { paths: (paths ?? []).filter((p) => p && p.length > 0) };
       },
@@ -1308,9 +2273,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       saveImageToDownloads: async ({ url, filename }) => {
         try {
           const parsed = new URL(url);
-          const filePath = path.join(getImagesBaseDir(), decodeURIComponent(parsed.pathname));
-          if (!existsSync(filePath)) return { ok: false };
-          const dest = path.join(Utils.paths.downloads, filename);
+          // 源路径（URL 里可能带 %2f..%2f）与目标文件名都来自调用方，双向都要限位。
+          const ref = decodeURIComponent(parsed.pathname).replace(/^\/+/, "");
+          const filePath = safeJoin(getImagesBaseDir(), ref);
+          if (!filePath || !existsSync(filePath)) return { ok: false };
+          const name = safeBaseName(filename);
+          if (!name) return { ok: false };
+          const dest = path.join(Utils.paths.downloads, name);
           copyFileSync(filePath, dest);
           return { ok: true };
         } catch {
@@ -1371,6 +2340,34 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         Updater.applyUpdate();
       },
 
+      checkReleaseUpdate: async ({ force }) => {
+        return ReleaseCheck.checkGitHubRelease(force === true);
+      },
+
+      getReleaseCheck: async () => {
+        return ReleaseCheck.getReleaseCheckResult();
+      },
+
+      startAutoUpdate: async () => {
+        void checkForUpdate();
+        return { ok: true };
+      },
+
+      openPath: async ({ path: target }) => {
+        try {
+          const cmd =
+            process.platform === "darwin"
+              ? ["open", target]
+              : process.platform === "win32"
+                ? ["cmd", "/c", "start", "", target]
+                : ["xdg-open", target];
+          Bun.spawn(cmd, { stdout: "ignore", stderr: "ignore" });
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
       // Chat
       listConversations: async (params) => {
         return { conversations: Chat.listConversations(params?.app) };
@@ -1398,8 +2395,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return Chat.setConversationPinned(id, pinned);
       },
 
-      sendChatMessage: async ({ conversationId, content, images, webSearch, files }) => {
-        return Chat.sendMessage(conversationId, content, images ?? [], { webSearch, files });
+      sendChatMessage: async ({ conversationId, content, images, webSearch, files, kbIds }) => {
+        return Chat.sendMessage(conversationId, content, images ?? [], { webSearch, files, kbIds });
       },
 
       deleteMessage: async ({ conversationId, messageId }) => {
@@ -1482,8 +2479,8 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return listChatModels();
       },
 
-      selectChatModel: async ({ type, value }) => {
-        return selectChatModel(type, value);
+      selectChatModel: async ({ type, value, providerId }) => {
+        return selectChatModel(type, value, providerId);
       },
 
       // Agent（Pi Agent Harness）
@@ -1512,7 +2509,104 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       listAgentTools: async (params) => {
         const mode = params?.mode as AgentMode | undefined;
-        return { tools: Agent.listAgentTools(mode) };
+        return { tools: await Agent.listAgentTools(mode) };
+      },
+
+      // MCP 服务器管理
+      mcpListServers: async () => {
+        const statuses = Mcp.mcpConnectionStatus();
+        const servers = Mcp.listMcpServers().map((s) =>
+          s.id && statuses[s.id] ? { ...s, status: statuses[s.id] } : s,
+        );
+        return { servers };
+      },
+      mcpSaveServer: async ({ server }) => {
+        const saved = Mcp.upsertMcpServer(server);
+        return { ok: true, server: saved };
+      },
+      mcpDeleteServer: async ({ id }) => {
+        Mcp.deleteMcpServer(id);
+        return { ok: true };
+      },
+      mcpSetServerEnabled: async ({ id, enabled }) => {
+        Mcp.setMcpServerEnabled(id, enabled);
+        return { ok: true };
+      },
+      mcpTestServer: async ({ server }) => {
+        const result = await Mcp.testMcpServer(server);
+        return {
+          ok: result.ok,
+          tools: result.tools.map((t) => ({ name: t.name, description: t.description })),
+          error: result.error,
+        };
+      },
+      mcpParseJson: async ({ text }) => {
+        try {
+          return { ok: true, servers: Mcp.parseMcpJson(text) };
+        } catch (e) {
+          return { ok: false, servers: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // 记忆（所有 Agent 共享的长期记忆库）
+      memoryList: async (params) => {
+        // 有查询词时走排序检索（相关度/重要度/新鲜度），界面浏览不累计使用热度。
+        if (params?.query?.trim()) {
+          const hits = await Memory.searchMemories(params.query, {
+            limit: params.limit ?? 50,
+            category: params.category,
+            includeArchived: params.status === "archived" || params.status === "all",
+            trackUsage: false,
+          });
+          const filtered = params.status && params.status !== "all" && params.status !== "archived"
+            ? hits.filter((h) => h.status === params.status)
+            : hits;
+          return { memories: filtered };
+        }
+        return { memories: Memory.listMemories(params ?? undefined) };
+      },
+      memorySave: async ({ memory }) => {
+        const saved = Memory.saveMemory(memory);
+        return { ok: true, memory: saved };
+      },
+      memorySetStatus: async ({ id, status }) => {
+        Memory.setMemoryStatus(id, status);
+        return { ok: true };
+      },
+      memoryPending: async () => {
+        return { memories: Memory.pendingMemories() };
+      },
+      memoryStats: async () => {
+        return { stats: Memory.memoryStats() };
+      },
+      memoryEvents: async (params) => {
+        return { events: Memory.listMemoryEvents(params?.limit ?? 30, params?.memoryId) };
+      },
+      memoryMaintain: async () => {
+        return Memory.runMemoryMaintenance();
+      },
+      memoryExport: async () => {
+        return Memory.exportMemories();
+      },
+      memoryImport: async ({ payload }) => {
+        return Memory.importMemories(payload);
+      },
+      memoryDelete: async ({ id }) => {
+        Memory.deleteMemory(id);
+        return { ok: true };
+      },
+      memorySetPinned: async ({ id, pinned }) => {
+        Memory.setMemoryPinned(id, pinned);
+        return { ok: true };
+      },
+      memorySyncStatus: async () => {
+        return { targets: MemorySync.memorySyncStatus() };
+      },
+      memorySyncApply: async ({ tools, remove }) => {
+        const results = remove
+          ? MemorySync.removeMemoryFromTools(tools)
+          : MemorySync.syncMemoryToTools(tools);
+        return { results };
       },
 
       // 实时语音通话
@@ -1611,21 +2705,28 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return { files };
       },
 
-      // ModelScope
-      searchModelScope: async ({ query, page }) => {
-        return ModelScope.searchModels(query, page ?? 1);
+      // 模型市场
+      searchMarketModels: async ({ query, page, source, format }) => {
+        const p = page ?? 1;
+        return source === "huggingface"
+          ? await HuggingFace.searchModels(query, p, 20, format)
+          : await ModelScope.searchModels(query, p, 20, format);
       },
 
-      listModelScopeFiles: async ({ repo }) => {
-        return { files: await ModelScope.listRepoFiles(repo) };
+      listModelFiles: async ({ repo, source }) => {
+        const files =
+          source === "huggingface"
+            ? await HuggingFace.listRepoFiles(repo)
+            : await ModelScope.listRepoFiles(repo);
+        return { files };
       },
 
       listDownloads: async () => {
         return { tasks: downloadManager.list() };
       },
 
-      startModelDownload: async ({ repo, fileName, category, source }) => {
-        return { task: downloadManager.start(repo, fileName, category, source) };
+      startModelDownload: async ({ repo, fileName, category, source, size, explicit }) => {
+        return { task: downloadManager.start(repo, fileName, category, source, { size, explicit }) };
       },
 
       pauseModelDownload: async ({ id }) => {
@@ -1657,6 +2758,18 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
         return ModelStore.setActiveModel(path);
       },
 
+      scanModelDir: async ({ dir }) => {
+        return ModelScan.previewModelDir(dir);
+      },
+
+      addModelDir: async ({ dir }) => {
+        return ModelScan.addModelDir(dir);
+      },
+
+      removeModelDir: async ({ dir }) => {
+        return ModelScan.removeModelDir(dir);
+      },
+
       deleteLocalModel: async ({ path }) => {
         return ModelStore.deleteLocalModel(path);
       },
@@ -1666,7 +2779,21 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       },
 
       getModelDirs: async () => {
-        return { dirs: ModelStore.getModelsDirs() };
+        const primary = ModelStore.getModelsBaseDirForRuntime();
+        const hfCache = ModelScan.getHfHubCacheDir();
+        const extra = ModelScan.getExtraModelDirs();
+        return {
+          dirs: [primary, ...extra],
+          entries: [
+            { path: primary, kind: "primary" as const, ...ModelScan.describeModelDir(primary) },
+            ...extra.map((d) => ({
+              path: d,
+              kind: "extra" as const,
+              ...ModelScan.describeModelDir(d),
+            })),
+            { path: hfCache, kind: "hf-cache" as const, ...ModelScan.describeHfCache() },
+          ],
+        };
       },
 
       getAboutInfo: async () => {
@@ -1678,11 +2805,30 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
           channel,
           sessionStartedAt,
           basePath: ModelStore.getModelsBaseDirForRuntime(),
+          dataDir: getUserDataDir(),
         };
       },
 
-      runBenchmark: async (params) => {
-        return runBenchmark(params);
+      startBenchmark: async (params) => {
+        return startBenchmark(params);
+      },
+      getBenchmarkRun: async ({ runId }) => {
+        return { run: getBenchmarkRun(runId) };
+      },
+      cancelBenchmark: async ({ runId }) => {
+        return cancelBenchmark(runId);
+      },
+      listBenchmarkRecords: async () => {
+        return { records: listBenchmarkRecords() };
+      },
+      deleteBenchmarkRecord: async ({ id }) => {
+        return deleteBenchmarkRecord(id);
+      },
+      clearBenchmarkRecords: async () => {
+        return clearBenchmarkRecords();
+      },
+      getEvalSuites: async () => {
+        return { suites: listEvalSuites() };
       },
 
       // Voice
@@ -1763,7 +2909,12 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             params?.base ?? cfg.base,
             params?.apiKey ?? cfg.apiKey,
           );
-          return { models };
+          // 服务商返回的是一整份模型清单（对话/语音/嵌入…），按调用场景要的分类挑，
+          // 挑不出来时回退全量并标记 relaxed，由界面提示"没能识别出该类模型"。
+          const kind = params?.kind;
+          if (!kind) return { models };
+          const picked = filterModelIds(models, [kind], { relax: true });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
@@ -1838,7 +2989,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getAsrAudioCppStatus: async () => {
         try {
           return await AsrAudioCpp.getAsrAudioCppStatus();
-        } catch (e) {
+        } catch {
           return {
             engineInstalled: false,
             binaryPath: null,
@@ -2007,7 +3158,13 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
             params?.base ?? cfg.base,
             params?.apiKey ?? cfg.apiKey,
           );
-          return { models };
+          // OCR 走的是 VLM（对话分类的视觉模型），服务商清单里的嵌入 / 语音 / 生图
+          // 模型剔掉；认不出来的保留，避免把可用的 VLM 藏掉。
+          const picked = filterModelIds(models, MODEL_CATEGORY_SETS.chat, {
+            keepOther: true,
+            relax: true,
+          });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
         }
@@ -2016,7 +3173,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getPpOcrStatus: async () => {
         try {
           return await PpOcr.getPpOcrStatus();
-        } catch (e) {
+        } catch {
           return {
             pythonFound: false,
             pythonPath: null,
@@ -2125,7 +3282,7 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       listImageRecords: async (params) => {
         try {
           return { records: ImageGen.listImageRecords(params?.limit) };
-        } catch (e) {
+        } catch {
           return { records: [] };
         }
       },
@@ -2156,9 +3313,84 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
                     params?.base ?? cfg.apiBase,
                     params?.apiKey ?? cfg.apiKey,
                   );
-          return { models };
+          // 生图后端（尤其 OpenAI 兼容的聚合服务）会把对话 / 语音模型也列出来，
+          // 只留生图模型；一个都认不出时保留全量并标记 relaxed。
+          const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
+          return { models: picked.ids, relaxed: picked.relaxed };
         } catch (e) {
           return { models: [], error: e instanceof Error ? e.message : String(e) };
+        }
+      },
+
+      // Agent 生图弹窗（media-setup）：用户点确认 / 取消后回传，弹窗里也可扫描候选模型
+      resolveMediaSetup: async (params) => {
+        return { ok: MediaSetup.resolveMediaSetup(params.id, params) };
+      },
+
+      scanMediaSetupCandidates: async (params) => {
+        return MediaSetup.scanSetupCandidates(params ?? {});
+      },
+
+      // AI 视频生成
+      submitVideoGeneration: async (params) => {
+        return VideoGen.submitVideoGeneration(params);
+      },
+
+      pollVideoRecords: async ({ ids }) => {
+        try {
+          return { records: await VideoGen.pollVideoRecords(ids) };
+        } catch {
+          return { records: [] };
+        }
+      },
+
+      listVideoRecords: async (params) => {
+        try {
+          return { records: VideoGen.listVideoRecords(params?.limit) };
+        } catch {
+          return { records: [] };
+        }
+      },
+
+      deleteVideoRecord: async ({ id }) => {
+        return VideoGen.deleteVideoRecord(id);
+      },
+
+      getVideoGenConfig: async () => {
+        return { config: VideoGen.getVideoGenConfig() };
+      },
+
+      saveVideoGenConfig: async (config) => {
+        VideoGen.saveVideoGenConfig(config);
+        return { ok: true };
+      },
+
+      listVideoGenModels: async (params) => {
+        try {
+          const cfg = VideoGen.getVideoGenConfig();
+          const backend = params?.backend ?? cfg.backend;
+          if (backend === "comfyui") {
+            const lists = await VideoGen.listComfyVideoModels(params?.base ?? cfg.comfyBase);
+            return {
+              models: lists.models,
+              checkpoints: lists.checkpoints,
+              clips: lists.clips,
+              vaes: lists.vaes,
+            };
+          }
+          const models =
+            backend === "seedance"
+              ? VideoGen.SEEDANCE_VIDEO_MODELS
+              : VideoGen.MINIMAX_VIDEO_MODELS;
+          return { models, checkpoints: [], clips: [], vaes: [] };
+        } catch (e) {
+          return {
+            models: [],
+            checkpoints: [],
+            clips: [],
+            vaes: [],
+            error: e instanceof Error ? e.message : String(e),
+          };
         }
       },
 
@@ -2210,10 +3442,486 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
       getMlxActiveModel: async () => {
         return { active: MlxGen.getMlxActiveModel() };
       },
+
+      // -----------------------------------------------------------------
+      // Skills 管理
+      // -----------------------------------------------------------------
+      skillsGetTools: async () => {
+        return { tools: Skills.listToolInfos() };
+      },
+      skillsSetToolEnabled: async ({ tool, enabled }) => {
+        Skills.setToolEnabled(tool, enabled);
+        return { ok: true };
+      },
+      skillsSetAllToolsEnabled: async ({ enabled }) => {
+        Skills.setAllToolsEnabled(enabled);
+        return { ok: true };
+      },
+      skillsSetCustomToolPath: async ({ tool, path }) => {
+        Skills.setCustomToolPath(tool, path);
+        return { ok: true };
+      },
+      skillsAddCustomTool: async (def) => {
+        return Skills.addCustomTool(def);
+      },
+      skillsRemoveCustomTool: async ({ key }) => {
+        Skills.removeCustomTool(key);
+        return { ok: true };
+      },
+      skillsGetCentralInfo: async () => {
+        return Skills.getCentralInfoForRpc();
+      },
+      skillsSetCentralPath: async ({ path }) => {
+        Skills.setCentralRepoPath(path);
+        return { ok: true, info: Skills.getCentralInfoForRpc() };
+      },
+      skillsReindex: async () => {
+        return Skills.reindexCentralRepo();
+      },
+      skillsList: async () => {
+        return { skills: Skills.listSkills() };
+      },
+      skillsGetDoc: async ({ skillId }) => {
+        return { markdown: Skills.getSkillDoc(skillId)?.markdown ?? null };
+      },
+      skillsDelete: async ({ ids }) => {
+        return Skills.deleteSkills(ids);
+      },
+      skillsSetTags: async ({ skillId, tags }) => {
+        Skills.setSkillTags(skillId, tags);
+        Skills.writeSkillMeta(skillId);
+        return { ok: true };
+      },
+      skillsGetAllTags: async () => {
+        return { tags: Skills.getAllTags() };
+      },
+      skillsRenameTag: async ({ from, to }) => {
+        Skills.renameTagEverywhere(from, to);
+        return { ok: true };
+      },
+      skillsDeleteTag: async ({ tag }) => {
+        Skills.deleteTagEverywhere(tag);
+        return { ok: true };
+      },
+      skillsMarketLeaderboard: async ({ board }) => {
+        return { skills: await Skills.fetchLeaderboard(board) };
+      },
+      skillsMarketSearch: async ({ query, limit }) => {
+        return { skills: await Skills.searchSkillssh(query, limit ?? 60) };
+      },
+      skillsInstallFromMarket: async ({ source, skillId }) => {
+        return Skills.installFromSkillssh(source, skillId);
+      },
+      skillsCancelInstall: async ({ ref }) => {
+        return { ok: Skills.cancelInstall(ref) };
+      },
+      skillsGitPreview: async ({ url }) => {
+        return Skills.gitPreview(url);
+      },
+      skillsGitConfirm: async ({ url, tempDir, items }) => {
+        return Skills.gitConfirm(url, tempDir, items);
+      },
+      skillsGitCancelPreview: async ({ tempDir }) => {
+        Skills.gitCancelPreview(tempDir);
+        return { ok: true };
+      },
+      skillsInstallLocal: async ({ path, name }) => {
+        return Skills.installLocal(path, name);
+      },
+      skillsBatchImportFolder: async ({ path }) => {
+        return Skills.batchImportFolder(path);
+      },
+      skillsCheckUpdates: async ({ ids }) => {
+        const statuses = ids && ids.length > 0 ? await Promise.all(ids.map((id) => Skills.checkSkillUpdate(id))) : await Skills.checkAllSkillUpdates();
+        return { statuses };
+      },
+      skillsUpdateSkill: async ({ skillId }) => {
+        return Skills.updateSkill(skillId);
+      },
+      skillsScanDiscovered: async () => {
+        return { groups: Skills.scanDiscoveredSkills() };
+      },
+      skillsImportDiscovered: async ({ name, paths, removeOriginal }) => {
+        return Skills.importDiscoveredGroup(name, paths, removeOriginal);
+      },
+      skillsImportAllDiscovered: async ({ groups, removeOriginal }) => {
+        return Skills.importAllDiscovered(groups, removeOriginal);
+      },
+      skillsSyncToTool: async ({ skillId, tool, overwrite }) => {
+        return Skills.syncSkillToTool(skillId, tool, { overwrite });
+      },
+      skillsUnsyncFromTool: async ({ skillId, tool }) => {
+        return Skills.unsyncSkillFromTool(skillId, tool);
+      },
+      skillsGetSyncMode: async () => {
+        return { mode: Skills.getSyncMode() };
+      },
+      skillsSetSyncMode: async ({ mode }) => {
+        Skills.setSyncMode(mode);
+        return { ok: true };
+      },
+      skillsListPresets: async () => {
+        return { presets: Skills.getPresetRowsWithCounts() };
+      },
+      skillsCreatePreset: async ({ name, description, icon }) => {
+        return { id: Skills.createPreset(name, description, icon) };
+      },
+      skillsUpdatePreset: async ({ id, name, description, icon }) => {
+        Skills.updatePresetRow(id, name, description, icon);
+        return { ok: true };
+      },
+      skillsDeletePreset: async ({ id }) => {
+        return Skills.deletePresetRow(id);
+      },
+      skillsAddSkillsToPreset: async ({ presetId, skillIds }) => {
+        for (const sid of skillIds) Skills.addSkillToPreset(presetId, sid);
+        return { ok: true };
+      },
+      skillsRemoveSkillFromPreset: async ({ presetId, skillId }) => {
+        Skills.removeSkillFromPreset(presetId, skillId);
+        return { ok: true };
+      },
+      skillsApplyPreset: async ({ presetId }) => {
+        return Skills.applyPresetToDefault(presetId);
+      },
+      skillsApplyPresetToAgents: async ({ presetId, mode }) => {
+        return Skills.applyPresetToCodingAgents(presetId, mode);
+      },
+      skillsTogglePresetSkillTool: async ({ presetId, skillId, tool, enabled }) => {
+        return Skills.togglePresetSkillTool(presetId, skillId, tool, enabled);
+      },
+      skillsSetActivePreset: async ({ presetId }) => {
+        Skills.setActivePreset(presetId);
+        return { ok: true };
+      },
+      skillsBackupStatus: async () => {
+        return { status: Skills.backupStatus() };
+      },
+      skillsBackupInit: async () => {
+        return Skills.backupInit();
+      },
+      skillsBackupSetRemote: async ({ url, pat }) => {
+        return Skills.setBackupRemote(url, pat);
+      },
+      skillsBackupCommit: async ({ message }) => {
+        return Skills.backupCommit(message);
+      },
+      skillsBackupPush: async () => {
+        return Skills.backupPush();
+      },
+      skillsBackupPull: async () => {
+        return Skills.backupPull();
+      },
+      skillsBackupSetAuto: async ({ enabled }) => {
+        Skills.setAutoBackup(enabled);
+        return { ok: true };
+      },
+      skillsSnapshots: async () => {
+        return { snapshots: Skills.listSnapshots() };
+      },
+      skillsCreateSnapshot: async ({ name }) => {
+        return Skills.createSnapshot(name);
+      },
+      skillsRestoreSnapshot: async ({ tag }) => {
+        return Skills.restoreSnapshot(tag);
+      },
+      skillsResolveConflict: async ({ keep }) => {
+        return Skills.resolveConflict(keep);
+      },
+      skillsSizeReport: async () => {
+        return Skills.sizeReport();
+      },
+      skillsListProjects: async () => {
+        return { projects: Skills.listProjectViews() };
+      },
+      skillsAddProject: async ({ path }) => {
+        return Skills.addProject(path);
+      },
+      skillsRemoveProject: async ({ id }) => {
+        Skills.removeProject(id);
+        return { ok: true };
+      },
+      skillsScanProjects: async ({ root }) => {
+        return { projects: Skills.scanProjectWorkspaces(root) };
+      },
+      skillsGetProjectSkills: async ({ projectId }) => {
+        return Skills.getProjectSkillsForRpc(projectId);
+      },
+      skillsProjectImportToCenter: async ({ projectId, relDir }) => {
+        return Skills.projectImportToCenterForRpc(projectId, relDir);
+      },
+      skillsProjectExportFromCenter: async ({ projectId, skillId, agentRel }) => {
+        return Skills.projectExportForRpc(projectId, skillId, agentRel);
+      },
+      skillsProjectUpdateToCenter: async ({ projectId, relDir }) => {
+        return Skills.projectUpdateToCenterForRpc(projectId, relDir);
+      },
+      skillsProjectToggleSkill: async ({ projectId, relDir, enabled }) => {
+        return Skills.projectToggleForRpc(projectId, relDir, enabled);
+      },
+      skillsProjectDeleteSkill: async ({ projectId, relDir }) => {
+        return Skills.projectDeleteForRpc(projectId, relDir);
+      },
+      skillsGetProjectSkillDoc: async ({ projectId, relDir }) => {
+        return Skills.projectSkillDocForRpc(projectId, relDir);
+      },
+      skillsOpenFolder: async (params) => {
+        let target = params.path;
+        if (params.path === "central") {
+          target = path.join(Skills.getCentralRepoDir(), params.skillId ?? "");
+        }
+        try {
+          const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+          Bun.spawn([opener, target]);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      // ---- 知识库（本地 RAG） ----
+      kbList: async () => {
+        return { kbs: Knowledge.listKnowledgeBases() };
+      },
+      kbCreate: async (params) => {
+        return {
+          kb: Knowledge.createKb({
+            name: params.name,
+            description: params.description,
+            embeddingModel: params.embeddingModel,
+            rerankModel: params.rerankModel,
+          }),
+        };
+      },
+      kbUpdate: async ({ id, patch }) => {
+        return Knowledge.updateKb(id, patch);
+      },
+      kbDelete: async ({ id }) => {
+        Knowledge.deleteKb(id);
+        return { ok: true };
+      },
+      kbDocList: async ({ kbId }) => {
+        return { docs: Knowledge.listDocs(kbId) };
+      },
+      kbAddFiles: async ({ kbId, paths }) => {
+        return { docs: Knowledge.addFileDocs(kbId, paths ?? []) };
+      },
+      kbAddFolder: async ({ kbId, path: dirPath }) => {
+        return Knowledge.addFolderDocs(kbId, dirPath);
+      },
+      kbAddNote: async ({ kbId, title, content }) => {
+        return { doc: Knowledge.addNoteDoc(kbId, title, content) };
+      },
+      kbAddWeb: async ({ kbId, url }) => {
+        return { doc: Knowledge.addWebDoc(kbId, url) };
+      },
+      kbDocDelete: async ({ id }) => {
+        Knowledge.deleteDoc(id);
+        return { ok: true };
+      },
+      kbDocReingest: async ({ id }) => {
+        Knowledge.reingestDoc(id);
+        return { ok: true };
+      },
+      kbChunks: async ({ docId }) => {
+        return { chunks: Knowledge.listChunks(docId) };
+      },
+      kbEmbedMissing: async ({ kbId }) => {
+        return Knowledge.embedMissing(kbId);
+      },
+      kbRecall: async ({ kbIds, query, topK }) => {
+        return Knowledge.recall(kbIds ?? [], query ?? "", topK);
+      },
+      kbTestEmbedding: async ({ base, apiKey, model }) => {
+        return Knowledge.testEmbedding({ base, apiKey, model });
+      },
+      kbEmbeddingModels: async (params) => {
+        return Knowledge.suggestEmbeddingModels(params ?? undefined);
+      },
+      kbTestRerank: async ({ base, apiKey, model }) => {
+        return Knowledge.testRerank({ base, apiKey, model });
+      },
+      kbRerankModels: async (params) => {
+        return Knowledge.suggestRerankModels(params ?? undefined);
+      },
+      kbEvents: async (params) => {
+        const kbId = params?.kbId;
+        return {
+          events: Knowledge.kbEvents({ kbId, limit: params?.limit ?? 100 }),
+          counts: Knowledge.kbAuditSummary(kbId),
+        };
+      },
+      kbQueueStats: async () => {
+        return Knowledge.kbQueueStats();
+      },
+      kbIndexStats: async () => {
+        return { indexes: Knowledge.kbIndexStatsAll() };
+      },
+      kbExport: async ({ kbId, includeEmbeddings }) => {
+        return Knowledge.exportKbToFile(kbId, { includeEmbeddings });
+      },
+      kbImport: async ({ json, name }) => {
+        let payload: unknown;
+        try {
+          payload = JSON.parse(json);
+        } catch {
+          throw new Error("导入内容不是合法 JSON");
+        }
+        return Knowledge.importKb(payload, { name });
+      },
+      kbDocRetry: async ({ id }) => {
+        Knowledge.retryDoc(id);
+        return { ok: true };
+      },
+      kbOpenExportDir: async () => {
+        const dir = Knowledge.kbExportDir();
+        try {
+          const opener = process.platform === "darwin" ? "open" : process.platform === "win32" ? "explorer" : "xdg-open";
+          Bun.spawn([opener, dir]);
+          return { ok: true, path: dir };
+        } catch {
+          return { ok: false, path: dir };
+        }
+      },
+
+      // ---------------------------------------------------------------------
+      // 全局备份 / 恢复
+      // ---------------------------------------------------------------------
+
+      backupList: async ({ dir } = {}) => Backup.listBackups({ dir }),
+
+      backupEstimate: async () => Backup.estimateBackup(),
+
+      backupOverview: async () => ({
+        dir: Backup.defaultBackupDir(),
+        appVersion: updateState.currentVersion,
+        active: Backup.activeBackupTask(),
+      }),
+
+      backupChooseDir: async () => {
+        const dirs = await Utils.openFileDialog({
+          canChooseFiles: false,
+          canChooseDirectory: true,
+          allowsMultipleSelection: false,
+          startingFolder: Backup.defaultBackupDir(),
+        });
+        const dir = (dirs ?? [])[0]?.trim();
+        if (!dir) return { dir: null };
+        // 选完立刻试写一次：只读盘 / 沙箱目录在创建到一半时才发现就太晚了
+        const check = await Backup.checkWritableDir(dir);
+        return { dir, error: check.error, freeBytes: check.freeBytes };
+      },
+
+      backupChooseFile: async () => {
+        // 不过滤扩展名：.omnibackup 不是系统已知类型，按扩展名过滤会让文件在选择器里
+        // 变灰；合法性交给 inspectBackup 校验（不是备份会明确报错）。
+        const paths = await Utils.openFileDialog({
+          allowedFileTypes: "*",
+          canChooseFiles: true,
+          canChooseDirectory: false,
+          allowsMultipleSelection: false,
+          startingFolder: Backup.defaultBackupDir(),
+        });
+        return { path: (paths ?? [])[0]?.trim() ?? null };
+      },
+
+      backupInspect: async ({ path }) => Backup.inspectBackup({ path }),
+
+      backupCreate: async (params: BackupCreateRequest) => {
+        // 结果通过事件回传：GB 级媒体可能要跑几分钟，不能挂在一次请求上。
+        return Backup.startCreateBackup({ ...params, ctx: backupCtx() });
+      },
+
+      backupRestore: async (params: BackupRestoreRequest) => Backup.startRestoreBackup({ ...params, ctx: backupCtx() }),
+
+      backupCancel: async ({ taskId }) => ({ ok: Backup.cancelBackupTask(taskId) }),
+
+      backupDelete: async ({ path, dir }) => Backup.deleteBackup({ path, dir }),
+
+      backupReveal: async ({ path }) => {
+        try {
+          Utils.showItemInFolder(path);
+          return { ok: true };
+        } catch {
+          return { ok: false };
+        }
+      },
+
+      backupRemoteGet: async () => {
+        const config = Backup.readRemoteConfig({ connection: sqliteClient });
+        return { config, configured: Backup.isRemoteConfigured(config) };
+      },
+
+      backupRemoteSave: async ({ config }) => {
+        try {
+          Backup.writeRemoteConfig(config, { connection: sqliteClient });
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+
+      backupRemoteTest: async () => Backup.testRemote({ connection: sqliteClient }),
+
+      backupRemoteList: async () => {
+        try {
+          return { entries: await Backup.listRemoteBackups({ connection: sqliteClient }) };
+        } catch (err) {
+          return { entries: [], error: err instanceof Error ? err.message : String(err) };
+        }
+      },
+
+      backupRemoteDownload: async (params: BackupDownloadRequest) =>
+        Backup.startDownloadRemoteBackup({ ...params, ctx: backupCtx() }),
+
+      backupRemoteDelete: async ({ fileName }) => {
+        try {
+          await Backup.deleteRemoteBackup(fileName);
+          return { ok: true };
+        } catch (err) {
+          return { ok: false, error: err instanceof Error ? err.message : String(err) };
+        }
+      },
     },
     messages: {},
   },
 });
+
+/**
+ * 备份上下文：复用应用自己的 SQLite 连接（单写者，避免恢复时与运行中的应用抢锁），
+ * 版本号取当前应用版本，写进清单便于排错。
+ */
+function backupCtx(): Partial<Backup.BackupContext> {
+  return { appVersion: updateState.currentVersion, connection: sqliteClient };
+}
+
+/** 备份进度 / 终态推送到 webview。 */
+export function initBackupBroadcast(win: BrowserWindowWithRPC) {
+  Backup.subscribeBackupEvents((event) => {
+    try {
+      if (event.type === "progress") win.webview.rpc?.send.backupProgress(event.progress);
+      else win.webview.rpc?.send.backupFinished(event);
+    } catch {}
+  });
+}
+
+/**
+ * webview 重新加载（刷新 / HMR）后补推一次当前状态。
+ *
+ * 状态推送只在"发生变化"时发消息，而 webview 侧 store 会随刷新重置为默认值，
+ * 于是重启后的界面会显示"未启动"，点了启动才报"已在运行"。
+ */
+export function broadcastCurrentStatus(win: BrowserWindowWithRPC) {
+  try {
+    win.webview.rpc?.send.serverStatusChanged({ status: ServerManager.getStatus() });
+  } catch {}
+  try {
+    win.webview.rpc?.send.servedModelsChanged(Served.getServedModels());
+  } catch {}
+  try {
+    win.webview.rpc?.send.gatewayStatusChanged({ status: Gateway.getGatewayStatus().status });
+  } catch {}
+}
 
 export function initServerBroadcast(win: BrowserWindowWithRPC) {
   ServerManager.onLog((text) => {
@@ -2224,6 +3932,17 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   ServerManager.onStatusChange((status) => {
     try {
       win.webview.rpc?.send.serverStatusChanged({ status });
+    } catch {}
+  });
+  // 已启动模型注册表：列表快照 + 每个实例的日志增量（控制台 / 选择器用）。
+  Served.onServedModelsChange((snapshot) => {
+    try {
+      win.webview.rpc?.send.servedModelsChanged(snapshot);
+    } catch {}
+  });
+  Served.onServedModelLog((id, text) => {
+    try {
+      win.webview.rpc?.send.servedModelLog({ id, text });
     } catch {}
   });
   Chat.onChatChunk((payload) => {
@@ -2260,6 +3979,12 @@ export function initServerBroadcast(win: BrowserWindowWithRPC) {
   Agent.onAgentStats((payload) => {
     try {
       win.webview.rpc?.send.chatStats(payload);
+    } catch {}
+  });
+  // 知识库：摄取进度 / 删除 / 向量补齐 → 前端刷新列表。
+  Knowledge.onKnowledgeChanged((payload) => {
+    try {
+      win.webview.rpc?.send.knowledgeChanged(payload);
     } catch {}
   });
   // 实时语音通话：把后端会话事件按类型路由到对应的一元消息通道。
@@ -2361,6 +4086,15 @@ export function initMlxModelDownloadBroadcast(win: BrowserWindowWithRPC) {
   });
 }
 
+/** Agent 生图前的「需要用户介入」弹窗：推给界面，用户确认后走 RPC resolveMediaSetup 回传。 */
+export function initMediaSetupBroadcast(win: BrowserWindowWithRPC) {
+  MediaSetup.onMediaSetup((payload) => {
+    try {
+      win.webview.rpc?.send.mediaSetup(payload);
+    } catch {}
+  });
+}
+
 /** PaddleOCR 引擎安装日志 / 阶段 / 模型下载进度，实时推送到前端。 */
 export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
   PpOcr.onPpOcrInstallLog((text) => {
@@ -2385,6 +4119,20 @@ export function initTessInstallBroadcast(win: BrowserWindowWithRPC) {
   Ocr.onTesseractInstallLog((text) => {
     try {
       win.webview.rpc?.send.tesseractInstallLog({ text });
+    } catch {}
+  });
+}
+
+/** Skills 安装进度 + 中央库变更，实时推送到前端。 */
+export function initSkillsBroadcast(win: BrowserWindowWithRPC) {
+  Skills.onInstallProgressForRpc((p) => {
+    try {
+      win.webview.rpc?.send.skillsInstallProgress(p);
+    } catch {}
+  });
+  Skills.onCentralChanged(() => {
+    try {
+      win.webview.rpc?.send.skillsChanged({});
     } catch {}
   });
 }

@@ -3,17 +3,26 @@ import { controlSocketPath } from "./paths";
 import { getWindowRef } from "./window";
 import * as ServerManager from "./server-manager";
 import * as Gateway from "./gateway";
-import { getSetting, updateSettings, getAllSettings } from "./db/settings";
+import { getSetting, updateSettings, getAllSettings, getActiveServerPort } from "./db/settings";
 import { listInstalledModels, setActiveModel, getActiveModelPath, slugModelFileName } from "./model-store";
+import { downloadManager } from "./download-manager";
 import { updateState } from "./updates";
+import * as Memory from "./memory";
+import * as CloudProviders from "./cloud-providers";
+import {
+  startBenchmark,
+  getBenchmarkRun,
+  cancelBenchmark,
+  listBenchmarkRecords,
+} from "./benchmark";
 
 /**
  * `omi` CLI 与应用的本地控制通道（Unix domain socket）。
  *
- * 参照 omlx 的 `control.sock` 设计：socket 文件即"应用是否在运行"的标志，
- * CLI 先尝试连接，失败才用 `open` 拉起应用。协议为 HTTP over unix socket，
- * POST JSON `{ cmd, payload }`，响应 `{ ok, data | error }`。
- * 只监听本机用户目录下的 socket，权限 0600，无网络暴露。
+ * socket 文件即"应用是否在运行"的标志：CLI 先尝试连接，失败才用 `open`
+ * 拉起应用。协议为 HTTP over unix socket，POST JSON `{ cmd, payload }`，
+ * 响应 `{ ok, data | error }`。只监听本机用户目录下的 socket，权限 0600，
+ * 无网络暴露。
  */
 
 type ControlRequest = { cmd: string; payload?: Record<string, unknown> };
@@ -65,7 +74,8 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
             status: ServerManager.getStatus(),
             pid: ServerManager.getPid(),
             host: getSetting("SERVER_HOST") || "127.0.0.1",
-            port: Number(getSetting("SERVER_PORT") || 8080),
+            // 多实例下活动模型的端口未必等于引擎设置端口（见 model-servers.ts）。
+            port: Number(getActiveServerPort()),
             engine: getSetting("INFERENCE_ENGINE") || "llama.cpp",
             logs: ServerManager.getLogs().slice(-8000),
             error: ServerManager.getLastError() || undefined,
@@ -117,6 +127,39 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     case "checkBinary":
       return { ok: true, data: ServerManager.checkBinaryExists() };
 
+    case "downloadsList":
+      return { ok: true, data: { tasks: downloadManager.list() } };
+
+    case "downloadsResume": {
+      // 把所有 paused / failed 的下载任务重新入队（磁盘空间恢复后可一键续传）。
+      const tasks = downloadManager.list();
+      const resumed: string[] = [];
+      for (const t of tasks) {
+        if ((t.status === "paused" || t.status === "failed") && downloadManager.resume(t.id)) {
+          resumed.push(t.fileName);
+        }
+      }
+      return { ok: true, data: { resumed, total: tasks.length } };
+    }
+
+    case "downloadsStart": {
+      const repo = String(payload.repo ?? "");
+      const fileName = String(payload.fileName ?? "");
+      if (!repo || !fileName) return { ok: false, error: "缺少 repo / fileName" };
+      const sizeHint = Number(payload.size);
+      const task = downloadManager.start(
+        repo,
+        fileName,
+        typeof payload.category === "string" ? (payload.category as never) : undefined,
+        (payload.source as "modelscope" | "huggingface") ?? "modelscope",
+        {
+          size: Number.isFinite(sizeHint) && sizeHint > 0 ? sizeHint : null,
+          explicit: payload.explicit === true,
+        },
+      );
+      return { ok: true, data: { task } };
+    }
+
     case "gatewayStart": {
       const result = await Gateway.startGateway();
       return { ok: result.ok, error: result.error, data: { ...Gateway.getGatewayStatus() } };
@@ -134,6 +177,88 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
 
     case "gatewayStatus":
       return { ok: true, data: { ...Gateway.getGatewayStatus(), apiKey: Gateway.getGatewayApiKey() } };
+
+    // 记忆写回通道：omi memory add / omni-memory MCP 桥接在应用运行时走这里，
+    // 与应用内 Agent 工具写的是同一个库。
+    case "memoryAdd": {
+      const content = typeof payload.content === "string" ? payload.content : "";
+      if (!content.trim()) return { ok: false, error: "content is required" };
+      const outcome = await Memory.saveAgentMemory({
+        content,
+        category: typeof payload.category === "string" ? (payload.category as never) : undefined,
+        tags: Array.isArray(payload.tags) ? payload.tags.map(String) : undefined,
+        sourceRef: typeof payload.sourceRef === "string" ? payload.sourceRef : "cli",
+      });
+      if (!outcome.ok) return { ok: false, error: outcome.error };
+      return { ok: true, data: { memory: outcome.result.memory, action: outcome.result.action } };
+    }
+    case "memorySearch": {
+      const query = typeof payload.query === "string" ? payload.query : "";
+      const limit = typeof payload.limit === "number" ? payload.limit : 8;
+      const hits = await Memory.searchMemories(query, { limit, scope: "all" });
+      return { ok: true, data: { memories: hits } };
+    }
+    case "memoryList": {
+      const status = typeof payload.status === "string" ? (payload.status as never) : "open";
+      return { ok: true, data: { memories: Memory.listMemories({ status, scope: "all" }) } };
+    }
+    case "memoryStats":
+      return { ok: true, data: Memory.memoryStats() as unknown as Record<string, unknown> };
+    case "memoryMaintain": {
+      const result = await Memory.runMemoryMaintenance();
+      return { ok: true, data: { ...result } };
+    }
+    case "memoryForget": {
+      const id = Number(payload.id ?? 0);
+      if (!Number.isFinite(id) || id <= 0) return { ok: false, error: "id is required" };
+      return { ok: true, data: { deleted: Memory.deleteMemory(id) } };
+    }
+    case "memorySetStatus": {
+      const id = Number(payload.id ?? 0);
+      const status = String(payload.status ?? "");
+      if (!Number.isFinite(id) || id <= 0) return { ok: false, error: "id is required" };
+      if (!["active", "pending", "archived", "superseded"].includes(status)) return { ok: false, error: "invalid status" };
+      Memory.setMemoryStatus(id, status as never);
+      return { ok: true, data: { id, status } };
+    }
+    case "memoryPending":
+      return { ok: true, data: { memories: Memory.pendingMemories() } };
+    case "memoryExport":
+      return { ok: true, data: Memory.exportMemories() as unknown as Record<string, unknown> };
+    case "memoryImport": {
+      const result = await Memory.importMemories(payload.payload);
+      return { ok: true, data: { ...result, errors: result.errors.slice(0, 5) } };
+    }
+
+    // 基准测速：omi benchmark 走这里（应用内 UI 与 CLI 共用同一任务单例与历史表）。
+    case "benchmark": {
+      const contexts = Array.isArray(payload.contexts)
+        ? payload.contexts.map(Number).filter((n) => Number.isFinite(n))
+        : undefined;
+      const result = startBenchmark({
+        model: typeof payload.model === "string" ? payload.model : "",
+        providerId: typeof payload.providerId === "string" ? payload.providerId : undefined,
+        genLength: Number(payload.genLength) || undefined,
+        batchSize: Number(payload.batchSize) || undefined,
+        temperature: Number.isFinite(Number(payload.temperature)) ? Number(payload.temperature) : undefined,
+        contexts,
+      });
+      if ("error" in result) return { ok: false, error: result.error };
+      return { ok: true, data: { runId: result.runId } };
+    }
+    case "benchmarkRun": {
+      return { ok: true, data: { run: getBenchmarkRun(String(payload.runId ?? "")) } };
+    }
+    case "benchmarkCancel": {
+      return { ok: true, data: cancelBenchmark(String(payload.runId ?? "")) };
+    }
+    case "benchmarkRecords": {
+      return { ok: true, data: { records: listBenchmarkRecords() } };
+    }
+    // --cloud 服务商解析用：完整 cloud_providers 表（"models" 只回激活槽位）。
+    case "cloudProviders": {
+      return { ok: true, data: CloudProviders.listCloudProviders() };
+    }
 
     case "models": {
       const activePath = getActiveModelPath();

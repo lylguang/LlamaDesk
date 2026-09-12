@@ -4,11 +4,16 @@ import { desc, eq, sql } from "drizzle-orm";
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
 import { getSetting, getActiveServerPort } from "./db/settings";
-import { getChatModelName } from "./chat-model";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
+import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { recordUsage } from "./stats";
 import { webSearch } from "./web-search";
-import { getStatus, getLastError, startServer } from "./server-manager";
+import { getLastError, startServer } from "./server-manager";
+import * as Served from "./model-servers";
+import { buildChatContext } from "./knowledge";
+import { memoryEnabled, memoryRecallSection } from "./memory";
+import type { KbCitation } from "../shared/knowledge";
 
 export type ChatMessage = {
   id: number;
@@ -19,6 +24,10 @@ export type ChatMessage = {
   reasoning?: string | null;
   images?: string[];
   tokens?: number | null;
+  /** user 消息：发送时挂载的知识库 id（重新生成时复用检索）。 */
+  kbIds?: number[] | null;
+  /** assistant 消息：知识库引用溯源。 */
+  citations?: KbCitation[] | null;
   createdAt: number;
 };
 
@@ -56,6 +65,8 @@ type DoneListener = (payload: {
   content: string;
   reasoning?: string;
   error?: string;
+  /** 知识库引用溯源（挂了知识库的回答才有）。 */
+  citations?: KbCitation[];
 }) => void;
 
 const chunkListeners = new Set<ChunkListener>();
@@ -120,6 +131,26 @@ function parseImages(row: { images: string | null }): string[] {
     return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === "string") : [];
   } catch {
     return [];
+  }
+}
+
+function parseJsonNumbers(row: { kbIds: string | null }): number[] | null {
+  if (!row.kbIds) return null;
+  try {
+    const parsed = JSON.parse(row.kbIds);
+    return Array.isArray(parsed) && parsed.every((v) => typeof v === "number") ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function parseCitations(row: { citations: string | null }): KbCitation[] | null {
+  if (!row.citations) return null;
+  try {
+    const parsed = JSON.parse(row.citations);
+    return Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
   }
 }
 
@@ -211,14 +242,19 @@ export function getConversation(id: number): {
     .where(eq(messages.conversationId, id))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({ ...m, images: parseImages(m) }));
+    .map((m) => ({
+      ...m,
+      images: parseImages(m),
+      kbIds: parseJsonNumbers(m),
+      citations: parseCitations(m),
+    }));
   return { conversation: conv as Conversation, messages: msgs as ChatMessage[] };
 }
 
 export function createConversation(title?: string, app: string = "chat"): Conversation {
   const result = db
     .insert(conversations)
-    .values({ title: title?.trim() || "New conversation", app, modelId: getChatModelName() || getSetting("CHAT_MODEL") || null })
+    .values({ title: title?.trim() || "New conversation", app, modelId: getChatModelLabel() || getSetting("CHAT_MODEL") || null })
     .returning()
     .get();
   return result as Conversation;
@@ -270,7 +306,12 @@ export function getHistory(conversationId: number): ChatMessage[] {
     .where(eq(messages.conversationId, conversationId))
     .orderBy(messages.createdAt)
     .all()
-    .map((m) => ({ ...m, images: parseImages(m) })) as ChatMessage[];
+    .map((m) => ({
+      ...m,
+      images: parseImages(m),
+      kbIds: parseJsonNumbers(m),
+      citations: parseCitations(m),
+    })) as ChatMessage[];
 }
 
 /** Resolve the OpenAI-compatible base URL (without the /v1 suffix). */
@@ -285,31 +326,86 @@ export function getChatBaseUrl(): string {
 }
 
 /**
- * Ensure the local inference server is ready before sending: auto-start it when
- * stopped, and wait for an already-triggered start (e.g. from the model picker)
- * to reach "running". Startup progress is streamed to the UI via
- * serverStatusChanged, so the frontend can show a progress indicator meanwhile.
+ * 本地模式发消息前的就绪检查。
+ *
+ * 已启动模型注册表里没有实例时**不再自动冷启动**：启动 / 卸载是控制台的事，
+ * 让人在对话框里等一次几分钟的加载（还看不到进度）体验很差 —— 这里直接给提示，
+ * 让用户去控制台启动，或换成已启动的模型 / 云端模型。
+ *
+ * 两个例外：
+ * - `autoStart: true`（`omi chat` / `omi launch`）仍按设置后台拉起，CLI 没有控制台；
+ * - 端口上本来就有别人起的 OpenAI 兼容服务（外部 llama-server / `omi serve`）时直接复用。
  */
 export async function ensureServerReady(
-  timeoutMs = 180_000,
+  opts: { autoStart?: boolean; timeoutMs?: number } = {},
 ): Promise<{ ok: boolean; error?: string }> {
+  const timeoutMs = opts.timeoutMs ?? 180_000;
   const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    const status = getStatus();
-    if (status === "running") return { ok: true };
-    if (status === "error") {
-      return { ok: false, error: getLastError() || "Inference server failed to start" };
+
+  let served = Served.getRequestTargetServedModel();
+  if (served) {
+    while (Date.now() < deadline) {
+      served = Served.getRequestTargetServedModel();
+      if (!served) break;
+      if (served.status === "running") return { ok: true };
+      // 启动失败：把注册表里记的原因给出来（比一句 "not ready" 有用）。
+      if (served.status === "error") {
+        return { ok: false, error: served.error || getLastError() || "Inference server failed to start" };
+      }
+      if (served.status === "stopped") break;
+      // starting / downloading —— 加载中，继续等。
+      await Bun.sleep(500);
     }
-    if (status === "stopped") {
-      // startServer resolves only once the health check passes.
-      const result = await startServer();
-      if (!result.ok) return { ok: false, error: result.error || "Failed to start inference server" };
-      return { ok: true };
+    const current = Served.getRequestTargetServedModel();
+    if (current?.status === "error") {
+      return { ok: false, error: current.error || "Inference server failed to start" };
     }
-    // starting / downloading — keep waiting for the status to advance.
-    await Bun.sleep(500);
   }
-  return { ok: false, error: "Timed out waiting for the inference server to start" };
+
+  // 端口上有活着的 OpenAI 兼容服务（外部起的 / 应用启动时拉起的旧实例）：直接用。
+  if (await probeLocalServer()) return { ok: true };
+
+  if (opts.autoStart) {
+    // startServer 要等健康检查通过才 resolve。
+    const result = await startServer();
+    if (!result.ok) return { ok: false, error: result.error || "Failed to start inference server" };
+    return { ok: true };
+  }
+
+  return { ok: false, error: LOCAL_MODEL_NOT_RUNNING };
+}
+
+/**
+ * 「本地没有模型在跑」的统一提示：聊天里出现的就是这句话，
+ * 说清楚该去哪儿启动，而不是让人对着一个转圈的下拉框猜。
+ */
+export const LOCAL_MODEL_NOT_RUNNING =
+  "No local model is running. Start one in Settings → Console (控制台), or switch to a cloud model.";
+
+/** 探测本机推理端口上有没有活着的 OpenAI 兼容服务。 */
+async function probeLocalServer(): Promise<boolean> {
+  try {
+    const port = getActiveServerPort();
+    const res = await fetch(`http://localhost:${port}/v1/models`, {
+      signal: AbortSignal.timeout(2000),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 单次回复的生成上限（max_tokens）。
+ *
+ * 必须显式给：不传时各引擎用自己的默认值，而 mlx-lm 的 `--max-tokens` 默认只有 512 ——
+ * 推理模型光"思考"就能用光它，正文一个字都出不来，界面上就是「空白回复 + 0 tokens」。
+ * 这里跟随「上下文长度」（SERVER_CTX_SIZE，默认 8192）并夹在 1k~32k：
+ * 上限只是封顶，模型正常会自己 EOS 收尾。
+ */
+export function maxOutputTokens(): number {
+  const ctx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  return Math.min(Math.max(1024, ctx), 32768);
 }
 
 /**
@@ -358,10 +454,13 @@ async function streamAssistantReply(opts: {
   extraSystem?: string;
   /** 关闭模型思考模式（llama.cpp Qwen3 等支持），用于要求直接回答的场景。 */
   disableThinking?: boolean;
+  /** 知识库引用溯源：随最终结果写库并推给前端。 */
+  citations?: KbCitation[];
 }): Promise<{ ok: boolean; error?: string; content: string }> {
   const { conversationId, assistantId, payloadMessages } = opts;
 
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   const base = getChatBaseUrl();
   if (!model || !base) {
     const errMsg = !model ? "No model configured" : "No inference server configured";
@@ -401,11 +500,16 @@ async function streamAssistantReply(opts: {
 
   const payload = {
     model,
-    messages: [
+    // 时间 / 场景提示词 / 检索 / 知识库 / 记忆都是 system：Qwen 系模板只允许开头一条，
+    // 多条会被它整请求拒掉（"System message must be at the beginning."），这里合并成一条。
+    messages: mergeSystemMessages([
       ...(opts.extraSystem ? [{ role: "system", content: opts.extraSystem }] : []),
       currentTimeSystemMessage(),
       ...payloadMessages,
-    ],
+    ]),
+    // 生成上限跟随上下文设置：本地引擎各有默认值，mlx-lm 只有 512 —— 推理模型光思考
+    // 就能用光它，正文一个字都出不来（界面上就是「空白回复 + 0 tokens」）。
+    max_tokens: maxOutputTokens(),
     stream: true,
     // llama.cpp / Qwen3 等支持：通话等场景要求直接回答，不打思考草稿。
     ...(opts.disableThinking ? { chat_template_kwargs: { enable_thinking: false } } : {}),
@@ -414,16 +518,47 @@ async function streamAssistantReply(opts: {
   let full = "";
   let reasoning = "";
 
+  /**
+   * 增量按帧批量下发：模型侧每个 token 一次 RPC 会让 webview 每秒重建几十次
+   * 消息数组、并整段重解析 Markdown。40ms 一批（≈25fps）保持"逐字"观感，
+   * 同时把 IPC 与前端重渲染次数降一个数量级。
+   */
+  const FLUSH_INTERVAL_MS = 40;
+  let pendingContent = "";
+  let pendingReasoning = "";
+  let flushTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const flushChunks = () => {
+    if (flushTimer) {
+      clearTimeout(flushTimer);
+      flushTimer = null;
+    }
+    if (pendingContent) {
+      emitChunk({ conversationId, messageId: assistantId, delta: pendingContent, kind: "content" });
+      pendingContent = "";
+    }
+    if (pendingReasoning) {
+      emitChunk({ conversationId, messageId: assistantId, delta: pendingReasoning, kind: "reasoning" });
+      pendingReasoning = "";
+    }
+  };
+  const scheduleFlush = () => {
+    if (!flushTimer) flushTimer = setTimeout(flushChunks, FLUSH_INTERVAL_MS);
+  };
+
   const appendContent = (delta: string) => {
     if (!delta) return;
     full += delta;
-    emitChunk({ conversationId, messageId: assistantId, delta, kind: "content" });
+    pendingContent += delta;
+    // 即时消费方（语音通话边生成边合成）仍按 token 回调，不走批量缓冲。
     opts.onDelta?.(delta);
+    scheduleFlush();
   };
   const appendReasoning = (delta: string) => {
     if (!delta) return;
     reasoning += delta;
-    emitChunk({ conversationId, messageId: assistantId, delta, kind: "reasoning" });
+    pendingReasoning += delta;
+    scheduleFlush();
   };
 
   const startedAt = performance.now();
@@ -467,12 +602,11 @@ async function streamAssistantReply(opts: {
       try {
         const json = JSON.parse(payloadLine);
         const delta = json.choices?.[0]?.delta ?? {};
-        if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) {
-          appendReasoning(delta.reasoning_content);
-        }
-        if (typeof delta.content === "string" && delta.content.length > 0) {
+        const { content: contentDelta, reasoning: reasonDelta } = parseChatDelta(delta);
+        if (reasonDelta) appendReasoning(reasonDelta);
+        if (contentDelta.length > 0) {
           // 部分推理模型的 content 开头带残留的思考标签，剥掉避免混进正文。
-          let content = delta.content;
+          let content = contentDelta;
           if (full.length === 0) content = content.replace(/^\s*<\/?think[\s>]*>/, "").trimStart();
           appendContent(content);
         }
@@ -495,20 +629,29 @@ async function streamAssistantReply(opts: {
     }
     if (buffer.trim()) consumeLine(buffer);
 
-    recordUsage(model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+    recordUsage(getChatModelLabel() || model, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+    // 收尾前先冲掉最后一批增量，避免 emitDone 先到、尾巴几个字后到。
+    flushChunks();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
     if (opts.signal?.aborted) {
       db.update(messages)
-        .set({ content: full, reasoning: reasoning || null })
+        .set({ content: full, reasoning: reasoning || null, citations: opts.citations ? JSON.stringify(opts.citations) : null })
         .where(eq(messages.id, assistantId))
         .run();
       db.update(conversations)
         .set({ updatedAt: Date.now() })
         .where(eq(conversations.id, conversationId))
         .run();
-      emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
+      flushChunks();
+      emitDone({
+        conversationId,
+        messageId: assistantId,
+        content: full,
+        reasoning: reasoning || undefined,
+        citations: opts.citations,
+      });
       return { ok: true, content: full };
     }
     // 把失败原因持久化到助手消息，避免刷新会话后错误反馈被清空。
@@ -520,8 +663,11 @@ async function streamAssistantReply(opts: {
       .set({ updatedAt: Date.now() })
       .where(eq(conversations.id, conversationId))
       .run();
+    flushChunks();
     emitDone({ conversationId, messageId: assistantId, content: "", reasoning: reasoning || undefined, error: msg });
     return { ok: false, error: msg, content: "" };
+  } finally {
+    if (flushTimer) clearTimeout(flushTimer);
   }
 
   const tokens = usage?.completion_tokens ?? estimateTokens(full);
@@ -529,7 +675,12 @@ async function streamAssistantReply(opts: {
   const tokensPerSec = Math.round((tokens / (elapsedMs / 1000)) * 10) / 10;
 
   db.update(messages)
-    .set({ content: full, reasoning: reasoning || null, tokens })
+    .set({
+      content: full,
+      reasoning: reasoning || null,
+      tokens,
+      citations: opts.citations ? JSON.stringify(opts.citations) : null,
+    })
     .where(eq(messages.id, assistantId))
     .run();
   db.update(conversations)
@@ -538,7 +689,13 @@ async function streamAssistantReply(opts: {
     .run();
 
   emitChatStats({ conversationId, messageId: assistantId, tokens, tokensPerSec, elapsedMs });
-  emitDone({ conversationId, messageId: assistantId, content: full, reasoning: reasoning || undefined });
+  emitDone({
+    conversationId,
+    messageId: assistantId,
+    content: full,
+    reasoning: reasoning || undefined,
+    citations: opts.citations,
+  });
   return { ok: true, content: full };
 }
 
@@ -546,13 +703,14 @@ export async function sendMessage(
   conversationId: number,
   content: string,
   images: string[] = [],
-  opts: { webSearch?: boolean; files?: { name: string; content: string }[] } = {},
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[]; kbIds?: number[] } = {},
 ): Promise<{ ok: boolean; error?: string }> {
   const conv = db.select().from(conversations).where(eq(conversations.id, conversationId)).get();
   if (!conv) return { ok: false, error: "Conversation not found" };
   if (!content.trim() && images.length === 0) return { ok: false, error: "Empty message" };
 
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   if (!model) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
@@ -576,6 +734,7 @@ export async function sendMessage(
       role: "user",
       content,
       images: images.length ? JSON.stringify(images) : undefined,
+      kbIds: opts.kbIds?.length ? JSON.stringify(opts.kbIds) : undefined,
     })
     .run();
 
@@ -593,10 +752,16 @@ export async function sendMessage(
     .returning({ id: messages.id })
     .get();
 
+  const { messages: payloadMessages, citations } = await buildPayloadMessages(
+    conversationId,
+    content,
+    opts,
+  );
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: await buildPayloadMessages(conversationId, content, opts),
+    payloadMessages,
+    citations: citations.length > 0 ? citations : undefined,
   });
   return { ok: result.ok, error: result.error };
 }
@@ -615,7 +780,8 @@ export async function streamChatTurn(opts: {
   disableThinking?: boolean;
 }): Promise<{ ok: boolean; error?: string }> {
   const { conversationId, content } = opts;
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   if (!model) {
     emitDone({ conversationId, messageId: Date.now(), content: "", error: "No model configured" });
     return { ok: false, error: "No model configured" };
@@ -645,10 +811,11 @@ export async function streamChatTurn(opts: {
     .returning({ id: messages.id })
     .get();
 
+  const { messages: payloadMessages } = await buildPayloadMessages(conversationId, content, {});
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: await buildPayloadMessages(conversationId, content, {}),
+    payloadMessages,
     signal: opts.signal,
     onDelta: opts.onDelta,
     extraSystem: opts.extraSystem,
@@ -681,7 +848,8 @@ function cleanSearchQuery(raw: string): string {
 async function rewriteSearchQuery(latestQuery: string): Promise<string> {
   const raw = latestQuery.trim();
   const fallback = cleanSearchQuery(raw);
-  const model = getChatModelName();
+  // 请求里要填本地服务器实际认的 id（MLX 是解析后的路径，见 getChatRequestModelId）
+  const model = getChatRequestModelId();
   const base = getChatBaseUrl();
   if (!raw || !model || !base) return fallback;
 
@@ -725,13 +893,14 @@ async function rewriteSearchQuery(latestQuery: string): Promise<string> {
  * 组装发给模型的完整 payload：
  * - 历史消息转 OpenAI 格式；
  * - 附件文件内容以 text part 追加到最后一条 user 消息（仅注入上下文，不落库）；
- * - 开启联网检索时，先改写查询词再搜索用户最新提问，把结果作为 system 消息注入（不落库）。
+ * - 开启联网检索时，先改写查询词再搜索用户最新提问，把结果作为 system 消息注入（不落库）；
+ * - 挂载知识库时检索相关分块，注入为带编号的参考资料，并返回引用列表（随助手消息落库）。
  */
 async function buildPayloadMessages(
   conversationId: number,
   latestQuery: string,
-  opts: { webSearch?: boolean; files?: { name: string; content: string }[] },
-): Promise<{ role: string; content: unknown }[]> {
+  opts: { webSearch?: boolean; files?: { name: string; content: string }[]; kbIds?: number[] },
+): Promise<{ messages: { role: string; content: unknown }[]; citations: KbCitation[] }> {
   const payloadMessages = buildOpenAiMessages(getHistory(conversationId));
 
   const files = (opts.files ?? []).filter((f) => f.name && f.content?.trim());
@@ -773,7 +942,23 @@ async function buildPayloadMessages(
     }
   }
 
-  return payloadMessages;
+  let citations: KbCitation[] = [];
+  const kbIds = (opts.kbIds ?? []).filter((id) => typeof id === "number");
+  if (kbIds.length > 0 && latestQuery.trim()) {
+    const ctx = await buildChatContext(kbIds, latestQuery, { actor: "chat" });
+    if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
+    citations = ctx.citations;
+  }
+
+  // 普通对话也吃共享记忆：按当前提问召回相关记忆，作为 system 注入（不落库）。
+  if (memoryEnabled() && latestQuery.trim()) {
+    const recall = await memoryRecallSection(latestQuery).catch(() => null);
+    if (recall) {
+      payloadMessages.unshift({ role: "system", content: `## 相关长期记忆（自动召回）\n${recall}` });
+    }
+  }
+
+  return { messages: payloadMessages, citations };
 }
 
 /** 删除单条消息（连同其附件图片文件）。 */
@@ -818,10 +1003,21 @@ export async function regenerateMessage(
     .returning({ id: messages.id })
     .get();
 
+  // 重新生成时沿用原提问挂载的知识库，重跑检索注入（引用随新消息落库）。
+  const lastUser = [...context].reverse().find((m) => m.role === "user");
+  const payloadMessages = buildOpenAiMessages(context);
+  let citations: KbCitation[] = [];
+  if (lastUser?.kbIds?.length && lastUser.content.trim()) {
+    const ctx = await buildChatContext(lastUser.kbIds, lastUser.content, { actor: "chat" });
+    if (ctx.system) payloadMessages.unshift({ role: "system", content: ctx.system });
+    citations = ctx.citations;
+  }
+
   const result = await streamAssistantReply({
     conversationId,
     assistantId: assistant.id,
-    payloadMessages: buildOpenAiMessages(context),
+    payloadMessages,
+    citations: citations.length > 0 ? citations : undefined,
   });
   return { ok: result.ok, error: result.error };
 }

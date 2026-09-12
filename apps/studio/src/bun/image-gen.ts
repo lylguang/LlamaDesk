@@ -4,7 +4,7 @@ import { randomUUID } from "crypto";
 import { desc, eq } from "drizzle-orm";
 
 import { db } from "./db";
-import { imageRecords } from "./db/schema";
+import { imageRecords, type MediaSource } from "./db/schema";
 import { getSetting, updateSettings } from "./db/settings";
 import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
@@ -37,6 +37,7 @@ export type ImageGenBackend = "mlx" | "api" | "comfyui";
 export type ImageRecordRow = {
   id: number;
   status: "done" | "failed";
+  source: MediaSource;
   backend: ImageGenBackend | null;
   model: string | null;
   prompt: string | null;
@@ -46,6 +47,8 @@ export type ImageRecordRow = {
   seed: number | null;
   steps: number | null;
   imageUrl: string | null;
+  /** 生成图片在 images 根目录下的相对路径（如 gen/xxx.png），供网关 b64_json 直读。 */
+  imagePath: string | null;
   error: string | null;
   createdAt: number;
 };
@@ -74,6 +77,10 @@ export type GenerateImageParams = {
   referenceImageRef?: string;
   /** 前端当前页面的实时配置。若提供则优先使用（避免读取到未保存的旧配置），并顺带落盘。 */
   config?: Partial<ImageGenConfig>;
+  /** 是否把本次生效配置落盘到 settings（默认 true；网关等只读调用传 false 避免改写用户配置）。 */
+  persistConfig?: boolean;
+  /** 调用方来源：界面手工生成（manual，默认）还是 agent（内置 Pi Agent / 网关）。 */
+  source?: MediaSource;
 };
 
 type RecordRow = typeof imageRecords.$inferSelect;
@@ -173,6 +180,7 @@ function toRow(r: RecordRow): ImageRecordRow {
   return {
     id: r.id,
     status: r.status,
+    source: r.source,
     backend: r.backend ?? null,
     model: r.model,
     prompt: r.prompt,
@@ -182,6 +190,7 @@ function toRow(r: RecordRow): ImageRecordRow {
     seed: r.seed,
     steps: r.steps,
     imageUrl: r.imagePath ? chatImageUrl(r.imagePath) : null,
+    imagePath: r.imagePath,
     error: r.error,
     createdAt: r.createdAt ?? 0,
   };
@@ -216,6 +225,7 @@ export function deleteImageRecord(id: number): { ok: boolean } {
 
 function insertImageRecord(data: {
   status?: "done" | "failed";
+  source?: MediaSource;
   backend?: ImageGenBackend | null;
   model?: string | null;
   prompt?: string | null;
@@ -231,6 +241,7 @@ function insertImageRecord(data: {
     .insert(imageRecords)
     .values({
       status: data.status ?? "done",
+      source: data.source ?? "manual",
       backend: data.backend ?? null,
       model: data.model ?? null,
       prompt: data.prompt ?? null,
@@ -585,9 +596,12 @@ export async function generateImage(
         : dbCfg.comfyBase,
   };
   // 把页面上的实时配置落盘（含 backend），确保下次打开仍是这次用的配置。
-  try {
-    saveImageGenConfig(cfg);
-  } catch {}
+  // 网关调用时传 persistConfig: false，避免 API 请求改写用户保存的图像配置。
+  if (params.persistConfig !== false) {
+    try {
+      saveImageGenConfig(cfg);
+    } catch {}
+  }
 
   const prompt = params.prompt?.trim() ?? "";
   if (!prompt) {
@@ -610,6 +624,7 @@ export async function generateImage(
       toRow(
         insertImageRecord({
           status: "done",
+          source: params.source ?? "manual",
           backend: cfg.backend,
           model: params.model?.trim() || cfg.model || null,
           prompt,
@@ -627,6 +642,7 @@ export async function generateImage(
     const message = e instanceof Error ? e.message : String(e);
     insertImageRecord({
       status: "failed",
+      source: params.source ?? "manual",
       backend: cfg.backend,
       model: params.model?.trim() || cfg.model || null,
       prompt,

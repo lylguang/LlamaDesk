@@ -1,8 +1,9 @@
 import { existsSync, mkdirSync, renameSync, statSync } from "fs";
 import { homedir } from "os";
 import path from "path";
-import { IMAGE_SERVER_PORT } from "../shared/server-info";
+import { IMAGE_SERVER_HOST, IMAGE_SERVER_PORT, isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 import { getDataDir } from "./paths";
+import { safeJoin } from "./path-safety";
 
 // Dev builds run with the process CWD inside the app bundle, which electrobun
 // regenerates on every rebuild — a CWD-relative data dir (and the audio/images
@@ -29,6 +30,11 @@ export function getImagesBaseDir(): string {
  * 提示词库媒体素材根目录：seed 数据里的 `/prompt-library/...` 路径指向
  * vibedesign 仓库 `frontend/public/prompt-library`（图片/视频封面，未打进本应用包）。
  * 目录不存在时返回 null，由本地缓存 / 云端直链兜底。
+ *
+ * 注意返回的是**素材根目录本身**（含 prompt-library 这一段）：`/prompt-library/`
+ * 路由会把前缀之后的部分接在它下面，与下载缓存目录（<dataDir>/prompt-media/
+ * prompt-library）保持同一语义。此前少了一层，导致开发机上的本地素材一律 404
+ * （被云端直链兜底掩盖，路由测试也一直是失败的、被人为跳过）。
  */
 export function getPromptLibraryMediaBase(): string | null {
   const base = path.join(
@@ -37,8 +43,9 @@ export function getPromptLibraryMediaBase(): string | null {
     "vibedesign",
     "frontend",
     "public",
+    "prompt-library",
   );
-  return existsSync(path.join(base, "prompt-library")) ? base : null;
+  return existsSync(base) ? base : null;
 }
 
 /**
@@ -51,7 +58,7 @@ export function getPromptLibraryCacheBase(): string {
 
 /** 提示词库媒体相对路径（如 `awesome/case544.jpg`）对应的本地缓存 URL。 */
 export function promptLibraryLocalUrl(rel: string): string {
-  return `http://localhost:${IMAGE_SERVER_PORT}/prompt-library/${rel}`;
+  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/prompt-library/${rel}`;
 }
 
 export function getUploadsBaseDir(): string {
@@ -73,8 +80,11 @@ const MIME: Record<string, string> = {
   ".m4a": "audio/mp4",
   ".aac": "audio/aac",
   ".flac": "audio/flac",
-  ".webm": "audio/webm",
-  ".mp4": "audio/mp4",
+  // 视频容器（AI 视频生成的成片由 <video> 元素播放，MIME 必须是 video/*）
+  ".webm": "video/webm",
+  ".mp4": "video/mp4",
+  ".mov": "video/quicktime",
+  ".mkv": "video/x-matroska",
 };
 
 const CORS_HEADERS = {
@@ -148,8 +158,15 @@ export function startImageServer() {
 
   Bun.serve({
     port: IMAGE_SERVER_PORT,
+    // 只监听回环：服务无鉴权，绑全网卡等于把文档/图片/音频暴露给同网段。
+    hostname: IMAGE_SERVER_HOST,
     async fetch(req) {
       const url = new URL(req.url);
+
+      // DNS rebinding / 外部网页防护：Host 必须是回环，Origin 必须是本机或本应用。
+      if (!isLoopbackHost(req.headers.get("host")) || !isLocalOrigin(req.headers.get("origin"))) {
+        return new Response("Forbidden", { status: 403 });
+      }
 
       if (req.method === "OPTIONS") {
         return new Response(null, { status: 204, headers: CORS_HEADERS });
@@ -161,10 +178,8 @@ export function startImageServer() {
         const rel = decodeURIComponent(url.pathname.slice("/prompt-library/".length));
         for (const mediaBase of [getPromptLibraryMediaBase(), getPromptLibraryCacheBase()]) {
           if (!mediaBase) continue;
-          const mediaPath = path.join(mediaBase, rel);
-          if (!mediaPath.startsWith(mediaBase + path.sep)) {
-            return new Response("Forbidden", { status: 403 });
-          }
+          const mediaPath = safeJoin(mediaBase, rel);
+          if (!mediaPath) return new Response("Forbidden", { status: 403 });
           if (!existsSync(mediaPath)) continue;
           const mediaSize = statSync(mediaPath).size;
           return fileResponse(mediaPath, mediaSize, req.headers.get("range"));
@@ -172,9 +187,8 @@ export function startImageServer() {
         return new Response("Not found", { status: 404 });
       }
 
-      const filePath = path.join(baseDir, decodeURIComponent(url.pathname));
-
-      if (!filePath.startsWith(baseDir)) {
+      const filePath = safeJoin(baseDir, decodeURIComponent(url.pathname));
+      if (!filePath) {
         return new Response("Forbidden", { status: 403 });
       }
 
@@ -187,11 +201,11 @@ export function startImageServer() {
     },
   });
 
-  console.log(`Image server running on http://localhost:${IMAGE_SERVER_PORT}`);
+  console.log(`Image server running on http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}`);
 }
 
 export function imageUrl(docId: number, filename: string): string {
-  return `http://localhost:${IMAGE_SERVER_PORT}/${docId}/${filename}`;
+  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/${docId}/${filename}`;
 }
 
 // Chat images are stored under images/<...> with a ref like "chat/<convId>/<file>".

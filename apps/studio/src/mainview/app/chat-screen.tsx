@@ -1,22 +1,24 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { memo, useEffect, useRef, useState, type ReactNode } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   ArrowUpIcon,
+  BookOpenIcon,
   BotIcon,
   BrainIcon,
+  CheckIcon,
   ChevronDownIcon,
   Loader2Icon,
   ImagePlusIcon,
+  LibraryIcon,
   PaperclipIcon,
   GlobeIcon,
   FileTextIcon,
   XIcon,
-  RefreshCwIcon,
   AlertTriangleIcon,
   CopyIcon,
-  CheckIcon,
   RotateCcwIcon,
   LanguagesIcon,
+  SquareTerminalIcon,
   Trash2Icon,
 } from "lucide-react";
 
@@ -24,15 +26,27 @@ import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Textarea } from "@ui/textarea";
 import type { ChatMessage } from "../../bun/chat";
+import type { KbCitation } from "../../shared/knowledge";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useT } from "@stores/ui-lang";
+import { useRouter } from "@stores/router";
 import { useServerStore } from "@stores/server";
+import { useServedStore } from "@stores/served";
 import { Markdown } from "@components/markdown";
 import { ModelPicker } from "@components/model-picker";
 import { persistedErrorMessage, serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 import { chatImageUrl } from "../../shared/server-info";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@ui/dialog";
+import { useKbListQuery } from "./kb";
 
 function MessageImages({ images }: { images: string[] }) {
   if (images.length === 0) return null;
@@ -251,6 +265,31 @@ function ReasoningBlock({ reasoning, streaming }: { reasoning: string; streaming
   );
 }
 
+/** 助手消息底部的知识库引用溯源：编号 + 来源文档，悬浮显示片段预览。 */
+function CitationBar({ citations }: { citations: KbCitation[] }) {
+  const t = useT();
+  if (citations.length === 0) return null;
+  return (
+    <div className="flex flex-wrap items-center gap-1 pt-0.5">
+      <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70">
+        <BookOpenIcon className="size-3" />
+        {t("chat.citations")}
+      </span>
+      {citations.map((c) => (
+        <span
+          key={`${c.docId}-${c.seq}-${c.n}`}
+          title={c.snippet}
+          className="inline-flex max-w-56 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+        >
+          <span className="font-mono text-primary/80">[{c.n}]</span>
+          <span className="truncate">{c.docName}</span>
+          <span className="shrink-0 font-mono text-muted-foreground/60">#{c.seq}</span>
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   isStreamingMessage,
@@ -259,7 +298,7 @@ function MessageBubble({
   isStreamingMessage: boolean;
 }) {
   const t = useT();
-  const { role, content, images, reasoning } = message;
+  const { role, content, images, reasoning, citations } = message;
   // 后端把启动失败持久化为 "⚠️ <raw error>"，这里补一行本地化的可操作提示。
   const rawError = role === "assistant" ? persistedErrorMessage(content) : null;
   const errorHint = rawError !== null ? serverErrorHint(t, rawError) : null;
@@ -301,6 +340,9 @@ function MessageBubble({
               </p>
             )}
             </div>
+            {!isStreamingMessage && citations && citations.length > 0 && (
+              <CitationBar citations={citations} />
+            )}
           </div>
         </div>
       )}
@@ -312,9 +354,110 @@ function MessageBubble({
 type Attachment = { ref: string; url: string };
 type FileAttachment = { name: string; content: string };
 
+/** 知识库选择弹窗：多选，随消息发送做检索注入 + 引用溯源。 */
+function KbPickerDialog({
+  open,
+  onOpenChange,
+  selected,
+  onChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  selected: number[];
+  onChange: (ids: number[]) => void;
+}) {
+  const t = useT();
+  const listQuery = useKbListQuery();
+  const kbs = listQuery.data?.kbs ?? [];
+
+  const toggle = (id: number) => {
+    onChange(selected.includes(id) ? selected.filter((x) => x !== id) : [...selected, id]);
+  };
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{t("chat.kbPicker.title")}</DialogTitle>
+          <DialogDescription>{t("chat.kbPicker.desc")}</DialogDescription>
+        </DialogHeader>
+        <div className="-mx-1 max-h-72 overflow-y-auto px-1">
+          {listQuery.isLoading ? (
+            <div className="flex justify-center py-8">
+              <Loader2Icon className="size-5 animate-spin text-muted-foreground" />
+            </div>
+          ) : kbs.length === 0 ? (
+            <div className="flex flex-col items-center gap-2 py-8 text-center">
+              <LibraryIcon className="size-6 text-muted-foreground/60" />
+              <p className="text-xs text-muted-foreground">{t("chat.kbPicker.empty")}</p>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-1">
+              {kbs.map((kb) => {
+                const active = selected.includes(kb.id);
+                return (
+                  <button
+                    key={kb.id}
+                    type="button"
+                    onClick={() => toggle(kb.id)}
+                    className={cn(
+                      "flex items-center gap-2.5 rounded-lg border px-3 py-2 text-left transition-colors",
+                      active
+                        ? "border-primary/40 bg-primary/5"
+                        : "hover:bg-muted/60",
+                    )}
+                  >
+                    <span
+                      className={cn(
+                        "flex size-4 shrink-0 items-center justify-center rounded border",
+                        active ? "border-primary bg-primary text-primary-foreground" : "border-muted-foreground/40",
+                      )}
+                    >
+                      {active && <CheckIcon className="size-3" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                      <span className="block truncate text-xs font-medium">{kb.name}</span>
+                      <span className="block text-[10px] text-muted-foreground">
+                        {t("kb.header.docs", { count: String(kb.docCount) })} ·{" "}
+                        {kb.embeddingModel || t("kb.header.keywordOnly")}
+                      </span>
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        <DialogFooter>
+          {selected.length > 0 && (
+            <Button
+              variant="ghost"
+              size="sm"
+              className="mr-auto text-xs text-muted-foreground"
+              onClick={() => onChange([])}
+            >
+              {t("chat.kbPicker.clear")}
+            </Button>
+          )}
+          <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
+            {t("common.done")}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * 流式输出时只有最后一条消息会被替换成新对象，其余消息引用不变；
+ * memo 让历史气泡整段跳过重渲染（否则每个增量都会重渲染整个会话）。
+ */
+const MemoizedMessageBubble = memo(MessageBubble);
+
 function ChatMessages({ conversationId }: { conversationId: number }) {
   const queryClient = useQueryClient();
   const t = useT();
+  const setRoute = useRouter((s) => s.setRoute);
   const activeMessages = useChatStore((s) => s.activeMessages);
   const streaming = useChatStore((s) => s.streaming);
   const serverStatus = useServerStore((s) => s.status);
@@ -322,6 +465,8 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [webSearch, setWebSearch] = useState(false);
+  const [kbIds, setKbIds] = useState<number[]>([]);
+  const [kbPickerOpen, setKbPickerOpen] = useState(false);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -344,9 +489,25 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     setWebSearch(webSearchDefault);
   }
 
+  // 本地就绪状态看**已启动模型**：活动实例在加载中 / 报错，或者一个都没启动。
+  const servedModels = useServedStore((s) => s.models);
+  const activeServed = servedModels.find((m) => m.isActive);
+  const localReady = servedModels.some(
+    (m) => m.status === "running" || m.status === "starting" || m.status === "downloading",
+  );
   const serverStarting =
-    !isRemoteMode && (serverStatus === "starting" || serverStatus === "downloading");
-  const serverFailed = !isRemoteMode && serverStatus === "error";
+    !isRemoteMode &&
+    (activeServed?.status === "starting" || activeServed?.status === "downloading");
+  const serverFailed = !isRemoteMode && activeServed?.status === "error";
+  // 端口上可能已经有别人起的服务（`omi serve` / 自建 llama-server）：探到就不提示启动。
+  const { data: localStatus } = useQuery({
+    queryKey: ["server-status"],
+    queryFn: () => rpcClient.getServerStatus(),
+    enabled: !isRemoteMode && !localReady,
+    refetchInterval: 8000,
+  });
+  const noLocalModel =
+    !isRemoteMode && !localReady && localStatus !== undefined && !localStatus.reachable;
 
   useEffect(() => {
     useChatStore.getState().setStreaming(false);
@@ -372,11 +533,13 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
       images,
       files,
       search,
+      kbIds,
     }: {
       content: string;
       images?: string[];
       files?: FileAttachment[];
       search?: boolean;
+      kbIds?: number[];
     }) =>
       rpcClient.sendChatMessage({
         conversationId,
@@ -384,6 +547,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
         images,
         webSearch: search,
         files,
+        kbIds,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -473,7 +637,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
       },
     ]);
     useChatStore.getState().setStreaming(true);
-    sendMutation.mutate({ content, images, files, search: webSearch });
+    sendMutation.mutate({ content, images, files, search: webSearch, kbIds });
   };
 
   const hasMessages = activeMessages.length > 0;
@@ -495,7 +659,7 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
             </div>
           ) : (
             activeMessages.map((m) => (
-              <MessageBubble
+              <MemoizedMessageBubble
                 key={m.id}
                 message={m}
                 isStreamingMessage={
@@ -509,27 +673,47 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
 
       <div className="shrink-0 border-t bg-gradient-to-t from-muted/40 to-transparent p-4">
         <div className="mx-auto flex w-full max-w-3xl flex-col gap-2">
-          {(serverStarting || (sendMutation.isPending && serverFailed)) && (
+          {(noLocalModel || serverStarting || (sendMutation.isPending && serverFailed)) && (
             <div
               className={cn(
                 "flex items-center gap-2 rounded-lg border px-3 py-1.5 text-xs",
                 serverFailed
                   ? "border-destructive/30 bg-destructive/10 text-destructive"
-                  : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
+                  : noLocalModel
+                    ? "border-border bg-muted/50 text-muted-foreground"
+                    : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-400",
               )}
             >
-              <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              {noLocalModel || serverFailed ? (
+                <AlertTriangleIcon className="size-3.5 shrink-0" />
+              ) : (
+                <Loader2Icon className="size-3.5 shrink-0 animate-spin" />
+              )}
               <span className="truncate">
-                {serverFailed
-                  ? t("server.startFailed")
-                  : serverStatus === "downloading"
-                    ? t("server.startingModel")
-                    : t("server.waitingForModel")}
+                {noLocalModel
+                  ? t("chat.noLocalModel")
+                  : serverFailed
+                    ? t("server.startFailed")
+                    : activeServed?.status === "downloading"
+                      ? t("server.startingModel")
+                      : t("server.waitingForModel")}
               </span>
-              {serverStarting && (
-                <span className="ml-auto h-1 w-20 shrink-0 overflow-hidden rounded-full bg-amber-500/20">
-                  <span className="block h-full w-1/2 animate-pulse rounded-full bg-amber-500" />
-                </span>
+              {noLocalModel ? (
+                <Button
+                  variant="outline"
+                  size="xs"
+                  className="ml-auto h-6 shrink-0"
+                  onClick={() => setRoute({ path: "settings", tab: "logs" })}
+                >
+                  <SquareTerminalIcon data-icon="inline-start" />
+                  {t("chat.modelStartInConsole")}
+                </Button>
+              ) : (
+                serverStarting && (
+                  <span className="ml-auto h-1 w-20 shrink-0 overflow-hidden rounded-full bg-amber-500/20">
+                    <span className="block h-full w-1/2 animate-pulse rounded-full bg-amber-500" />
+                  </span>
+                )
               )}
             </div>
           )}
@@ -644,6 +828,24 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               >
                 <GlobeIcon className="size-4" />
               </Button>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-pressed={kbIds.length > 0}
+                className={cn(
+                  kbIds.length > 0
+                    ? "bg-primary/10 text-primary hover:bg-primary/15 hover:text-primary"
+                    : "text-muted-foreground",
+                )}
+                tooltip={t("chat.kb")}
+                onClick={() => setKbPickerOpen(true)}
+                disabled={streaming}
+              >
+                <BookOpenIcon className="size-4" />
+                {kbIds.length > 0 && (
+                  <span className="ml-0.5 font-mono text-[10px] tabular-nums">{kbIds.length}</span>
+                )}
+              </Button>
 
               <div className="ml-auto flex min-w-0 items-center gap-1.5">
                 <ModelPicker disabled={streaming} />
@@ -664,6 +866,13 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
               </div>
             </div>
           </div>
+
+          <KbPickerDialog
+            open={kbPickerOpen}
+            onOpenChange={setKbPickerOpen}
+            selected={kbIds}
+            onChange={setKbIds}
+          />
         </div>
       </div>
     </div>

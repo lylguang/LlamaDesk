@@ -15,11 +15,16 @@ import {
   AlertTriangleIcon,
   SparklesIcon,
   SlidersHorizontalIcon,
+  TerminalSquareIcon,
   ChevronDownIcon,
   StoreIcon,
+  FolderIcon,
+  FolderPlusIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { SourceBadge } from "@components/source-badge";
+import { ModelCategoryBadge, ModelFormatBadge, MODEL_TAG_CLASS } from "@components/model-category-badge";
 import { useEngine } from "@lib/use-engine";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
@@ -31,7 +36,7 @@ import { Tabs, TabsList, TabsTrigger } from "@ui/tabs";
 import { Spinner } from "@ui/spinner";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detail";
-import { useServerStore } from "@stores/server";
+import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import {
   MODEL_PRESETS,
@@ -42,7 +47,10 @@ import {
   type InstalledModel,
   type InferenceEngine,
   type ModelCategory,
+  type ModelOrigin,
+  type ModelSource,
 } from "@/shared/modelscope";
+
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "./setup-screen/constants";
 import { LlamaEngineInstall } from "./local-engines/llm-panel";
@@ -79,6 +87,13 @@ function useFirstSuggestedPreset(engine: InferenceEngine): ChatPreset | null {
 function EngineSelector() {
   const t = useT();
   const { engine, setEngine, isSaving } = useEngine();
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  // MLX 只面向 macOS，非 mac 不展示该引擎选项。
+  const isMac = data?.platform === "darwin";
+  const options = ENGINE_OPTIONS.filter((o) => o.value !== "mlx" || isMac);
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
@@ -92,7 +107,7 @@ function EngineSelector() {
             <SelectValue />
           </SelectTrigger>
           <SelectContent>
-            {ENGINE_OPTIONS.map((o) => (
+            {options.map((o) => (
               <SelectItem key={o.value} value={o.value}>{t(o.labelKey)}</SelectItem>
             ))}
           </SelectContent>
@@ -149,6 +164,7 @@ const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
     { key: "SGLANG_TP_SIZE", labelKey: "models.params.tp" },
     { key: "SGLANG_MEM_FRACTION_STATIC", labelKey: "models.params.memFraction", step: "0.02" },
   ],
+  mlx: [{ key: "MLX_CACHE_SIZE_GB", labelKey: "models.params.mlxCacheGb", step: "1" }],
 };
 
 /** 数字参数输入：编辑中不写库，失焦 / Enter 时提交（下次启动生效）。 */
@@ -263,11 +279,15 @@ function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
 // 启动条
 // ---------------------------------------------------------------------------
 
-/** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。 */
-function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
+/** 启动条：选择已下载的模型 + 启动/重启服务器（使用上方所选引擎与启动参数）。
+ * 只列出当前引擎能加载的模型，避免在 MLX 下选到 GGUF 等不兼容文件。 */
+function LaunchBar({ installedModels, engine }: { installedModels: InstalledModel[]; engine: InferenceEngine }) {
+  // 目录条目（HF 缓存里的整仓库）按它自己的格式判断兼容性，文件名没有扩展名。
+  const compatibleModels = installedModels.filter((m) => engineSupports(engine, m.kind));
   const t = useT();
   const queryClient = useQueryClient();
-  const serverStatus = useServerStore((s) => s.status);
+  const setRoute = useRouter((s) => s.setRoute);
+  const servedModels = useServedStore((s) => s.models);
   const [startError, setStartError] = useState<string | null>(null);
 
   const { data } = useQuery({
@@ -275,6 +295,9 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
     queryFn: () => rpcClient.getSettings(undefined),
   });
   const activePath = data?.settings.LOCAL_MODEL_PATH ?? "";
+  // 状态按**这个模型自己的实例**看：多实例下"当前活动实例在跑"不代表所选模型在跑。
+  const servedForModel = servedModels.find((m) => m.modelRef === activePath);
+  const serverStatus = servedForModel?.status ?? "stopped";
 
   const selectMutation = useMutation({
     mutationFn: (path: string) => rpcClient.setActiveModel({ path }),
@@ -286,17 +309,18 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
   });
   const startMutation = useMutation({
     mutationFn: async () => {
-      const status = useServerStore.getState().status;
-      const res =
-        status === "running" || status === "starting" || status === "downloading"
-          ? await rpcClient.restartServer()
-          : await rpcClient.startServer();
+      // 已启动过就重启那个实例（换端口 / 重载设置），没启动过就按路径启动一个。
+      const res = servedForModel
+        ? await rpcClient.restartServedModel({ id: servedForModel.id })
+        : await rpcClient.startServedModel({ path: activePath });
       if (!res.ok) throw new Error(res.error || "Failed to start server");
       return res;
     },
     onSuccess: () => {
       setStartError(null);
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+      queryClient.invalidateQueries({ queryKey: ["served-models"] });
+      queryClient.invalidateQueries({ queryKey: ["chat-models"] });
     },
     onError: (err: unknown) =>
       setStartError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
@@ -315,20 +339,30 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
             onValueChange={(v) => selectMutation.mutate(v)}
             disabled={selectMutation.isPending || busy}
           >
-            <SelectTrigger className="h-8 text-xs">
+            <SelectTrigger className="h-9 text-xs">
               <SelectValue placeholder={t("models.chooseModelEmpty")} />
             </SelectTrigger>
-            <SelectContent className="max-w-sm">
-              {installedModels.map((m) => {
-                const kind = fileKind(m.fileName);
+            <SelectContent className="w-[30rem] max-w-[min(30rem,90vw)]">
+              {compatibleModels.map((m) => {
+                const kind = m.kind ?? fileKind(m.fileName);
                 return (
                   <SelectItem key={m.path} value={m.path}>
-                    <span className="flex min-w-0 items-center gap-2">
+                    <span className="flex min-w-0 flex-1 items-center gap-1.5">
+                      {m.isDir && (
+                        <FolderIcon className="size-3 shrink-0 text-muted-foreground/60" />
+                      )}
                       <span className="truncate">{m.fileName}</span>
-                      <span className="ml-auto shrink-0 text-[10px] text-muted-foreground/70">
-                        {kind === "gguf" ? "GGUF" : kind === "safetensors" ? "safetensors" : "·"}
-                        {m.isActive ? ` · ${t("models.inUse")}` : ""}
+                    </span>
+                    <span className="flex shrink-0 items-center gap-1.5 text-[10px] text-muted-foreground/70">
+                      {m.isActive && <span className="text-primary">{t("models.inUse")}</span>}
+                      <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
+                        {kind === "gguf"
+                          ? "GGUF"
+                          : kind === "safetensors"
+                            ? "safetensors"
+                            : t("models.format.other")}
                       </span>
+                      <span className="max-w-44 truncate">{m.repo}</span>
                     </span>
                   </SelectItem>
                 );
@@ -362,6 +396,19 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
           )}
           {serverStatus === "running" ? t("models.restartServer") : t("models.launch")}
         </Button>
+        {/* 启动是后台进行的：进度 / 日志在控制台看，这里给个直达入口。 */}
+        {serverStatus !== "stopped" && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-8 text-xs"
+            tooltip={t("console.open")}
+            onClick={() => setRoute({ path: "settings", tab: "logs" })}
+          >
+            <TerminalSquareIcon data-icon="inline-start" />
+            {t("console.title")}
+          </Button>
+        )}
       </div>
       {startError && (
         <div className="space-y-0.5">
@@ -385,14 +432,6 @@ function LaunchBar({ installedModels }: { installedModels: InstalledModel[] }) {
 // 已安装模型管理
 // ---------------------------------------------------------------------------
 
-const CAT_BADGE_CLASSES: Record<string, string> = {
-  chat: "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400",
-  tts: "bg-purple-100 text-purple-700 dark:bg-purple-900/40 dark:text-purple-400",
-  asr: "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-400",
-  image: "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400",
-  other: "bg-muted text-muted-foreground",
-};
-
 function InstalledModelRow({
   model,
   engine,
@@ -406,15 +445,26 @@ function InstalledModelRow({
     isChatModel: boolean;
     category: ModelCategory;
     favorite: boolean;
+    /** 下载来源平台（老数据可能没有）。 */
+    source?: ModelSource;
+    /** 模型来自哪个位置：应用下载 / 本地目录 / HF 缓存。 */
+    origin: ModelOrigin;
+    /** 整目录条目（HF 缓存里的模型目录）。 */
+    isDir: boolean;
+    /** 权重格式，目录条目按内容判定。 */
+    kind: import("../../shared/modelscope").ModelFileKind;
+    /** 运行时实际加载的路径（分批 GGUF 指向第一个分片），与已启动实例对齐用。 */
+    runtimeTarget: string;
   };
   engine: InferenceEngine;
 }) {
   const queryClient = useQueryClient();
   const t = useT();
-  const serverStatus = useServerStore((s) => s.status);
-  const kind = fileKind(model.fileName);
+  const servedModels = useServedStore((s) => s.models);
+  const kind = model.kind ?? fileKind(model.fileName);
   const compatible = engineSupports(engine, kind);
   const [startError, setStartError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
 
   const setActiveMutation = useMutation({
     mutationFn: () => rpcClient.setActiveModel({ path: model.path }),
@@ -427,23 +477,32 @@ function InstalledModelRow({
   });
   const deleteMutation = useMutation({
     mutationFn: () => rpcClient.deleteLocalModel({ path: model.path }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        setDeleteError(res.error ?? t("models.deleteFailed"));
+        return;
+      }
+      setDeleteError(null);
+      queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+    },
   });
   const favoriteMutation = useMutation({
     mutationFn: () => rpcClient.toggleFavoriteModel({ path: model.path }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
   });
+  const servedForModel = servedModels.find(
+    (m) => m.modelRef === model.runtimeTarget || m.modelRef === model.path,
+  );
   const startMutation = useMutation({
     mutationFn: async () => {
       if (!model.isActive) {
         const act = await rpcClient.setActiveModel({ path: model.path });
         if (!act.ok) throw new Error(act.error || "Failed to activate model");
       }
-      const status = useServerStore.getState().status;
-      const res =
-        status === "running" || status === "starting" || status === "downloading"
-          ? await rpcClient.restartServer()
-          : await rpcClient.startServer();
+      // 已启动过就重启那个实例，否则按路径启动新实例（可同时跑多个模型）。
+      const res = servedForModel
+        ? await rpcClient.restartServedModel({ id: servedForModel.id })
+        : await rpcClient.startServedModel({ path: model.runtimeTarget || model.path });
       if (!res.ok) throw new Error(res.error || "Failed to start server");
       return res;
     },
@@ -455,6 +514,7 @@ function InstalledModelRow({
     onError: (err: unknown) =>
       setStartError(err instanceof Error ? err.message.replace(/^Error:\s*/i, "") : String(err)),
   });
+  const serverStatus = servedForModel?.status ?? "stopped";
   const serverBusy = serverStatus === "starting" || serverStatus === "downloading";
   const startErrorHint = startError ? serverErrorHint(t, startError) : null;
   const [copied, setCopied] = useState(false);
@@ -473,37 +533,32 @@ function InstalledModelRow({
     <div className="flex items-center gap-3 rounded-lg border p-3">
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2">
+          {model.isDir && (
+            <FolderIcon className="size-3.5 shrink-0 text-muted-foreground/60" />
+          )}
           <span className="truncate text-sm font-medium">{model.fileName}</span>
-          <span
-            className={cn(
-              "inline-flex h-5 items-center rounded-full px-1.5 text-[10px] font-medium",
-              CAT_BADGE_CLASSES[model.category],
-            )}
-          >
-            {t(`models.cat.${model.category}`)}
-          </span>
-          <span
-            className={cn(
-              "inline-flex h-5 shrink-0 items-center rounded-full px-1.5 text-[10px] font-medium",
+          <ModelCategoryBadge
+            category={model.category}
+            label={t(`models.cat.${model.category}`)}
+          />
+          <ModelFormatBadge
+            kind={kind}
+            label={
               kind === "gguf"
-                ? "bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-400"
+                ? t("models.format.gguf")
                 : kind === "safetensors"
-                  ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-                  : "bg-muted text-muted-foreground",
-            )}
-          >
-            {kind === "gguf"
-              ? t("models.format.gguf")
-              : kind === "safetensors"
-                ? t("models.format.safetensors")
-                : t("models.format.other")}
-          </span>
+                  ? t("models.format.safetensors")
+                  : t("models.format.other")
+            }
+          />
           {!compatible && (
             <span className="inline-flex h-5 items-center gap-1 rounded-full bg-amber-100 px-1.5 text-[10px] font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-400">
               <AlertTriangleIcon className="size-3" />
               {t("models.autoSwitchEngine")}
             </span>
           )}
+          <OriginBadge origin={model.origin} />
+          {model.source && model.origin !== "hf-cache" && <SourceBadge source={model.source} />}
           {model.isActive && (
             <Badge variant="default" className="gap-1 text-[10px]">
               <SparklesIcon className="size-3" /> {t("models.inUse")}
@@ -518,9 +573,18 @@ function InstalledModelRow({
         <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">
           {model.repo}
         </p>
-        <p className="mt-0.5 text-[11px] text-muted-foreground">
-          {formatBytes(model.size)}
+        <p className="mt-0.5 flex items-center gap-1.5 text-[11px] text-muted-foreground">
+          <span>{formatBytes(model.size)}</span>
+          {model.isDir && (
+            <span className="rounded bg-muted px-1 text-[10px]">{t("models.wholeRepo")}</span>
+          )}
         </p>
+        {deleteError && (
+          <p className="mt-1 flex items-start gap-1 text-[11px] text-destructive">
+            <AlertTriangleIcon className="mt-0.5 size-3 shrink-0" />
+            <span className="min-w-0 break-words">{deleteError}</span>
+          </p>
+        )}
         {startError && (
           <div className="mt-1 space-y-0.5">
             {startErrorHint && (
@@ -587,7 +651,16 @@ function InstalledModelRow({
         <Button
           variant="ghost"
           size="icon-sm"
-          tooltip={t("common.delete")}
+          tooltip={t("models.showInFolder")}
+          onClick={() => void rpcClient.showInExplorer({ filePath: model.path })}
+          className="text-muted-foreground"
+        >
+          <FolderOpenIcon className="size-4" />
+        </Button>
+        <Button
+          variant="ghost"
+          size="icon-sm"
+          tooltip={model.origin === "hf-cache" ? t("models.deleteCacheEntry") : t("common.delete")}
           onClick={() => deleteMutation.mutate()}
           disabled={deleteMutation.isPending}
         >
@@ -598,21 +671,24 @@ function InstalledModelRow({
   );
 }
 
-/** 已安装模型 tab 页：全部 / 对话·VLM / TTS / ASR / 生图，切换展示，不再上下堆叠。 */
+/** 已安装模型 tab 页：全部分类各一个 tab（与模型库的分类口径一致），切换展示。 */
 type InstalledTab = "all" | ModelCategory;
 
 const INSTALLED_TABS: { value: InstalledTab; labelKey: string }[] = [
   { value: "all", labelKey: "models.cat.all" },
   { value: "chat", labelKey: "models.cat.chat" },
+  { value: "embedding", labelKey: "models.cat.embedding" },
+  { value: "rerank", labelKey: "models.cat.rerank" },
   { value: "tts", labelKey: "models.cat.tts" },
   { value: "asr", labelKey: "models.cat.asr" },
   { value: "image", labelKey: "models.cat.image" },
+  { value: "video", labelKey: "models.cat.video" },
 ];
 
 function InstalledModels({ engine }: { engine: InferenceEngine }) {
   const t = useT();
-  const [showAll, setShowAll] = useState(false);
   const [tab, setTab] = useState<InstalledTab>("all");
+  const [origin, setOrigin] = useState<ModelOrigin | "all">("all");
   const { data, isLoading } = useQuery({
     queryKey: ["installed-models"],
     queryFn: () => rpcClient.listInstalledModels(),
@@ -626,16 +702,44 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
     );
   }
 
+  // 严格按当前引擎过滤：只显示该引擎能加载的推理模型；`other`（TTS/ASR/生图
+  // 等非推理模型）不属于推理引擎加载，始终展示，由分类 tab 分组。
   const allModels = (data?.models ?? []).filter(
-    (m) => showAll || fileKind(m.fileName) === "other" || engineSupports(engine, fileKind(m.fileName)),
+    (m) => m.kind === "other" || engineSupports(engine, m.kind),
   );
+  const byOrigin =
+    origin === "all" ? allModels : allModels.filter((m) => m.origin === origin);
   const models =
-    tab === "all" ? allModels : allModels.filter((m) => (m.category ?? "other") === tab);
+    tab === "all" ? byOrigin : byOrigin.filter((m) => (m.category ?? "other") === tab);
   const countFor = (value: InstalledTab) =>
-    value === "all" ? allModels.length : allModels.filter((m) => (m.category ?? "other") === value).length;
+    value === "all" ? byOrigin.length : byOrigin.filter((m) => (m.category ?? "other") === value).length;
+  const originCount = (value: ModelOrigin) => allModels.filter((m) => m.origin === value).length;
 
   return (
     <Tabs value={tab} onValueChange={(v) => setTab(v as InstalledTab)} className="gap-3">
+      {/* 来源筛选：应用下载 / 本地目录 / HF 缓存 —— 一眼看出模型是从哪儿来的 */}
+      <div className="flex flex-wrap items-center gap-1.5">
+        {(["all", "managed", "external", "hf-cache"] as const).map((o) => {
+          const active = origin === o;
+          const count = o === "all" ? allModels.length : originCount(o);
+          return (
+            <button
+              key={o}
+              type="button"
+              onClick={() => setOrigin(o)}
+              className={cn(
+                "rounded-full border px-2.5 py-1 text-[11px] transition-colors",
+                active
+                  ? "border-primary bg-primary/10 text-primary"
+                  : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+              )}
+            >
+              {o === "all" ? t("models.cat.all") : t(ORIGIN_LABEL_KEYS[o])}
+              <span className="ml-1 tabular-nums opacity-60">{count}</span>
+            </button>
+          );
+        })}
+      </div>
       <TabsList className="w-fit max-w-full overflow-x-auto">
         {INSTALLED_TABS.map((tb) => (
           <TabsTrigger key={tb.value} value={tb.value} className="gap-1.5 text-xs">
@@ -652,15 +756,6 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
           <p className="text-xs text-muted-foreground">
             {allModels.length === 0 ? t("models.noInstalled") : t("models.noInstalledInCat")}
           </p>
-          {!showAll && allModels.length === 0 && (
-            <button
-              type="button"
-              onClick={() => setShowAll(true)}
-              className="text-xs text-primary underline-offset-2 hover:underline"
-            >
-              {t("models.showAllFormats")}
-            </button>
-          )}
         </div>
       ) : (
         <div className="flex flex-col gap-2">
@@ -670,6 +765,200 @@ function InstalledModels({ engine }: { engine: InferenceEngine }) {
         </div>
       )}
     </Tabs>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 本地模型目录管理：默认扫描应用下载目录 + HF 缓存，用户可再添加自己的目录
+// ---------------------------------------------------------------------------
+
+const ORIGIN_LABEL_KEYS: Record<ModelOrigin, string> = {
+  managed: "models.origin.managed",
+  external: "models.origin.external",
+  "hf-cache": "models.origin.hfCache",
+};
+
+/** 目录来源标签：应用下载目录 / HF 缓存 / 用户自己加的目录。 */
+function OriginBadge({ origin, className }: { origin: ModelOrigin; className?: string }) {
+  const t = useT();
+  return (
+    <span className={cn(MODEL_TAG_CLASS, className)}>
+      <FolderIcon className="size-3" />
+      {t(ORIGIN_LABEL_KEYS[origin])}
+    </span>
+  );
+}
+
+/**
+ * 目录管理：
+ * - 应用下载目录与 HF 缓存默认就在扫描范围里（HF / ModelScope 下载的模型都能看到）；
+ * - "添加目录"走系统选择器 → 先扫描预览（认不出模型就不加），避免把整个磁盘加进来。
+ */
+function ModelDirsManager() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const [pending, setPending] = useState<{ dir: string; count: number; totalSize: number; files: { name: string; repo: string; size: number; kind: string }[] } | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+
+  const dirsQuery = useQuery({
+    queryKey: ["model-dirs"],
+    queryFn: () => rpcClient.getModelDirs(),
+  });
+  const entries = dirsQuery.data?.entries ?? [];
+
+  const invalidate = () => {
+    queryClient.invalidateQueries({ queryKey: ["model-dirs"] });
+    queryClient.invalidateQueries({ queryKey: ["installed-models"] });
+  };
+
+  const pickMutation = useMutation({
+    mutationFn: async () => {
+      const { path: dir } = await rpcClient.openDirectoryDialog(undefined);
+      if (!dir) return null;
+      return { dir, preview: await rpcClient.scanModelDir({ dir }) };
+    },
+    onSuccess: (res) => {
+      setNotice(null);
+      if (!res) return;
+      if (!res.preview.ok) {
+        setError(res.preview.error ?? t("models.dirs.scanFailed"));
+        setPending(null);
+        return;
+      }
+      setError(null);
+      setPending({ dir: res.dir, ...res.preview });
+    },
+    onError: (e: unknown) => setError(String(e)),
+  });
+
+  const addMutation = useMutation({
+    mutationFn: (dir: string) => rpcClient.addModelDir({ dir }),
+    onSuccess: (res, dir) => {
+      if (!res.ok) {
+        setError(res.error ?? t("models.dirs.scanFailed"));
+        return;
+      }
+      setError(null);
+      setPending(null);
+      setNotice(t("models.dirs.added", { count: String(res.count ?? 0), dir }));
+      invalidate();
+    },
+    onError: (e: unknown) => setError(String(e)),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (dir: string) => rpcClient.removeModelDir({ dir }),
+    onSuccess: (res) => {
+      if (!res.ok) setError(res.error ?? null);
+      else setNotice(null);
+      invalidate();
+    },
+  });
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div className="flex items-center justify-between gap-2">
+        <Label className="text-xs">{t("models.dirs.title")}</Label>
+        <Button
+          size="sm"
+          variant="outline"
+          className="h-7 text-xs"
+          disabled={pickMutation.isPending}
+          onClick={() => pickMutation.mutate()}
+        >
+          {pickMutation.isPending ? (
+            <Loader2Icon data-icon="inline-start" className="animate-spin" />
+          ) : (
+            <FolderPlusIcon data-icon="inline-start" className="size-3.5" />
+          )}
+          {t("models.dirs.add")}
+        </Button>
+      </div>
+      <p className="text-[11px] text-muted-foreground">{t("models.dirs.hint")}</p>
+
+      <div className="flex flex-col gap-1.5">
+        {entries.map((entry) => (
+          <div key={entry.path} className="flex items-center gap-2 rounded-lg border px-3 py-2">
+            <div className="min-w-0 flex-1">
+              <p className="truncate font-mono text-[11px]">{entry.path}</p>
+              <p className="mt-0.5 flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                <span>
+                  {entry.kind === "primary"
+                    ? t("models.dirs.primary")
+                    : entry.kind === "hf-cache"
+                      ? t("models.dirs.hfCache")
+                      : t("models.dirs.extra")}
+                </span>
+                <span>·</span>
+                {entry.exists ? (
+                  <>
+                    <span>{t("models.dirs.count", { count: String(entry.count) })}</span>
+                    <span>·</span>
+                    <span>{formatBytes(entry.size)}</span>
+                  </>
+                ) : (
+                  <span className="text-amber-600 dark:text-amber-400">
+                    {t("models.dirs.missing")}
+                  </span>
+                )}
+              </p>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon-sm"
+              tooltip={t("models.showInFolder")}
+              onClick={() => void rpcClient.showInExplorer({ filePath: entry.path })}
+            >
+              <FolderOpenIcon className="size-3.5" />
+            </Button>
+            {entry.kind === "extra" && (
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                tooltip={t("models.dirs.remove")}
+                disabled={removeMutation.isPending}
+                onClick={() => removeMutation.mutate(entry.path)}
+              >
+                <Trash2Icon className="size-3.5" />
+              </Button>
+            )}
+          </div>
+        ))}
+      </div>
+
+      {pending && (
+        <div className="flex flex-col gap-2 rounded-lg border border-primary/40 bg-primary/5 px-3 py-2">
+          <p className="text-xs">
+            {t("models.dirs.previewTitle", { count: String(pending.count), size: formatBytes(pending.totalSize) })}
+          </p>
+          <p className="truncate font-mono text-[11px] text-muted-foreground">{pending.dir}</p>
+          <ul className="flex flex-col gap-0.5">
+            {pending.files.slice(0, 5).map((f) => (
+              <li key={`${f.repo}/${f.name}`} className="truncate text-[11px] text-muted-foreground">
+                {f.repo} / {f.name}
+              </li>
+            ))}
+            {pending.count > 5 && (
+              <li className="text-[11px] text-muted-foreground">
+                {t("models.dirs.moreFiles", { count: String(pending.count - 5) })}
+              </li>
+            )}
+          </ul>
+          <div className="flex gap-2">
+            <Button size="sm" className="h-7 text-xs" disabled={addMutation.isPending} onClick={() => addMutation.mutate(pending.dir)}>
+              {t("models.dirs.confirmAdd")}
+            </Button>
+            <Button size="sm" variant="ghost" className="h-7 text-xs" onClick={() => setPending(null)}>
+              {t("common.cancel")}
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {error && <p className="text-[11px] text-destructive">{error}</p>}
+      {notice && <p className="text-[11px] text-emerald-600 dark:text-emerald-400">{notice}</p>}
+    </div>
   );
 }
 
@@ -685,10 +974,6 @@ function DefaultModelConfig() {
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
   });
-  const { data: modelDirs } = useQuery({
-    queryKey: ["model-dirs"],
-    queryFn: () => rpcClient.getModelDirs(),
-  });
   const settings = data?.settings ?? {};
   const [form, setForm] = useState<Record<string, string>>({});
 
@@ -700,7 +985,7 @@ function DefaultModelConfig() {
 
   const saveMutation = useMutation({
     mutationFn: () => {
-      const keys = ["VLLM_MODEL_PROFILE", "CUSTOM_HF_MODEL", "MODEL_DIRS"] as const;
+      const keys = ["VLLM_MODEL_PROFILE", "CUSTOM_HF_MODEL"] as const;
       const patch: Record<string, string> = {};
       for (const k of keys) if (form[k] !== undefined) patch[k] = form[k];
       return rpcClient.updateSettings({ settings: patch });
@@ -723,7 +1008,6 @@ function DefaultModelConfig() {
     return quantInfo?.defaultQuant ?? "";
   })();
 
-  const dirs = modelDirs?.dirs ?? [];
   const ALL_PROFILES = [
     ...MODEL_PROFILES.map((p) => ({ id: p.id, label: p.label })),
     { id: "none" as const, label: "None (raw output)" },
@@ -808,22 +1092,7 @@ function DefaultModelConfig() {
             </div>
           )}
 
-          <div className="grid gap-3 sm:grid-cols-2">
-            <div>
-              <Label htmlFor="modelDirPrimary" className="mb-1 text-xs">{t("settings.modelDirs.primary")}</Label>
-              <Input id="modelDirPrimary" value={dirs[0] ?? ""} readOnly className="h-8 font-mono text-xs" />
-            </div>
-            <div>
-              <Label htmlFor="modelDirExtra" className="mb-1 text-xs">{t("settings.modelDirs.extra")}</Label>
-              <Input
-                id="modelDirExtra"
-                placeholder="/path/one,/path/two"
-                value={form.MODEL_DIRS ?? ""}
-                onChange={(e) => updateField("MODEL_DIRS", e.target.value)}
-                className="h-8 font-mono text-xs"
-              />
-            </div>
-          </div>
+          <ModelDirsManager />
 
           <div className="flex items-center gap-3 border-t pt-3">
             <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
@@ -898,7 +1167,7 @@ export function LocalModelsScreen({
         <EngineSelector />
         {engine === "llama.cpp" && <LlamaEngineInstall />}
         <ServerParamsPanel engine={engine} />
-        <LaunchBar installedModels={installedModels} />
+        <LaunchBar installedModels={installedModels} engine={engine} />
 
         <div>
           <div className="mb-2 flex items-center justify-between gap-2">

@@ -3,21 +3,25 @@ import "./user-data";
 import "./canvas-polyfill";
 import Electrobun, { Utils } from "electrobun/bun";
 import { BrowserWindow, Updater } from "electrobun/bun";
-import { db } from "./db";
+import "./db";
 import { startImageServer } from "./image-server";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initPpOcrBroadcast, initTessInstallBroadcast } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus } from "./rpc";
 import { seedIfNeeded } from "./prompt-library";
+import { initSkills, shutdownSkills } from "./skills";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
 import { broadcastUpdateStatus, checkForUpdate } from "./updates";
 import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
+import { stopAllServed } from "./model-servers";
 import * as Gateway from "./gateway";
 import { stopAsr } from "./asr";
 import { stopPpOcr } from "./ppocr";
 import { startControlServer, stopControlServer } from "./control-server";
 import { getAgentWorkspace } from "./agent";
+import { runMemoryMaintenance } from "./memory";
+import { runKbMaintenance } from "./knowledge";
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
@@ -41,6 +45,15 @@ seedIfNeeded();
 
 // 确保 Agent 的默认工作区存在（~/.llamadesk/workspace），用当前用户权限创建。
 getAgentWorkspace();
+
+// Skills 中央库（默认 ~/.agents/skills）：建目录、清安装残留、收编已有技能、启动监听。
+initSkills();
+
+// MCP 服务器预热：后台连接已启用的服务器，首次 Agent 对话不用现场握手。
+// 失败静默（设置页与 Agent 运行时会按需重连并展示错误）。
+void import("./mcp")
+  .then((m) => m.connectEnabledServers())
+  .catch(() => {});
 
 // serve extracted images over HTTP for the webview
 try {
@@ -79,18 +92,25 @@ initTTSModelDownloadBroadcast(mainWindow);
 initGatewayBroadcast(mainWindow);
 initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
+initMediaSetupBroadcast(mainWindow);
 initPpOcrBroadcast(mainWindow);
 initTessInstallBroadcast(mainWindow);
+initSkillsBroadcast(mainWindow);
+initBackupBroadcast(mainWindow);
 
 mainWindow.webview.on("dom-ready", () => {
   broadcastUpdateStatus();
+  // 刷新 / HMR 后 store 会重置，这里补推一次服务器与网关的当前状态。
+  broadcastCurrentStatus(mainWindow);
 });
 
 // CLI 控制通道（Unix socket），供 `omi` 命令唤醒/导航/管理。
 void startControlServer();
 
-// Check for updates on startup
-checkForUpdate();
+// Check for updates on startup（"关于我们 → 自动更新" 开关可关闭，仅手动检查）
+if (getSetting("AUTO_UPDATE") !== "0") {
+  checkForUpdate();
+}
 
 // Auto-start local server if configured and enabled
 if (
@@ -119,16 +139,31 @@ if (Gateway.isGatewayEnabled()) {
   });
 }
 
+// 记忆库维护（启动后台跑一次）：补内容哈希、归档过期/长期未用的低价值记忆、补向量。
+// 知识库维护：恢复上次进程遗留的摄取作业、对账分块计数、修剪审计流水。
+// 都不阻塞窗口显示，也不影响首屏；失败只记日志。
+void runMemoryMaintenance().catch((e) => {
+  console.error("Memory maintenance failed:", e instanceof Error ? e.message : String(e));
+});
+void Promise.resolve()
+  .then(() => runKbMaintenance())
+  .catch((e) => {
+    console.error("Knowledge base maintenance failed:", e instanceof Error ? e.message : String(e));
+  });
+
 // Handle window close
 mainWindow.on("close", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  // 停掉**全部**已启动模型：推理进程是 detached 的，漏一个就留下占显存的孤儿。
+  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  shutdownSkills();
   stopControlServer();
   Utils.quit();
 });
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
-  await Promise.all([ServerManager.stopServer(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
+  shutdownSkills();
   stopControlServer();
 });
 

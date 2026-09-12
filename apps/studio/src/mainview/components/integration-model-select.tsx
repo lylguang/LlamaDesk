@@ -2,6 +2,8 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { rpcClient } from "@lib/rpc";
+import { classifyModelName, type ModelCategory } from "@/shared/modelscope";
+import { ModelCategoryIcon } from "@components/model-category-badge";
 import { Input } from "@ui/input";
 import {
   Select,
@@ -18,6 +20,8 @@ type ModelLike = {
   type: "local" | "api";
   label: string;
   detail?: string;
+  /** 模型分类（这里是给工具用的模型名，只应有对话类）。 */
+  category: ModelCategory;
 };
 
 /**
@@ -55,6 +59,7 @@ export function IntegrationModelSelect({
     type: m.type,
     label: m.label,
     detail: m.detail,
+    category: m.category,
   }));
 
   // 设置里显式配置的云端模型（CLOUD_MODELS）也纳入可选项。
@@ -64,7 +69,16 @@ export function IntegrationModelSelect({
     if (Array.isArray(parsed)) {
       for (const m of parsed) {
         if (typeof m?.id === "string" && m.id && !options.some((o) => o.label === m.id)) {
-          options.push({ type: "api", label: m.id, detail: t("settings.integrations.cloudModel") });
+          const category = classifyModelName(m.id);
+          // 外部 agent / 编程助手只能用对话模型：设置里配置的云端模型若是
+          // 嵌入 / 语音 / 生图类，不列进来（认不出的仍保留）。
+          if (category !== "chat" && category !== "other") continue;
+          options.push({
+            type: "api",
+            label: m.id,
+            detail: t("settings.integrations.cloudModel"),
+            category,
+          });
         }
       }
     }
@@ -105,7 +119,7 @@ export function IntegrationModelSelect({
       <SelectTrigger size="sm" className="h-8 w-full text-xs">
         <SelectValue placeholder={placeholder ?? t("settings.integrations.selectModel")} />
       </SelectTrigger>
-      <SelectContent position="popper" sideOffset={6} className="max-w-80">
+      <SelectContent position="popper" sideOffset={6} className="w-[28rem] max-w-[min(28rem,90vw)]">
         <div
           className="sticky top-0 z-10 bg-popover p-1.5 pb-1"
           onKeyDown={(e) => e.stopPropagation()}
@@ -140,10 +154,15 @@ export function IntegrationModelSelect({
             <SelectLabel>{t("chat.modelLocal")}</SelectLabel>
             {shownLocal.map((o) => (
               <SelectItem key={`local-${o.label}`} value={o.label}>
-                <span className="truncate">{o.label}</span>
-                {o.detail && (
-                  <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
-                )}
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <ModelCategoryIcon category={o.category} label={t(`models.cat.${o.category}`)} />
+                  {o.detail && (
+                    <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
+                      {o.detail}
+                    </span>
+                  )}
+                </span>
               </SelectItem>
             ))}
           </SelectGroup>
@@ -153,10 +172,15 @@ export function IntegrationModelSelect({
             <SelectLabel>{t("chat.modelApi")}</SelectLabel>
             {shownApi.map((o) => (
               <SelectItem key={`api-${o.label}`} value={o.label}>
-                <span className="truncate">{o.label}</span>
-                {o.detail && (
-                  <span className="truncate text-[10px] text-muted-foreground/70">{o.detail}</span>
-                )}
+                <span className="min-w-0 flex-1 truncate">{o.label}</span>
+                <span className="flex shrink-0 items-center gap-1.5">
+                  <ModelCategoryIcon category={o.category} label={t(`models.cat.${o.category}`)} />
+                  {o.detail && (
+                    <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
+                      {o.detail}
+                    </span>
+                  )}
+                </span>
               </SelectItem>
             ))}
           </SelectGroup>

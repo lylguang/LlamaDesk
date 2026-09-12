@@ -17,7 +17,6 @@ import {
   SparklesIcon,
   LayersIcon,
   LanguagesIcon,
-  ClipboardListIcon,
   BookmarkIcon,
   ImageIcon as ImagePromptIcon,
   BotIcon,
@@ -25,10 +24,12 @@ import {
   FileTextIcon,
   FileIcon,
   LayoutListIcon,
+  GaugeIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { AudioDownloadButton, audioFileName } from "@components/audio-download";
+import { MediaSourceBadge } from "@components/media-source-badge";
 import type { DocumentStatus } from "@lib/constants";
 import { Badge } from "@ui/badge";
 import { ScrollArea } from "@ui/scroll-area";
@@ -54,10 +55,15 @@ import { useAppStore, type AppId } from "@stores/app";
 import { useChatStore } from "@stores/chat";
 import { useVoiceStore, type VoiceTab } from "@stores/voice";
 import { useImageStore } from "@stores/image";
+import { useVideoStore } from "@stores/video";
 import { useOcrStore } from "@stores/ocr";
+import { useBenchmarkStore } from "@stores/benchmark";
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { usePromptStore } from "@stores/prompt";
+import { SkillsSidebar } from "../skills/sidebar";
+import { MemorySidebar } from "../memory-screen";
+import { KbSidebar } from "../kb/sidebar";
 import type { PromptKind } from "@/bun/prompt-library";
 import type { TranslationRecordRow } from "@/bun/translate";
 import { translationLangShort } from "@/shared/translate";
@@ -285,6 +291,38 @@ const VOICE_TAB_ICONS: Record<VoiceTab, React.ReactNode> = {
   clone: <Wand2Icon className="size-4" />,
 };
 
+/** 侧栏顶部的翻译工具切换按钮组（文本翻译 / 同传翻译）。 */
+function TranslateToolSwitcher() {
+  const t = useT();
+  const tool = useTranslateStore((s) => s.tool);
+  const setTool = useTranslateStore((s) => s.setTool);
+  return (
+    <div className="grid grid-cols-2 gap-1 px-1 pb-1">
+      {(
+        [
+          { key: "text", icon: <LanguagesIcon className="size-4" />, labelKey: "translate.tool.text" },
+          { key: "live", icon: <MicIcon className="size-4" />, labelKey: "translate.tool.live" },
+        ] as const
+      ).map((item) => (
+        <button
+          key={item.key}
+          type="button"
+          onClick={() => setTool(item.key)}
+          className={cn(
+            "flex flex-col items-center gap-1 rounded-lg px-1 py-2 text-[11px] transition-colors",
+            tool === item.key
+              ? "bg-primary/10 text-primary"
+              : "text-muted-foreground hover:bg-muted hover:text-foreground",
+          )}
+        >
+          {item.icon}
+          <span className="leading-none">{t(item.labelKey)}</span>
+        </button>
+      ))}
+    </div>
+  );
+}
+
 /** 单工具页的侧栏顶部入口（与多工具页的入口按钮组同款位置与选中样式）。 */
 function SingleToolEntry({ icon, label }: { icon: React.ReactNode; label: string }) {
   return (
@@ -292,6 +330,144 @@ function SingleToolEntry({ icon, label }: { icon: React.ReactNode; label: string
       {icon}
       <span className="leading-none">{label}</span>
     </div>
+  );
+}
+
+/** 基准测试页左侧历史记录：每条 = 模型 + 平均 TPS + 时间，点击在结果区回放。 */
+function BenchmarkRecordList() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { setRoute } = useRouter();
+  const { setActiveApp } = useAppStore();
+  const selectedRecordId = useBenchmarkStore((s) => s.selectedRecordId);
+  const setSelectedRecordId = useBenchmarkStore((s) => s.setSelectedRecordId);
+  const [confirmClear, setConfirmClear] = useState(false);
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["benchmark-records"],
+    queryFn: () => rpcClient.listBenchmarkRecords(undefined),
+  });
+  const records = data?.records ?? [];
+
+  const deleteMutation = useMutation({
+    mutationFn: (id: number) => rpcClient.deleteBenchmarkRecord({ id }),
+    onSuccess: (_, id) => {
+      if (selectedRecordId === id) setSelectedRecordId(null);
+      queryClient.invalidateQueries({ queryKey: ["benchmark-records"] });
+    },
+  });
+  const clearMutation = useMutation({
+    mutationFn: () => rpcClient.clearBenchmarkRecords(undefined),
+    onSuccess: () => {
+      setSelectedRecordId(null);
+      setConfirmClear(false);
+      queryClient.invalidateQueries({ queryKey: ["benchmark-records"] });
+    },
+  });
+
+  // 清空是破坏性操作：按钮两段式确认，3 秒未确认自动复原。
+  useEffect(() => {
+    if (!confirmClear) return;
+    const timer = setTimeout(() => setConfirmClear(false), 3000);
+    return () => clearTimeout(timer);
+  }, [confirmClear]);
+
+  const fmtRecordTime = (ms: number) => {
+    const d = new Date(ms);
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    const md = `${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+    const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+    return sameYear ? `${md} ${hm}` : `${d.getFullYear()}-${md} ${hm}`;
+  };
+
+  return (
+    <SidebarGroup className="min-h-0 flex-1 gap-1">
+      <div className="px-1 pb-1">
+        <SingleToolEntry icon={<GaugeIcon className="size-4" />} label={t("apps.benchmark")} />
+      </div>
+      <SidebarGroupLabel>
+        <span className="flex items-center gap-1.5">
+          {t("benchmark.history")}
+          <Badge variant="secondary" className="h-5 px-1.5 text-[10px] tabular-nums">
+            {records.length}
+          </Badge>
+        </span>
+        {records.length > 0 && (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="ml-auto h-6 shrink-0 px-2 text-[11px] hover:text-destructive"
+            disabled={clearMutation.isPending}
+            onClick={() => (confirmClear ? clearMutation.mutate() : setConfirmClear(true))}
+          >
+            {confirmClear ? t("benchmark.clearConfirm") : t("benchmark.clear")}
+          </Button>
+        )}
+      </SidebarGroupLabel>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-0.5">
+          {isLoading ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : records.length === 0 ? (
+            <div className="py-8 text-center text-xs text-muted-foreground">{t("benchmark.noRecords")}</div>
+          ) : (
+            records.map((r) => (
+              <SidebarMenuItem key={r.id} className="group/bench-record">
+                <SidebarMenuButton
+                  isActive={selectedRecordId === r.id}
+                  onClick={() => {
+                    setSelectedRecordId(r.id);
+                    setActiveApp("benchmark");
+                    setRoute({ path: "index" });
+                  }}
+                  tooltip={r.model}
+                >
+                    <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                      <span className="flex min-w-0 items-center gap-1">
+                        {r.kind === "eval" && <GaugeIcon className="size-3 shrink-0 text-muted-foreground" />}
+                        <span className="min-w-0 truncate text-xs font-medium leading-none">{r.model}</span>
+                      </span>
+                      <span className="flex items-center gap-1 text-[10px] leading-none text-muted-foreground">
+                        {r.kind === "eval" ? (
+                          <>
+                            <span className="max-w-24 truncate">{t(`benchmark.suite.${r.summary?.eval?.suite ?? "mmlu"}`)}</span>
+                            {r.summary?.eval ? (
+                              <span className="font-medium tabular-nums text-primary">{r.summary.eval.accuracy}%</span>
+                            ) : (
+                              <span>{t(`benchmark.status.${r.status}`)}</span>
+                            )}
+                          </>
+                        ) : r.summary ? (
+                          <span className="font-medium tabular-nums text-primary">{r.summary.avgTps} tok/s</span>
+                        ) : (
+                          <span>{t(`benchmark.status.${r.status}`)}</span>
+                        )}
+                        <span className="tabular-nums">{fmtRecordTime(r.createdAt)}</span>
+                      </span>
+                    </span>
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    tooltip={t("benchmark.deleteRecord")}
+                    className="size-6 shrink-0 opacity-0 transition-opacity group-hover/bench-record:opacity-100"
+                    disabled={deleteMutation.isPending}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      deleteMutation.mutate(r.id);
+                    }}
+                  >
+                    <Trash2Icon className="size-3.5" />
+                  </Button>
+                </SidebarMenuButton>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
+    </SidebarGroup>
   );
 }
 
@@ -437,6 +613,7 @@ function VoiceRecordList() {
                         {r.voice}
                       </span>
                     )}
+                    <MediaSourceBadge source={r.source} className="px-1" />
                     <span className="ml-auto text-[10px] text-muted-foreground/70 tabular-nums">
                       {new Date(r.createdAt).toLocaleTimeString([], {
                         hour: "2-digit",
@@ -792,11 +969,14 @@ function ImageRecordList() {
                     <span className="line-clamp-2 text-[11px] leading-snug text-foreground/80">
                       {r.prompt || t("image.error")}
                     </span>
-                    <span className="text-[10px] text-muted-foreground/70 tabular-nums">
-                      {new Date(r.createdAt).toLocaleTimeString([], {
-                        hour: "2-digit",
-                        minute: "2-digit",
-                      })}
+                    <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70 tabular-nums">
+                      <span>
+                        {new Date(r.createdAt).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                      <MediaSourceBadge source={r.source} />
                     </span>
                   </span>
                 </button>
@@ -816,6 +996,109 @@ function formatRecordTime(ts: number): string {
     hour: "2-digit",
     minute: "2-digit",
   });
+}
+
+// ---------------------------------------------------------------------------
+// 视频页侧栏：生成记录列表（点击聚焦到视频页播放）
+// ---------------------------------------------------------------------------
+
+function VideoRecordList() {
+  const t = useT();
+  const { focusRecordId, setFocusRecordId, setView } = useVideoStore();
+
+  const { data, isLoading } = useQuery({
+    queryKey: ["video-records"],
+    queryFn: () => rpcClient.listVideoRecords(undefined),
+  });
+  const records = data?.records ?? [];
+
+  return (
+    <SidebarGroup className="min-h-0 flex-1">
+      <SidebarGroupLabel>
+        <FilmIcon className="size-3.5" />
+        {t("video.history.title")}
+        <SidebarMenuBadge>
+          <Badge variant="secondary" className="h-5 text-[10px]">
+            {records.length}
+          </Badge>
+        </SidebarMenuBadge>
+      </SidebarGroupLabel>
+
+      <ScrollArea className="min-h-0 flex-1">
+        <SidebarMenu className="gap-1">
+          {isLoading ? (
+            <div className="flex justify-center py-6">
+              <Spinner className="size-3.5" />
+            </div>
+          ) : records.length === 0 ? (
+            <div className="py-6 text-center text-xs text-muted-foreground">
+              {t("video.history.empty")}
+            </div>
+          ) : (
+            records.map((r) => (
+              <SidebarMenuItem key={r.id} className="px-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setView("generate");
+                    setFocusRecordId(r.id);
+                  }}
+                  className={cn(
+                    "flex w-full items-center gap-2 rounded-md border p-1.5 text-left transition-colors",
+                    focusRecordId === r.id
+                      ? "border-primary/60 bg-primary/5"
+                      : "hover:bg-muted/60",
+                  )}
+                >
+                  {r.videoUrl ? (
+                    <video
+                      src={`${r.videoUrl}#t=0.1`}
+                      muted
+                      preload="metadata"
+                      className="size-9 shrink-0 rounded bg-muted object-cover"
+                    />
+                  ) : (
+                    <span
+                      className={cn(
+                        "flex size-9 shrink-0 items-center justify-center rounded bg-muted",
+                        r.status === "failed" && "text-destructive/70",
+                      )}
+                    >
+                      {r.status === "processing" ? (
+                        <Loader2Icon className="size-3.5 animate-spin text-primary" />
+                      ) : (
+                        <FilmIcon className="size-3.5 text-muted-foreground" />
+                      )}
+                    </span>
+                  )}
+                  <span className="flex min-w-0 flex-1 flex-col gap-0.5">
+                    <span className="line-clamp-2 text-[11px] leading-snug text-foreground/80">
+                      {r.prompt || t("video.error")}
+                    </span>
+                    <span className="flex items-center gap-1 text-[10px] text-muted-foreground/70 tabular-nums">
+                      {r.status === "processing" && (
+                        <span className="text-primary">{t("video.status.processing")}</span>
+                      )}
+                      {r.status === "failed" && (
+                        <span className="text-destructive/80">{t("video.status.failed")}</span>
+                      )}
+                      <span>
+                        {new Date(r.createdAt).toLocaleTimeString([], {
+                          hour: "2-digit",
+                          minute: "2-digit",
+                        })}
+                      </span>
+                      <MediaSourceBadge source={r.source} />
+                    </span>
+                  </span>
+                </button>
+              </SidebarMenuItem>
+            ))
+          )}
+        </SidebarMenu>
+      </ScrollArea>
+    </SidebarGroup>
+  );
 }
 
 function TranslateRecordList() {
@@ -843,8 +1126,8 @@ function TranslateRecordList() {
 
   return (
     <SidebarGroup className="min-h-0 flex-1">
-      {/* 单工具页的入口位：与其他工具页侧栏顶部入口对齐 */}
-      <SingleToolEntry icon={<LanguagesIcon className="size-4" />} label={t("apps.translate")} />
+      {/* 翻译工具菜单：文本翻译 / 同传翻译（与生图页侧栏入口同款） */}
+      <TranslateToolSwitcher />
       <SidebarGroupLabel>
         <span className="flex items-center gap-1.5">
           <LanguagesIcon className="size-3.5" />
@@ -1151,10 +1434,20 @@ export function AppSidebar() {
           <VoiceRecordList />
         ) : activeApp === "image" ? (
           <ImageRecordList />
+        ) : activeApp === "video" ? (
+          <VideoRecordList />
         ) : activeApp === "translate" ? (
           <TranslateRecordList />
         ) : activeApp === "prompt" ? (
           <PromptSidebar />
+        ) : activeApp === "skills" ? (
+          <SkillsSidebar />
+        ) : activeApp === "kb" ? (
+          <KbSidebar />
+        ) : activeApp === "memory" ? (
+          <MemorySidebar />
+        ) : activeApp === "benchmark" ? (
+          <BenchmarkRecordList />
         ) : (
           <ConversationRecordList app={activeApp} />
         )}

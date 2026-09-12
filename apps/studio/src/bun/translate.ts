@@ -2,8 +2,8 @@ import { eq, desc } from "drizzle-orm";
 import { db } from "./db";
 import { translationRecords } from "./db/schema";
 import { getSetting } from "./db/settings";
-import { getChatModelName } from "./chat-model";
-import { ensureServerReady, getChatBaseUrl } from "./chat";
+import { getChatModelLabel, getChatRequestModelId } from "./chat-model";
+import { ensureServerReady, getChatBaseUrl, maxOutputTokens } from "./chat";
 import { recordUsage } from "./stats";
 import { translationLangLabel } from "../shared/translate";
 
@@ -101,6 +101,8 @@ export async function runTranslation(params: {
   sourceLang?: string;
   targetLang: string;
   engine?: "model" | "google";
+  /** false 时仅翻译不入库（同传等高频场景，避免刷爆历史记录）。 */
+  save?: boolean;
 }): Promise<{ text?: string; id?: number; error?: string }> {
   const text = (params.text ?? "").trim();
   if (!text) return { error: "待翻译文本不能为空" };
@@ -113,6 +115,7 @@ export async function runTranslation(params: {
         params.sourceLang ?? "auto",
         params.targetLang,
       );
+      if (params.save === false) return { text: content };
       const record = db
         .insert(translationRecords)
         .values({
@@ -130,7 +133,9 @@ export async function runTranslation(params: {
     }
   }
 
-  const model = getChatModelName();
+  // 请求里填本地服务器认的 id（MLX 是绝对路径）；记录与展示仍用服务名。
+  const model = getChatRequestModelId();
+  const modelLabel = getChatModelLabel() || model;
   const base = getChatBaseUrl();
   if (!model || !base) {
     return { error: !model ? "未配置模型" : "未配置推理服务器" };
@@ -166,6 +171,8 @@ export async function runTranslation(params: {
           { role: "system", content: instruction },
           { role: "user", content: text },
         ],
+        // 译文长度与原文同量级；显式给上限，免得 mlx-lm 默认的 512 被推理模型的思考吃光。
+        max_tokens: maxOutputTokens(),
         stream: false,
       }),
       signal: AbortSignal.timeout(600_000),
@@ -190,9 +197,10 @@ export async function runTranslation(params: {
       usage?: { prompt_tokens?: number; completion_tokens?: number };
     };
     const content = json.choices?.[0]?.message?.content?.trim() ?? "";
-    recordUsage(model, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
+    recordUsage(modelLabel, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
     if (!content) return { error: "模型未返回译文" };
 
+    if (params.save === false) return { text: content };
     const record = db
       .insert(translationRecords)
       .values({
@@ -200,7 +208,7 @@ export async function runTranslation(params: {
         targetLang: params.targetLang,
         text,
         result: content,
-        model,
+        model: modelLabel,
       })
       .returning()
       .get();

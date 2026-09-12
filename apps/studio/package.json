@@ -17,6 +17,8 @@
     "dev:hmr": "concurrently \"bun run hmr\" \"bun run start --watch\"",
     "db:generate": "drizzle-kit generate",
     "hmr": "vite --port 5173",
+    "test": "bun test",
+    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/omi-docs-smoke.ts",
     "build:dev": "vite build && electrobun build",
     "build:canary": "vite build && electrobun build --env=canary",
     "build:stable": "vite build && electrobun build --env=stable"
@@ -26,10 +28,7 @@
     "@earendil-works/pi-agent-core": "0.85.1",
     "@earendil-works/pi-ai": "0.85.1",
     "@fontsource-variable/plus-jakarta-sans": "^5.2.8",
-    "@img/sharp-darwin-arm64": "^0.34.5",
-    "@img/sharp-libvips-darwin-arm64": "^1.2.4",
     "@napi-rs/canvas": "^0.1.96",
-    "@napi-rs/canvas-darwin-arm64": "^0.1.97",
     "@radix-ui/react-use-controllable-state": "^1.2.2",
     "@streamdown/cjk": "^1.0.3",
     "@streamdown/code": "^1.1.1",
@@ -62,6 +61,22 @@
     "yaml": "^2.9.0",
     "zustand": "^5.0.11",
     "@appica/ui-react": "^1.1.0"
+  },
+  "optionalDependencies": {
+    "@img/sharp-darwin-arm64": "^0.34.5",
+    "@img/sharp-darwin-x64": "^0.34.5",
+    "@img/sharp-libvips-darwin-arm64": "^1.2.4",
+    "@img/sharp-libvips-darwin-x64": "^1.2.4",
+    "@img/sharp-libvips-linux-arm64": "^1.2.4",
+    "@img/sharp-libvips-linux-x64": "^1.2.4",
+    "@img/sharp-linux-arm64": "^0.34.5",
+    "@img/sharp-linux-x64": "^0.34.5",
+    "@img/sharp-win32-x64": "^0.34.5",
+    "@napi-rs/canvas-darwin-arm64": "^0.1.97",
+    "@napi-rs/canvas-darwin-x64": "^0.1.97",
+    "@napi-rs/canvas-linux-arm64-gnu": "^0.1.97",
+    "@napi-rs/canvas-linux-x64-gnu": "^0.1.97",
+    "@napi-rs/canvas-win32-x64-msvc": "^0.1.97"
   },
   "devDependencies": {
     "@types/bun": "catalog:",

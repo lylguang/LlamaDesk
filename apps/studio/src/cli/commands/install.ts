@@ -1,20 +1,16 @@
 import { join } from "path";
 import { resolveDataDir } from "../data-dir";
+import { ENGINE_INSTALL_HINTS, availableEngines } from "../../shared/engines";
 
-const ENGINE_HINTS: Record<string, string> = {
-  "llama.cpp": "brew install llama.cpp",
-  vllm: "pip install vllm  （或 uv pip install vllm）",
-  sglang: "pip install 'sglang[all]'",
-};
-
-/** 检查三个推理引擎的二进制 / 运行环境，缺失时打印安装命令。 */
+/** 检查各推理引擎的二进制 / 运行环境，缺失时打印安装命令。 */
 export async function cmdInstall() {
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
   process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
 
   const { createRuntime } = await import("../../bun/runtimes");
-  const engines = ["llama.cpp", "vllm", "sglang"] as const;
+  // 平台可用引擎来自注册表（mlx 仅 macOS）。
+  const engines = availableEngines();
 
   let missing = false;
   for (const engine of engines) {
@@ -24,7 +20,7 @@ export async function cmdInstall() {
         console.log(`✓ ${engine.padEnd(10)} ${result.path}`);
       } else {
         missing = true;
-        console.log(`✗ ${engine.padEnd(10)} 未找到。安装：${ENGINE_HINTS[engine]}`);
+        console.log(`✗ ${engine.padEnd(10)} 未找到。安装：${ENGINE_INSTALL_HINTS[engine]}`);
       }
     } catch (err) {
       missing = true;

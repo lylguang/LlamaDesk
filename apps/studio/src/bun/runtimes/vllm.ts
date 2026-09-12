@@ -1,53 +1,30 @@
 import type { Subprocess } from "bun";
 import { existsSync } from "fs";
 import { getSetting, getServerPort, ENGINE_EXTRA_ARGS_KEYS } from "../db/settings";
+import { modelNameForPath } from "../model-scan";
 import { slugModelFileName } from "../model-store";
 import { markServerStarted } from "../stats";
 import { extractStartupError } from "./errors";
+import { MAX_LOG_CHARS, killProcessTree, pumpServerOutput, spawnServerProcess, waitExit } from "./proc";
 import type {
   BinaryCheckResult,
   LogListener,
   Runtime,
+  RuntimeOverrides,
   ServerStatus,
   StartResult,
   StatusListener,
 } from "./types";
 
-const MAX_LOG_CHARS = 200_000;
 const DOWNLOAD_PATTERN = /downloading|fetching|(\d+(\.\d+)?)\s*%|progress/i;
 
-function collapseCarriageReturns(text: string): string {
-  if (!text.includes("\r")) return text;
-  const normalized = text.replace(/\r\n/g, "\n");
-  if (!normalized.includes("\r")) return normalized;
-  return normalized
-    .split("\n")
-    .map((line) => {
-      if (!line.includes("\r")) return line;
-      const parts = line.split("\r").filter(Boolean);
-      return parts.length > 0 ? parts[parts.length - 1] : "";
-    })
-    .join("\n");
-}
 
-async function pipeStream(stream: ReadableStream<Uint8Array>, appendLog: (text: string) => void) {
-  const reader = stream.getReader();
-  const decoder = new TextDecoder();
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const text = collapseCarriageReturns(decoder.decode(value, { stream: true }));
-      if (text) appendLog(text);
-    }
-  } catch {
-    // stream closed
-  }
-}
 
 export class VllmRuntime implements Runtime {
   readonly id = "vllm";
   readonly label = "vLLM";
+
+  constructor(private readonly overrides: RuntimeOverrides = {}) {}
 
   private serverProcess: Subprocess | null = null;
   private serverStatus: ServerStatus = "stopped";
@@ -118,10 +95,7 @@ export class VllmRuntime implements Runtime {
           stdout: "pipe",
           stderr: "pipe",
         });
-        const exited = await Promise.race([
-          proc.exited.then(() => true),
-          Bun.sleep(5000).then(() => false),
-        ]);
+        const exited = await waitExit(proc, 5000);
         if (exited) return { found: true, path: pythonPath };
       } catch {
         // not available
@@ -132,6 +106,15 @@ export class VllmRuntime implements Runtime {
   }
 
   private resolveModel(): { model: string; servedName?: string } {
+    // 显式覆盖（已启动模型注册表）优先：同引擎多实例时不能读「当前活动模型」。
+    if (this.overrides.model) {
+      const target = this.overrides.model;
+      const fallbackName = existsSync(target)
+        ? slugModelFileName(modelNameForPath(target))
+        : undefined;
+      return { model: target, servedName: this.overrides.servedName ?? fallbackName };
+    }
+
     const localPath = getSetting("LOCAL_MODEL_PATH");
     if (localPath) {
       const localName = getSetting("LOCAL_MODEL_NAME");
@@ -163,7 +146,7 @@ export class VllmRuntime implements Runtime {
     if (modelOverride) {
       model = modelOverride;
       if (existsSync(modelOverride)) {
-        servedName = slugModelFileName(modelOverride.split(/[\\/]/).pop() ?? "model");
+        servedName = slugModelFileName(modelNameForPath(modelOverride));
       }
     } else {
       const resolved = this.resolveModel();
@@ -180,7 +163,7 @@ export class VllmRuntime implements Runtime {
   }
 
   private buildArgs(model: string, servedName?: string): string[] {
-    const port = getServerPort(this.id);
+    const port = this.overrides.port ?? getServerPort(this.id);
     const host = getSetting("SERVER_HOST") || "127.0.0.1";
     const maxModelLen = getSetting("VLLM_MAX_MODEL_LEN") || "8192";
     const tensorParallel = getSetting("VLLM_TENSOR_PARALLEL_SIZE") || "1";
@@ -241,15 +224,8 @@ export class VllmRuntime implements Runtime {
     this.appendLog(`$ ${cmd.join(" ")}\n`);
 
     try {
-      this.serverProcess = Bun.spawn(cmd, {
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-
-      const { stdout, stderr } = this.serverProcess;
-      const appendLog = this.appendLog.bind(this);
-      if (stdout && typeof stdout !== "number") pipeStream(stdout, appendLog);
-      if (stderr && typeof stderr !== "number") pipeStream(stderr, appendLog);
+      this.serverProcess = spawnServerProcess(cmd);
+      pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;
       this.serverProcess.exited
@@ -272,7 +248,7 @@ export class VllmRuntime implements Runtime {
           self.setStatus("error");
         });
 
-      const port = getServerPort(this.id);
+      const port = this.overrides.port ?? getServerPort(this.id);
       const healthUrl = `http://localhost:${port}/health`;
       const maxIdleAttempts = 180; // vLLM may take longer to load
       let idleCount = 0;
@@ -333,7 +309,7 @@ export class VllmRuntime implements Runtime {
     this.setStatus("stopped");
     this.appendLog("\n[stopping server...]\n");
 
-    proc.kill("SIGTERM");
+    killProcessTree(proc, "SIGTERM");
 
     const exited = await Promise.race([
       proc.exited.then(() => true),
@@ -341,7 +317,7 @@ export class VllmRuntime implements Runtime {
     ]);
 
     if (!exited) {
-      proc.kill("SIGKILL");
+      killProcessTree(proc, "SIGKILL");
       await proc.exited.catch(() => {});
     }
 
@@ -356,7 +332,7 @@ export class VllmRuntime implements Runtime {
   forceKill() {
     if (this.serverProcess) {
       try {
-        this.serverProcess.kill("SIGKILL");
+        killProcessTree(this.serverProcess, "SIGKILL");
       } catch {
         // already dead
       }

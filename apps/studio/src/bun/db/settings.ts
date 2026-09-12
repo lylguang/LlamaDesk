@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import type { InferenceEngine } from "../../shared/modelscope";
+import { ENGINE_IDS, ENGINE_SPECS } from "../../shared/engines";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
@@ -22,6 +23,7 @@ export type SettingsKey =
   | "AUTO_START_SERVER"
   | "MODEL_DIRS"
   | "UPDATE_CHANNEL"
+  | "AUTO_UPDATE"
   | "FAVORITE_MODELS"
   | "LAUNCHER_CLAUDE_MODE"
   | "LAUNCHER_CLAUDE_OPUS"
@@ -48,10 +50,16 @@ export type SettingsKey =
   | "LOCAL_MODEL_NAME"
   | "CHAT_MODEL"
   | "UI_LANG"
+  | "UI_THEME"
   | "MAX_VLLM_RETRIES"
   | "MAX_VLLM_FAILURE_RETRIES"
   | "PAGE_CONCURRENCY"
   | "INFERENCE_ENGINE"
+  | "MLX_PORT"
+  | "MLX_EXTRA_ARGS"
+  | "MLX_MODEL"
+  | "MLX_CACHE_SIZE_GB"
+  | "MLX_HF_ENDPOINT"
   | "VLLM_MAX_MODEL_LEN"
   | "VLLM_TENSOR_PARALLEL_SIZE"
   | "VLLM_GPU_MEMORY_UTILIZATION"
@@ -95,6 +103,19 @@ export type SettingsKey =
   | "IMG_API_KEY"
   | "IMG_MODEL"
   | "IMG_COMFY_BASE"
+  | "IMG_MLX_IDLE_MINUTES"
+  // AI 视频生成（video-gen.ts）
+  | "VIDEO_BACKEND"
+  | "VIDEO_MINIMAX_BASE"
+  | "VIDEO_MINIMAX_API_KEY"
+  | "VIDEO_MINIMAX_MODEL"
+  | "VIDEO_SEEDANCE_BASE"
+  | "VIDEO_SEEDANCE_API_KEY"
+  | "VIDEO_SEEDANCE_MODEL"
+  | "VIDEO_COMFY_BASE"
+  | "VIDEO_COMFY_CKPT"
+  | "VIDEO_COMFY_CLIP"
+  | "VIDEO_COMFY_VAE"
   | "MODEL_DOWNLOADS"
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
@@ -104,6 +125,13 @@ export type SettingsKey =
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
   | "WEB_SEARCH_MAX_RESULTS"
+  /** 记忆总开关：Agent 获得记忆工具，置顶记忆注入系统提示。 */
+  | "MEMORY_ENABLED"
+  | "MEMORY_REVIEW_MODE"
+  | "MEMORY_EMBEDDING_MODEL"
+  | "MEMORY_EMBEDDING_BASE"
+  | "MEMORY_EMBEDDING_API_KEY"
+  | "MEMORY_SCOPE_ENABLED"
   | "TRANSLATION_ENGINE"
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
@@ -114,7 +142,34 @@ export type SettingsKey =
   | "VOICE_CALL_REALTIME_API_KEY"
   | "VOICE_CALL_REALTIME_BASE_URL"
   | "VOICE_CALL_REALTIME_MODEL"
-  | "VOICE_CALL_REALTIME_VOICE";
+  | "VOICE_CALL_REALTIME_VOICE"
+  // Skills 管理（参照 skills-manager 移植）
+  | "SKILLS_CENTRAL_PATH"
+  | "SKILLS_SYNC_MODE"
+  | "SKILLS_TOOLS_DISABLED"
+  | "SKILLS_TOOL_PATH_OVERRIDES"
+  | "SKILLS_CUSTOM_TOOLS"
+  | "SKILLS_ACTIVE_PRESET"
+  | "SKILLS_AUTO_BACKUP"
+  | "SKILLS_GIT_REMOTE"
+  | "SKILLS_GIT_PAT"
+  | "BACKUP_REMOTE_KIND"
+  | "BACKUP_REMOTE_ENABLED"
+  | "BACKUP_REMOTE_ENDPOINT"
+  | "BACKUP_REMOTE_BUCKET"
+  | "BACKUP_REMOTE_REGION"
+  | "BACKUP_REMOTE_ACCESS_KEY"
+  | "BACKUP_REMOTE_SECRET_KEY"
+  | "BACKUP_REMOTE_PREFIX"
+  | "BACKUP_REMOTE_PATH_STYLE"
+  | "BACKUP_REMOTE_AUTO_UPLOAD"
+  | "BACKUP_REMOTE_DELETE_LOCAL"
+  // 模型云服务（cloud_providers 表的兼容槽位：激活行写回，网关 / CLI 消费）
+  | "CLOUD_PROVIDER"
+  | "CLOUD_MODELS"
+  | "CUSTOM_PROVIDERS"
+  // 已启动模型注册表：当前活动实例 id（本地模式请求的目标），见 bun/model-servers.ts
+  | "SERVED_ACTIVE_ID";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -133,6 +188,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   AUTO_START_SERVER: "1",
   MODEL_DIRS: "",
   UPDATE_CHANNEL: "stable",
+  // 启动时自动检查并下载新 release（"0" 关闭，仅手动检查）。
+  AUTO_UPDATE: "1",
   FAVORITE_MODELS: "[]",
   LAUNCHER_CLAUDE_MODE: "local",
   LAUNCHER_CLAUDE_OPUS: "",
@@ -159,10 +216,23 @@ const DEFAULTS: Record<SettingsKey, string> = {
   LOCAL_MODEL_NAME: "",
   CHAT_MODEL: "",
   UI_LANG: "zh",
+  /** 界面主题：system / light / dark，前端据此切换 <html> 的 .dark 类。 */
+  UI_THEME: "system",
   MAX_VLLM_RETRIES: "6",
   MAX_VLLM_FAILURE_RETRIES: "0",
   PAGE_CONCURRENCY: "3",
   INFERENCE_ENGINE: "llama.cpp",
+  MLX_PORT: "18010",
+  MLX_EXTRA_ARGS: "",
+  // MLX 引擎部署的模型（HF repo id 或本地目录）。**必须留空**：这个键是「用户显式部署」
+  // 的标记，运行时优先用它 —— 一旦给默认值（曾默认是 DeepSeek V4.1 Flash 预设），
+  // 用户在模型库里选的本地 MLX 目录就会被预设盖住：启动时拿着预设 repo 去 HuggingFace
+  // 下载，下载不到就报 LocalEntryNotFoundError（「启动 / 加载都有问题」就是这么来的）。
+  // 预设仍在 MLX 引擎面板与引导流程里一键部署，那两处会显式写入本键。
+  MLX_MODEL: "",
+  MLX_CACHE_SIZE_GB: "8",
+  // 国内环境优先走 hf-mirror，置空则使用 HuggingFace 官方。
+  MLX_HF_ENDPOINT: "https://hf-mirror.com",
   VLLM_MAX_MODEL_LEN: "8192",
   VLLM_TENSOR_PARALLEL_SIZE: "1",
   VLLM_GPU_MEMORY_UTILIZATION: "0.9",
@@ -207,6 +277,21 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_API_KEY: "",
   IMG_MODEL: "",
   IMG_COMFY_BASE: "",
+  // MLX 生图常驻 worker 空闲多少分钟后自动卸载（0 = 一直常驻）：模型会占数 GB 内存。
+  IMG_MLX_IDLE_MINUTES: "10",
+  // MiniMax（H3）默认走官方 API；自部署的 MiniMax 兼容服务改 Base 即可（参照 OmniLabs）。
+  VIDEO_BACKEND: "minimax",
+  VIDEO_MINIMAX_BASE: "https://api.minimaxi.com",
+  VIDEO_MINIMAX_API_KEY: "",
+  VIDEO_MINIMAX_MODEL: "MiniMax-H3",
+  // Seedance 走火山方舟内容生成任务 API（Bearer ARK_API_KEY）。
+  VIDEO_SEEDANCE_BASE: "https://ark.cn-beijing.volces.com/api/v3",
+  VIDEO_SEEDANCE_API_KEY: "",
+  VIDEO_SEEDANCE_MODEL: "doubao-seedance-1-0-lite-t2v-250428",
+  VIDEO_COMFY_BASE: "",
+  VIDEO_COMFY_CKPT: "",
+  VIDEO_COMFY_CLIP: "",
+  VIDEO_COMFY_VAE: "",
   MODEL_DOWNLOADS: "[]",
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",
@@ -216,6 +301,15 @@ const DEFAULTS: Record<SettingsKey, string> = {
   WEB_SEARCH_PROVIDER: "bing",
   WEB_SEARCH_API_KEY: "",
   WEB_SEARCH_MAX_RESULTS: "5",
+  MEMORY_ENABLED: "1",
+  /** Agent / CLI / MCP 的写入先落「待确认」，用户在记忆页批准后才生效（0=直接生效）。 */
+  MEMORY_REVIEW_MODE: "0",
+  /** 记忆向量检索（可选）：留空则纯关键词检索。 */
+  MEMORY_EMBEDDING_MODEL: "",
+  MEMORY_EMBEDDING_BASE: "",
+  MEMORY_EMBEDDING_API_KEY: "",
+  /** 是否把 Agent 写入记为项目记忆（按工作区隔离，1=开启）。 */
+  MEMORY_SCOPE_ENABLED: "1",
   TRANSLATION_ENGINE: "model",
   AGENT_WORKSPACE: "",
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
@@ -230,11 +324,59 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
   VOICE_CALL_REALTIME_VOICE: "longanqian",
+  // Skills 管理默认值
+  SKILLS_CENTRAL_PATH: "",
+  SKILLS_SYNC_MODE: "symlink",
+  SKILLS_TOOLS_DISABLED: "[]",
+  SKILLS_TOOL_PATH_OVERRIDES: "{}",
+  SKILLS_CUSTOM_TOOLS: "[]",
+  SKILLS_ACTIVE_PRESET: "",
+  SKILLS_AUTO_BACKUP: "1",
+  SKILLS_GIT_REMOTE: "",
+  SKILLS_GIT_PAT: "",
+
+  // 备份远端存储（S3 兼容 / WebDAV）。密钥类键名带 KEY/SECRET，备份的「剔除密钥」会抹掉它们。
+  BACKUP_REMOTE_KIND: "s3",
+  BACKUP_REMOTE_ENABLED: "0",
+  BACKUP_REMOTE_ENDPOINT: "",
+  BACKUP_REMOTE_BUCKET: "",
+  BACKUP_REMOTE_REGION: "us-east-1",
+  BACKUP_REMOTE_ACCESS_KEY: "",
+  BACKUP_REMOTE_SECRET_KEY: "",
+  BACKUP_REMOTE_PREFIX: "OmniStudio",
+  BACKUP_REMOTE_PATH_STYLE: "1",
+  BACKUP_REMOTE_AUTO_UPLOAD: "0",
+  BACKUP_REMOTE_DELETE_LOCAL: "0",
+  CLOUD_PROVIDER: "",
+  CLOUD_MODELS: "[]",
+  CUSTOM_PROVIDERS: "[]",
+  SERVED_ACTIVE_ID: "",
 };
 
+/**
+ * 设置读取缓存：`getSetting` 是热路径（一次服务器启动会读十几次，每次对话也要读），
+ * 263 处调用点每处一次 SELECT 会被放大。
+ *
+ * - 本进程写入（updateSettings）立即失效对应键，读到的一定是最新值；
+ * - 跨进程写入（omi CLI、记忆桥接会直连同一个 SQLite）不经过本进程，
+ *   用 2 秒 TTL 兜底 —— 代价是最多 2 秒的陈旧窗口，换来热路径零查询。
+ */
+const SETTINGS_CACHE_TTL_MS = 2000;
+const settingsCache = new Map<string, { value: string; at: number }>();
+
+/** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */
+export function invalidateSettingsCache() {
+  settingsCache.clear();
+}
+
 export function getSetting(key: SettingsKey): string {
+  const now = Date.now();
+  const cached = settingsCache.get(key);
+  if (cached && now - cached.at < SETTINGS_CACHE_TTL_MS) return cached.value;
   const row = db.select().from(settingsTable).where(eq(settingsTable.key, key)).get();
-  return row?.value ?? DEFAULTS[key];
+  const value = row?.value ?? DEFAULTS[key];
+  settingsCache.set(key, { value, at: now });
+  return value;
 }
 
 export function getNumericSetting(key: SettingsKey): number {
@@ -246,6 +388,7 @@ export function getAllSettings(): Record<string, string> {
   const result: Record<string, string> = { ...DEFAULTS };
   for (const row of rows) {
     result[row.key] = row.value;
+    settingsCache.set(row.key, { value: row.value, at: Date.now() });
   }
   return result;
 }
@@ -256,6 +399,7 @@ export function updateSettings(values: Record<string, string>) {
       .values({ key, value })
       .onConflictDoUpdate({ target: settingsTable.key, set: { value } })
       .run();
+    settingsCache.set(key, { value, at: Date.now() });
   }
 }
 
@@ -264,19 +408,15 @@ export function isConfigured(): boolean {
   return row?.value === "1";
 }
 
-/** The port key each LLM inference engine reads (mirrored on the UI by ENGINE_PORT_KEYS). */
-export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = {
-  "llama.cpp": "SERVER_PORT",
-  vllm: "VLLM_PORT",
-  sglang: "SGLANG_PORT",
-};
+/** The port key each LLM inference engine reads (derived from shared/engines.ts). */
+export const ENGINE_PORT_KEYS: Record<InferenceEngine, SettingsKey> = Object.fromEntries(
+  ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].portKey]),
+) as Record<InferenceEngine, SettingsKey>;
 
 /** The extra-launch-args key for each LLM engine (whitespace-separated flags appended last). */
-export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = {
-  "llama.cpp": "SERVER_EXTRA_ARGS",
-  vllm: "VLLM_EXTRA_ARGS",
-  sglang: "SGLANG_EXTRA_ARGS",
-};
+export const ENGINE_EXTRA_ARGS_KEYS: Record<InferenceEngine, SettingsKey> = Object.fromEntries(
+  ENGINE_IDS.map((id) => [id, ENGINE_SPECS[id].extraArgsKey]),
+) as Record<InferenceEngine, SettingsKey>;
 
 /** The configured listen port of the given engine. */
 export function getServerPort(engine: InferenceEngine): string {
@@ -289,6 +429,16 @@ export function getActiveInferenceEngine(): InferenceEngine {
 }
 
 /** The listen port of the currently active LLM inference engine. */
+/**
+ * 运行期端口覆盖：同时驻留多个模型时，活动实例的端口未必等于引擎的设置端口
+ * （只有第一个启动的实例占设置端口）。由 model-servers 维护，不落库。
+ */
+let activePortOverride: string | null = null;
+
+export function setActiveServerPortOverride(port: string | null) {
+  activePortOverride = port;
+}
+
 export function getActiveServerPort(): string {
-  return getServerPort(getActiveInferenceEngine());
+  return activePortOverride || getServerPort(getActiveInferenceEngine());
 }

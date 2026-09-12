@@ -19,37 +19,46 @@ const db = drizzle({ client: sqlite });
 migrate(db, { migrationsFolder: join(import.meta.dir, "db/migrations") });
 
 mock.module("./db", () => ({ db }));
-mock.module("./db/settings", () => ({
-  getSetting: (key: string) =>
+mock.module("./db/settings", () => {
+  const getSetting = (key: string) =>
     key === "SERVER_MODE"
       ? "remote"
       : key === "VLLM_API_BASE"
         ? "http://fake:8000"
         : key === "CHAT_MODEL"
           ? "test-model"
-          : "",
-  updateSettings: () => {},
-  getAllSettings: () => ({}),
-  getActiveServerPort: () => "18080",
-}));
+          : "";
+  return {
+    getSetting,
+    // knowledge.ts → vllm/vllm.ts 会读重试次数等数值设置。
+    getNumericSetting: (key: string) => Number(getSetting(key)),
+    updateSettings: () => {},
+    getAllSettings: () => ({}),
+    getActiveServerPort: () => "18080",
+    // 已启动模型注册表（chat.ts → model-servers.ts）会经 runtimes/* 读这两个：
+    // 部分 mock 少了它们会让整个模块图命名导入失败（"Export named ... not found"）。
+    getServerPort: () => "18080",
+    ENGINE_EXTRA_ARGS_KEYS: { "llama.cpp": "", vllm: "", sglang: "", mlx: "" },
+  };
+});
 mock.module("./chat-model", () => ({ getChatModelName: () => "test-model" }));
+// 展开真实模块再覆盖：只改本文件需要的几个函数，其余导出保持真实实现。
+// 同一批测试共享 mock 注册表，image-server.route.test 也会 import ./image-server ——
+// 手写全量桩会随真实实现演进变味（例如 getPromptLibraryMediaBase 曾经少一层路径，
+// 桩里也照抄了旧逻辑，于是一个文件里的 bug 被另一个文件的桩隐藏）。
+const realImageServer = await import("./image-server");
 mock.module("./image-server", () => ({
+  ...realImageServer,
   chatImageDir: () => "/tmp",
   getImagesBaseDir: () => "/tmp",
   getPromptLibraryCacheBase: () => join("/tmp", `pl-cache-${process.pid}`),
   promptLibraryLocalUrl: (rel: string) => `http://localhost:1/prompt-library/${rel}`,
-  // 同一批测试在同一进程共享 mock 注册表，image-server.route.test 也会 import
-  // ./image-server；补上它需要的导出，避免该文件的冒烟测试被这个桩污染。
-  getPromptLibraryMediaBase: () => {
-    const base = join(process.env.HOME || "", "ai", "vibedesign", "frontend", "public");
-    return fs.existsSync(join(base, "prompt-library")) ? base : null;
-  },
   startImageServer: () => {
-    // 让路由冒烟测试按"端口被占用"的预设路径跳过服务器冒烟，只跑纯函数断言。
-    throw new Error("image-server mocked: treat as port occupied");
+    // 本文件不需要起图片服务（chat 只用到目录工具函数）。
+    throw new Error("image-server mocked: no server in chat tests");
   },
 }));
-mock.module("./stats", () => ({ recordUsage: () => {} }));
+mock.module("./stats", () => ({ recordUsage: () => {}, markServerStarted: () => {} }));
 mock.module("./server-manager", () => ({
   getStatus: () => "running",
   getLastError: () => null,
@@ -89,14 +98,22 @@ afterAll(() => {
 test("sendMessage streams, persists content+tokens and emits stats", async () => {
   const conv = createConversation(undefined, "chat");
   const events: string[] = [];
-  const offChunk = onChatChunk(() => events.push("chunk"));
+  const deltas: string[] = [];
+  // 增量按 ~40ms 批量下发（减少 IPC 与前端重渲染），事件条数不再等于 token 数：
+  // 这里断言真正的不变量 —— 内容一字不丢、done 最后收尾。
+  const offChunk = onChatChunk((payload) => {
+    events.push("chunk");
+    if (payload.kind !== "reasoning") deltas.push(payload.delta);
+  });
   const offDone = onChatDone(() => events.push("done"));
   const stats: number[] = [];
   const offStats = onChatStats((s) => stats.push(s.tokens));
 
   const res = await sendMessage(conv.id, "hello");
   expect(res.ok).toBe(true);
-  expect(events).toEqual(["chunk", "chunk", "done"]);
+  expect(deltas.join("")).toBe("你好世界");
+  expect(events.length).toBeGreaterThan(0);
+  expect(events[events.length - 1]).toBe("done");
   expect(stats).toEqual([4]);
 
   const { messages } = getConversation(conv.id);

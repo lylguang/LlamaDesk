@@ -45,6 +45,7 @@ import {
 } from "@/shared/modelscope";
 import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "./setup-screen/constants";
+import { LlamaEngineInstall } from "./local-engines/llm-panel";
 import { serverErrorHint } from "@/mainview/lib/server-error";
 import { cn } from "@/mainview/lib/utils";
 
@@ -895,6 +896,7 @@ export function LocalModelsScreen({
         )}
 
         <EngineSelector />
+        {engine === "llama.cpp" && <LlamaEngineInstall />}
         <ServerParamsPanel engine={engine} />
         <LaunchBar installedModels={installedModels} />
 

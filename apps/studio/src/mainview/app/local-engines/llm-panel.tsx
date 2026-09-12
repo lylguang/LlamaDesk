@@ -50,6 +50,7 @@ import { MODEL_PROFILES } from "@/shared/model-profiles";
 import { MODEL_QUANTS } from "../setup-screen/constants";
 import { serverErrorHint } from "@/mainview/lib/server-error";
 import {
+  EngineInstallRow,
   CommitInput,
   CommitTextarea,
   DownloadControls,
@@ -222,6 +223,8 @@ function EngineConfigCard({ engine }: { engine: InferenceEngine }) {
         placeholder="--flash-attn on --no-warmup"
         onCommit={(v) => patch.mutate({ [ENGINE_EXTRA_ARGS_KEYS[engine]]: v })}
       />
+      {engine === "llama.cpp" && <LlamaEngineInstall />}
+
       <div className="flex flex-wrap items-center gap-3 border-t pt-3">
         <Button
           size="sm"
@@ -1023,6 +1026,46 @@ export function LlmPanel() {
       <SupportedModels engine={tab} />
       <InstalledModels engine={tab} />
       <DefaultModelConfig />
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// llama.cpp 引擎一键安装（应用内置引擎 / PATH 均视为已安装）
+// ---------------------------------------------------------------------------
+
+export function LlamaEngineInstall() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const infoQuery = useQuery({
+    queryKey: ["llama-engine"],
+    queryFn: () => rpcClient.getLlamaEngineInfo(),
+  });
+  const installMutation = useMutation({
+    mutationFn: () => rpcClient.downloadLlamaEngine(),
+    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["llama-engine"] }),
+  });
+
+  const info = infoQuery.data;
+  const installed = !!info?.installed;
+  const detail = installed
+    ? info?.version
+      ? `llama.cpp ${info.version}`
+      : t("engine.status.ready")
+    : undefined;
+
+  return (
+    <div className="space-y-0.5">
+      <EngineInstallRow
+        installed={installed}
+        detail={detail}
+        note={installed ? info?.binaryPath ?? undefined : undefined}
+        onInstall={() => installMutation.mutate()}
+        installing={installMutation.isPending}
+      />
+      {installMutation.isError && (
+        <p className="text-[11px] break-all text-destructive">{String(installMutation.error)}</p>
+      )}
     </div>
   );
 }

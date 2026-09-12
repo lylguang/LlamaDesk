@@ -19,7 +19,7 @@ export interface Runtime {
    * precedence over the currently active model; omit it for the active model.
    * Used to let users copy the command and run it in their own terminal.
    */
-  buildCommandLine(modelOverride?: string): string;
+  buildCommandLine(modelOverride?: string): string | Promise<string>;
 
   start(): Promise<StartResult>;
   stop(): Promise<void>;

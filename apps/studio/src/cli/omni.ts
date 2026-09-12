@@ -281,7 +281,7 @@ async function cmdModel(ctx: Ctx, args: string[]) {
         chatModel: m.isChatModel,
         favorite: m.favorite,
         engine: backend.settings.getSetting("INFERENCE_ENGINE"),
-        command: backend.serverManager.getLaunchCommand(m.path).command,
+        command: (await backend.serverManager.getLaunchCommand(m.path)).command,
       };
       json
         ? console.log(JSON.stringify(info, null, 2))
@@ -596,7 +596,7 @@ async function cmdServer(args: string[], ctx: Ctx) {
       const engine = backend.runtimes.getActiveEngine();
       const status = backend.serverManager.getStatus();
       const pid = backend.serverManager.getPid();
-      const launch = backend.serverManager.getLaunchCommand();
+      const launch = await backend.serverManager.getLaunchCommand();
       const lastError = backend.serverManager.getLastError();
       // 端口探测：应用自身在跑的推理服务器（外部实例）也能被识别。
       const reachable = await probeServer(backend.chat.getChatBaseUrl());

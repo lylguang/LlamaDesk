@@ -270,6 +270,15 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
 
+      - name: Extract Windows setup exe
+        run: |
+          cd llamadesk-win-x64
+          ZIP="$(ls *Setup*.zip | head -n1)"
+          PREFIX="${ZIP%%-*}"
+          unzip -j "$ZIP" "*.exe" -d .
+          EXE="$(ls *.exe | head -n1)"
+          mv "$EXE" "${PREFIX}-win-x64-LlamaDesk-Setup.exe"
+
       - name: Determine release environment
         id: release-env
         run: |
@@ -283,6 +292,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
+          body: |
+            ## 下载安装
+            - 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`
+            - 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）
+            - 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`
           files: |
             llamadesk-darwin-arm64/*
             llamadesk-win-x64/*

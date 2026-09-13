@@ -32,6 +32,14 @@ type ServerConfig = {
   ignoreRange?: boolean;
   /** 只让「从 0 开始的区间」失败（构造前缀分片失败的场景）。 */
   failFromZero?: boolean;
+  /**
+   * 每个 64KiB 块之间 `Bun.sleep` 这么久。测「下载到一半 abort」的用例必须开：
+   * start() 里同步 enqueue 会把整个响应体一次性排进队列（ReadableStream 无背压），
+   * abort 追不上已入队的数据。本地事件循环快、取消能插队；CI 调度下整文件会在
+   * 取消生效前下完，`0 < 已下 < 全量` 的断言就成了掷硬币。加一点节流让
+   * `onProgress` 的阈值稳定落在中途。
+   */
+  chunkDelayMs?: number;
   /** 统计。 */
   requests?: { ranges: string[]; total: number };
 };
@@ -73,6 +81,8 @@ function startServer(cfg: ServerConfig) {
                 first = false;
                 await Bun.sleep(cfg.stallOnceMs ?? 200);
               }
+              // 节流：让整条流按块下发，abort 才能稳定落在中途而不是下完之后。
+              if (cfg.chunkDelayMs) await Bun.sleep(cfg.chunkDelayMs);
             }
             controller.close();
           },
@@ -166,7 +176,9 @@ describe("多路并发 + 断点续传", () => {
 
   test("暂停后重启：只请求缺失区间，不从头重下", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data });
+    // chunkDelayMs 让流按块下发：不节流的话整份 20MiB 会在一个微任务风暴里下完，
+    // abort 追不上，"部分下载"的前提不成立（CI 上就是这么翻车的）。
+    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
     servers.push(server);
     const dest = path.join(dir, "big.gguf");
 
@@ -381,7 +393,7 @@ describe("远端变化与旧格式", () => {
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data });
+    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
     servers.push(server);
     const dest = path.join(dir, "cleanup.bin");
 
@@ -403,7 +415,8 @@ describe("旁路数据管理", () => {
   test("小文件走单流也能断点续传", async () => {
     const size = 512 * 1024; // 低于并行门槛
     const data = makeData(size);
-    const { server, requests } = startServer({ data });
+    // 节流理由同上：不延迟的话 512KiB 一瞬下完，30% 的 abort 阈值形同虚设。
+    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
     servers.push(server);
     const dest = path.join(dir, "small.json");
 

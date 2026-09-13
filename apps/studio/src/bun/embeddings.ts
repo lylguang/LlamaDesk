@@ -47,6 +47,17 @@ export async function callEmbeddings(cfg: EmbeddingConfig, texts: string[]): Pro
     });
     if (!res.ok) {
       const body = await res.text().catch(() => "");
+      // 常见失败都给出"下一步怎么做"：501/404 = 当前服务没有嵌入能力（只加载了对话模型），
+      // 401/403 = 鉴权 —— 用户看到裸 HTTP 码 + 响应体片段解决不了问题。
+      if (res.status === 501 || res.status === 404) {
+        throw new Error(
+          "当前推理服务不支持向量嵌入（只加载了对话模型）。请下载并启动一个嵌入模型" +
+            "（模型库 → 嵌入 Embedding 分类，如 bge-m3），或在知识库「设置」里把嵌入服务指向支持 /v1/embeddings 的地址。",
+        );
+      }
+      if (res.status === 401 || res.status === 403) {
+        throw new Error("嵌入服务鉴权失败（HTTP " + res.status + "）：请检查嵌入服务地址的 API Key 配置。");
+      }
       throw new Error(`嵌入请求失败（HTTP ${res.status}）${body.slice(0, 200)}`);
     }
     const json = (await res.json()) as { data?: { embedding?: number[]; index?: number }[] };

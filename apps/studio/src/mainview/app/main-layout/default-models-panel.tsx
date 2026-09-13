@@ -216,11 +216,19 @@ function ChatModelCard() {
   const selectMutation = useMutation({
     mutationFn: (opt: { type: "local" | "api"; value: string }) => rpcClient.selectChatModel(opt),
     onSettled: () => setPending(false),
-    onSuccess: () => {
+    onSuccess: async (res, opt) => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
       queryClient.invalidateQueries({ queryKey: ["installed-models"] });
       queryClient.invalidateQueries({ queryKey: ["chat-models"] });
       queryClient.invalidateQueries({ queryKey: ["server-status"] });
+      // 兑现面板文案「选择本地模型会自动启动推理服务」：needsStart = 选了未启动的
+      // 本地模型（selectChatModel 只记设置不拉进程）。启动在后台进行，就绪后
+      // 对话 / Agent 的模型选择器里就能直接选它。
+      if (res.ok && res.needsStart && opt.type === "local" && opt.value.startsWith("/")) {
+        await rpcClient.startServedModel({ path: opt.value });
+        queryClient.invalidateQueries({ queryKey: ["served-models"] });
+        queryClient.invalidateQueries({ queryKey: ["chat-models"] });
+      }
     },
   });
 

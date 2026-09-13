@@ -30,6 +30,7 @@ import {
   type ModelCategory,
   type InstalledModel,
 } from "@/shared/modelscope";
+import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { cn } from "@/mainview/lib/utils";
 import {
   ModelCategoryBadge,
@@ -80,7 +81,7 @@ function PresetRow({
           <ModelCategoryBadge category={preset.app} label={t(`models.cat.${preset.app}`)} />
           {preset.engine && preset.engine !== "all" && (
             <span className="inline-flex h-5 shrink-0 items-center rounded-full bg-muted px-1.5 text-[10px] font-medium text-muted-foreground">
-              {t(`settings.engine.${preset.engine}`)}
+              {ENGINE_SHORT_NAMES[preset.engine]}
             </span>
           )}
         </div>

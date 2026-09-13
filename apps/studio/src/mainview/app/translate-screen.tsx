@@ -26,6 +26,7 @@ import {
 } from "@ui/select";
 import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
+import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { cn } from "@/mainview/lib/utils";
 import type { TranslationRecordRow } from "../../bun/translate";
 import { LiveTranslateTab } from "./live-translate";
@@ -177,7 +178,7 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                         <span className="flex min-w-0 items-center gap-1">
                           {o.engine && (
                             <span className="rounded-sm bg-muted px-1 text-[9px] leading-4 text-muted-foreground">
-                              {t(`settings.engine.${o.engine}`)}
+                              {ENGINE_SHORT_NAMES[o.engine]}
                             </span>
                           )}
                           {o.detail && (

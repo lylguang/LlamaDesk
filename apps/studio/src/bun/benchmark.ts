@@ -546,9 +546,15 @@ export function startBenchmark(params: BenchmarkParams): { runId: string } | { e
   const batchSize = Math.max(params.batchSize ?? 1, 1);
   const genLength = Math.max(params.genLength ?? 128, 16);
   const temperature = params.temperature ?? 0;
-  const contexts = (params.contexts?.length ? params.contexts : DEFAULT_CONTEXTS)
+  // 扫描档位不能超过当前上下文长度（SERVER_CTX_SIZE，默认 8192）：超出服务上下文
+  // 上限的档位必然失败，扫了也只是白等报错。全被截掉时退回单档（≤ 上限）。
+  const serverCtx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
+  const withinCtx = (params.contexts?.length ? params.contexts : DEFAULT_CONTEXTS)
     .map((c) => Math.max(c, 128))
-    .sort((a, b) => a - b);
+    .filter((c) => c <= serverCtx);
+  const contexts = (withinCtx.length ? withinCtx : [Math.min(1024, serverCtx)]).sort(
+    (a, b) => a - b,
+  );
 
   const kind: "speed" | "eval" = params.mode === "eval" ? "eval" : "speed";
   if (kind === "eval" && !params.suite) return { error: "eval suite required" };

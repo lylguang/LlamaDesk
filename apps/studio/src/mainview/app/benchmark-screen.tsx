@@ -98,6 +98,15 @@ export function BenchmarkScreen() {
     queryKey: ["benchmark-records"],
     queryFn: () => rpcClient.listBenchmarkRecords(undefined),
   });
+
+  // 当前上下文长度（与推理服务启动参数同源）：扫描档位不允许超过它，超了必然失败。
+  const serverCtx = Number(settingsData?.settings?.SERVER_CTX_SIZE) || 8192;
+  useEffect(() => {
+    setContexts((prev) => {
+      const next = prev.filter((c) => c <= serverCtx);
+      return next.length > 0 ? next : [Math.min(1024, serverCtx)];
+    });
+  }, [serverCtx]);
   const evalSuitesQuery = useQuery({
     queryKey: ["eval-suites"],
     queryFn: () => rpcClient.getEvalSuites(undefined),
@@ -448,22 +457,27 @@ export function BenchmarkScreen() {
               <div>
                 <Label className="mb-1.5 block text-xs">{t("benchmark.contexts")}</Label>
                 <div className="flex flex-wrap gap-1.5">
-                  {PRESET_CONTEXTS.map((c) => (
-                    <button
-                      key={c}
-                      type="button"
-                      disabled={isRunning}
-                      onClick={() => toggleContext(c)}
-                      className={cn(
-                        "rounded-full border px-2.5 py-1 text-xs transition-colors",
-                        contexts.includes(c)
-                          ? "border-primary bg-primary/10 text-primary"
-                          : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                      )}
-                    >
-                      {fmtCtx(c)}
-                    </button>
-                  ))}
+                  {PRESET_CONTEXTS.map((c) => {
+                    const overCtx = c > serverCtx;
+                    return (
+                      <button
+                        key={c}
+                        type="button"
+                        disabled={isRunning || overCtx}
+                        title={overCtx ? t("benchmark.ctxOverLimit") : undefined}
+                        onClick={() => toggleContext(c)}
+                        className={cn(
+                          "rounded-full border px-2.5 py-1 text-xs transition-colors",
+                          contexts.includes(c)
+                            ? "border-primary bg-primary/10 text-primary"
+                            : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
+                          overCtx && "cursor-not-allowed opacity-40 hover:text-muted-foreground",
+                        )}
+                      >
+                        {fmtCtx(c)}
+                      </button>
+                    );
+                  })}
                 </div>
               </div>
             </>

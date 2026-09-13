@@ -545,6 +545,10 @@ export type AppRPC = {
         params: { type: "local" | "api"; value: string; providerId?: string };
         response: { ok: boolean; error?: string; needsStart?: boolean };
       };
+      stopChatMessage: {
+        params: { conversationId: number };
+        response: { ok: boolean };
+      };
       // Agent（Pi Agent Harness）
       sendAgentMessage: {
         params: {
@@ -2481,6 +2485,10 @@ export const appRPC = BrowserView.defineRPC<AppRPC>({
 
       selectChatModel: async ({ type, value, providerId }) => {
         return selectChatModel(type, value, providerId);
+      },
+
+      stopChatMessage: async ({ conversationId }) => {
+        return { ok: Chat.stopChatGeneration(conversationId) };
       },
 
       // Agent（Pi Agent Harness）

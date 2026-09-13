@@ -46,7 +46,7 @@ export function activeProviderId(): string | null {
  * 首次访问时把散落在 settings 里的旧云服务配置迁移入表（幂等：表非空即跳过）。
  * - CUSTOM_PROVIDERS 里的自定义服务商 → 各一行（api_key 为空，旧版未存）；
  * - 当前 CLOUD_PROVIDER（预设或自定义）→ 一行，带上 VLLM_API_KEY 与 CLOUD_MODELS；
- * - 全新安装（无任何云配置）→ 预置一行 OmniLabs（未激活），引导用户补 Key。
+ * - 全新安装（无任何云配置）→ 表保持为空，用户在「模型云服务」页自行添加。
  */
 function ensureMigrated(): void {
   const existing = db.select({ id: cloudProviders.id }).from(cloudProviders).all();
@@ -110,20 +110,8 @@ function ensureMigrated(): void {
     }
   }
 
-  if (rows.length === 0) {
-    const preset = getPreset("omnilabs")!;
-    rows.push({
-      id: preset.id,
-      name: preset.name,
-      vendor: preset.vendor,
-      baseUrl: preset.baseUrl,
-      apiKey: "",
-      models: JSON.stringify(preset.models.map((id) => ({ id }))),
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-
+  // 全新安装（无任何云配置）：不预置任何服务商行 —— 预设里没有"自家"品牌，
+  // 空表即可，用户在「模型云服务」页按需添加。幂等：表仍为空时下次重走本函数。
   for (const row of rows) {
     db.insert(cloudProviders).values(row).onConflictDoNothing().run();
   }

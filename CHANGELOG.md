@@ -4,6 +4,14 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [0.0.9] - 2026-09-13
+
+### Fixed / 修复
+
+- **下载内核并发竞态（数据损坏）**：多分片下载某片失败时，`Promise.all` 一有 reject 就进入清理分支删分片文件，而其余在途分片仍握着同名 fd 继续 append —— 两轮布局交错写同一个 `.partN`，装配出内容偏移的坏文件。改为 `Promise.allSettled`：轮次收尾前绝不动磁盘与 sidecar。CI（较慢的 macOS runner）上偶现、本地全绿的三个 downloader 用例即此因；对应地给测试假服务器加了 `chunkDelayMs` 节流，让「下载到一半 abort」的前提稳定成立。
+- **`omi memory` / `omi benchmark` 读到空库**：商业化把规范库名从 `omni-studio.db` 改成 `llama-desk.db`，但 CLI 的 memory / benchmark 进程内兜底路径仍指旧名 —— `bun:sqlite` 的 `create: true` 会静默开一个全新空库，命令「成功」却全是空数据（比报错更隐蔽）。改回规范名；`backup/index.ts` 的 `resolveDbPath` 现先认 `llama-desk.db`，旧安装的 `omni-studio.db` 仅作回退。
+- **CI / 发布**：`release.yml` 的 release job 缺 `actions/checkout`，导致从 CHANGELOG 提取发布说明的 awk 读不到文件、回退成自动生成——补上 checkout（v0.0.8 正文已手工修好）；备份冒烟脚本的造数据与「坏库对照」检查改用规范库名，并修正远端列表断言的品牌前缀；`docs/omi-cli.md` 重新生成为 LlamaDesk 品牌。
+
 ## [0.0.8] - 2026-09-13
 
 ### Fixed / 修复

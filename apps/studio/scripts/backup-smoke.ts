@@ -25,7 +25,10 @@ const check = (name: string, ok: boolean, detail?: string) => {
 };
 
 const skillsRepo = path.join(dataDir, "skills-repo");
-const dbPath = path.join(dataDir, "omni-studio.db");
+// 规范库名是 llama-desk.db（商业化更名,与 db/index.ts 一致）。CLI 的 memory 命令
+// 在模块 import 期就会打开这份库,冒烟造数据必须写同一个文件,否则「坏库」检查
+// 拿的是一个根本没人读的旧名字,对照形同虚设。
+const dbPath = path.join(dataDir, "llama-desk.db");
 
 // 1. 造数据：设置（含密钥）、云服务商、会话与消息、记忆、技能仓库文件、媒体文件
 // 表结构按迁移文件建（含后续 ALTER TABLE 补的列），与真实数据目录一致；
@@ -274,7 +277,7 @@ check("非备份文件被拒绝", badInspect.code !== 0, badInspect.out.trim());
   check("正确密码可预览", encInspect.code === 0 && JSON.parse(encInspect.out).scopes.join(",") === "settings,skills");
 
   const remoteList = await runOmiAsync(["backup", "remote", "list", "--json"]);
-  check("omi backup remote list 看得到上传的备份", remoteList.code === 0 && remoteList.out.includes("OmniStudio-"), remoteList.err.trim());
+  check("omi backup remote list 看得到上传的备份", remoteList.code === 0 && remoteList.out.includes("LlamaDesk-"), remoteList.err.trim());
   const remoteDownload = await runOmiAsync(["backup", "remote", "download", path.basename(encPath)]);
   check("omi backup remote download 拉回本地", remoteDownload.code === 0 && remoteDownload.out.includes("已下载到"), remoteDownload.err.trim());
 

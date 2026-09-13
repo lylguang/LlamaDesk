@@ -303,9 +303,10 @@ jobs:
           NOTES="$RUNNER_TEMP/release-notes.md"
           {
             echo "## 下载安装"
-            echo "- 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`"
-            echo "- 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）"
-            echo "- 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`"
+            # 必须单引号:双引号里的反引号会被 bash 当命令替换吃掉,文件名整个消失。
+            echo '- 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`'
+            echo '- 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）'
+            echo '- 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`'
             echo ""
           } > "$NOTES"
           VERSION="${RELEASE_TAG#v}"

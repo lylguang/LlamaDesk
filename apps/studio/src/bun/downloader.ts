@@ -816,7 +816,10 @@ async function downloadOnce(
   let lastError: unknown = null;
   for (let round = 1; round <= rounds; round++) {
     try {
-      await Promise.all(
+      // 全部 settle 后才处理失败：Promise.all 一有分片抛错就返回，外层（重试或
+      // 重新探测）会立刻清理分片文件，而其余在途分片还握着同名 fd 在写 ——
+      // 两轮布局交错写同一个 .partN，装配出内容偏移的坏文件。
+      const results = await Promise.allSettled(
         sidecar.parts.map((part) =>
           fetchPart(url, destPath, part, opts, totals, (bytes) => {
             received += bytes;
@@ -824,6 +827,8 @@ async function downloadOnce(
           }),
         ),
       );
+      const failed = results.find((r) => r.status === "rejected") as PromiseRejectedResult | undefined;
+      if (failed) throw failed.reason;
       lastError = null;
       break;
     } catch (e) {

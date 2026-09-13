@@ -272,7 +272,7 @@ describe("备份 / 恢复", () => {
   });
 
   test("文件名带时间戳且扩展名固定", () => {
-    expect(backupFileName(new Date(2026, 0, 2, 3, 4, 5))).toBe("OmniStudio-20260102-030405.omnibackup");
+    expect(backupFileName(new Date(2026, 0, 2, 3, 4, 5))).toBe("LlamaDesk-20260102-030405.omnibackup");
   });
 
   test("加密备份：清单要密码才读得到，恢复同样需要密码", async () => {

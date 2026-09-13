@@ -173,10 +173,15 @@ export async function runTranslation(params: {
         ],
         // 译文长度与原文同量级；显式给上限，免得 mlx-lm 默认的 512 被推理模型的思考吃光。
         max_tokens: maxOutputTokens(),
-        stream: false,
+        // 流式接收（本函数内就地聚合）：慢模型逐 token 有数据流动，不会触发传输层
+        // 的静默/整体超时；总时长仍由下面的 AbortSignal 封顶。
+        stream: true,
       }),
+      // Bun fetch 默认 300s 就掐断整个请求（非空闲超时），慢模型的长译文必然被杀；
+      // 关掉它，只认上面 600s 的显式上限。timeout 是 Bun 扩展字段，标准 RequestInit 没有。
+      timeout: false,
       signal: AbortSignal.timeout(600_000),
-    });
+    } as RequestInit);
 
     if (!res.ok) {
       const body = await res.text().catch(() => "");
@@ -192,13 +197,55 @@ export async function runTranslation(params: {
       return { error: msg };
     }
 
-    const json = (await res.json()) as {
-      choices?: { message?: { content?: string } }[];
-      usage?: { prompt_tokens?: number; completion_tokens?: number };
+    if (!res.body) return { error: "模型响应为空" };
+
+    // SSE 就地聚合：攒完整译文后再一次性入库 / 返回（UI 仍是转圈等结果，不变）。
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let raw = "";
+    let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
+
+    const consumeLine = (line: string) => {
+      const trimmed = line.trim();
+      if (!trimmed.startsWith("data:")) return;
+      const payloadLine = trimmed.slice(5).trim();
+      if (payloadLine === "[DONE]") return;
+      try {
+        const json = JSON.parse(payloadLine) as {
+          choices?: { delta?: { content?: string } }[];
+          usage?: { prompt_tokens?: number; completion_tokens?: number };
+        };
+        const delta = json.choices?.[0]?.delta?.content;
+        if (typeof delta === "string" && delta) raw += delta;
+        if (json.usage) usage = json.usage;
+      } catch {
+        // skip malformed chunk
+      }
     };
-    const content = json.choices?.[0]?.message?.content?.trim() ?? "";
-    recordUsage(modelLabel, json.usage?.prompt_tokens ?? 0, json.usage?.completion_tokens ?? 0);
-    if (!content) return { error: "模型未返回译文" };
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      let idx: number;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        consumeLine(buffer.slice(0, idx));
+        buffer = buffer.slice(idx + 1);
+      }
+    }
+    if (buffer.trim()) consumeLine(buffer);
+
+    recordUsage(modelLabel, usage?.prompt_tokens ?? 0, usage?.completion_tokens ?? 0);
+
+    // 推理模型可能把思考草稿塞进 content：剥掉成对 / 未闭合的 <think> 段与残留标签。
+    const content = raw
+      .replace(/<think>[\s\S]*?(?:<\/think>|$)/gi, "")
+      .replace(/^\s*<\/think>/i, "")
+      .trim();
+    if (!content) {
+      return { error: "模型未返回译文（可能思考内容占满了输出上限），请重试或更换更小的模型" };
+    }
 
     if (params.save === false) return { text: content };
     const record = db
@@ -215,8 +262,23 @@ export async function runTranslation(params: {
 
     return { text: content, id: record.id };
   } catch (e) {
-    return { error: e instanceof Error ? e.message : String(e) };
+    return { error: friendlyTranslateError(e) };
   }
+}
+
+/** 把底层超时 / 中断异常转成可行动的中文提示（原始报错对用户没有意义）。 */
+function friendlyTranslateError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/timed?\s*out|timeout/i.test(msg)) {
+    return "翻译超时：模型响应过慢（推理模型可能一直在思考）。可重试一次、换更小的模型，或把翻译引擎切到「Google 翻译」。";
+  }
+  if (/abort/i.test(msg)) {
+    return "翻译请求被中断，请重试。";
+  }
+  if (/fetch failed|econnrefused|connect|network/i.test(msg)) {
+    return "无法连接推理服务器：请确认本地模型已启动，或检查网络与代理设置。";
+  }
+  return msg;
 }
 
 export function listTranslationRecords(limit = 100): TranslationRecordRow[] {

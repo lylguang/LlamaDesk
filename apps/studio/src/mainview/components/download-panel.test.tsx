@@ -219,8 +219,8 @@ test("下载记录整份渲染：14 条任务都在列表里，不只最近几�
     }
     // 面板标题上的计数与任务总数一致。
     expect(text).toContain(`(${tasks.length})`);
-    // Radix 滚动视口存在，且列表挂在它下面。
-    const viewport = popover.querySelector("[data-radix-scroll-area-viewport]");
+    // 滚动视口存在（Appica ScrollArea = Base UI，viewport 带 data-slot），且列表挂在它下面。
+    const viewport = popover.querySelector("[data-slot='scroll-area-viewport']");
     expect(viewport).not.toBeNull();
     expect(textOf(viewport as unknown as Element)).toContain("preprocessor_config.json");
   } finally {

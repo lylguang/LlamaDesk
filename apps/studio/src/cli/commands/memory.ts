@@ -22,12 +22,14 @@ type MemoryModule = typeof import("../../bun/memory");
 
 let memoryMod: MemoryModule | null = null;
 
-/** 独立进程直连主库：必须先设 OMNI_DATA_DIR/OMNI_DB_PATH（见 db/index.ts 约定）。 */
+/** 独立进程直连主库：必须先设 OMNI_DATA_DIR/OMNI_DB_PATH（见 db/index.ts 约定）。
+ * 库名与 db/index.ts 的规范一致（llama-desk.db，商业化更名）。指错名字时
+ * `create: true` 会静默开一个全新空库——命令"成功"但数据全是空的，比报错更糟。 */
 async function loadMemory(): Promise<MemoryModule> {
   if (memoryMod) return memoryMod;
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
+  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
   memoryMod = await import("../../bun/memory");
   return memoryMod;
 }

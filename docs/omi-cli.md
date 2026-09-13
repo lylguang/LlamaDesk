@@ -1,4 +1,4 @@
-# omi — OmniStudio 命令行工具
+# omi — LlamaDesk 命令行工具
 
 omi 把桌面应用的后端能力（模型库、推理服务器、API 网关、共享记忆、编码工具启动器）封装成一条命令行。它和应用共用同一份 SQLite 与设置：应用在运行时走控制 socket 实时读写，应用没运行时直接读库兜底。
 
@@ -22,7 +22,7 @@ cd apps/studio && bun link
 OMNI_DATA_DIR=<数据目录> omi models
 ```
 
-默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
+默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/com.lylguang.llamadesk/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
 
 ## 启动应用与推理服务器
 
@@ -32,8 +32,8 @@ OMNI_DATA_DIR=<数据目录> omi models
 omi start
 ```
 
-启动 OmniStudio（未运行时自动拉起并等待控制通道就绪）。
-- 装在非默认位置时加 --app-path /path/to/OmniStudio.app。
+启动 LlamaDesk（未运行时自动拉起并等待控制通道就绪）。
+- 装在非默认位置时加 --app-path /path/to/LlamaDesk.app。
 
 `omi start --server` — 启动应用并同时拉起推理服务器，就绪后打印地址与引擎。
 `omi start --model` — 启动后直接在应用里打开模型列表。
@@ -260,7 +260,7 @@ omi backup restore <file> [--password <密码>] [--scopes a,b] [--yes]
 
 从备份恢复：默认先自动备份当前数据（pre-restore-*.omnibackup），再整表替换所选分组。恢复要求应用已退出（需要独占数据库）；应用内「设置 → 数据 → 备份与恢复」支持在线恢复并显示实时进度。
 
-`omi backup restore ~/Backups/OmniStudio-20260912-101500.omnibackup --scopes settings,skills` — 只把设置与技能恢复回来。
+`omi backup restore ~/Backups/LlamaDesk-20260912-101500.omnibackup --scopes settings,skills` — 只把设置与技能恢复回来。
 
 ```bash
 omi backup create|list|inspect  ·  应用内「设置 → 数据 → 备份与恢复」

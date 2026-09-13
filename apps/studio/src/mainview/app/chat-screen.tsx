@@ -18,6 +18,7 @@ import {
   CopyIcon,
   RotateCcwIcon,
   LanguagesIcon,
+  SquareIcon,
   SquareTerminalIcon,
   Trash2Icon,
 } from "lucide-react";
@@ -564,6 +565,11 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
     },
   });
 
+  // 停止生成：后端中断当前流式请求，保留已生成的部分内容并正常收尾（chatDone 解锁 UI）。
+  const stopMutation = useMutation({
+    mutationFn: () => rpcClient.stopChatMessage({ conversationId }),
+  });
+
   const attachMutation = useMutation({
     mutationFn: async () => {
       const { paths } = await rpcClient.openFileDialog({
@@ -849,20 +855,37 @@ function ChatMessages({ conversationId }: { conversationId: number }) {
 
               <div className="ml-auto flex min-w-0 items-center gap-1.5">
                 <ModelPicker disabled={streaming} />
-                <Button
-                  variant="default"
-                  size="icon-lg"
-                  className="shrink-0 rounded-full"
-                  tooltip={`${t("chat.send")} · ${t("chat.enterHint")}`}
-                  onClick={handleSend}
-                  disabled={!canSend || sendMutation.isPending}
-                >
-                  {sendMutation.isPending ? (
-                    <Loader2Icon className="size-4 animate-spin" />
-                  ) : (
-                    <ArrowUpIcon className="size-4" />
-                  )}
-                </Button>
+                {streaming ? (
+                  <Button
+                    variant="secondary"
+                    size="icon-lg"
+                    className="shrink-0 rounded-full"
+                    tooltip={t("chat.stopGeneration")}
+                    onClick={() => stopMutation.mutate()}
+                    disabled={stopMutation.isPending}
+                  >
+                    {stopMutation.isPending ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : (
+                      <SquareIcon className="size-4" />
+                    )}
+                  </Button>
+                ) : (
+                  <Button
+                    variant="default"
+                    size="icon-lg"
+                    className="shrink-0 rounded-full"
+                    tooltip={`${t("chat.send")} · ${t("chat.enterHint")}`}
+                    onClick={handleSend}
+                    disabled={!canSend || sendMutation.isPending}
+                  >
+                    {sendMutation.isPending ? (
+                      <Loader2Icon className="size-4 animate-spin" />
+                    ) : (
+                      <ArrowUpIcon className="size-4" />
+                    )}
+                  </Button>
+                )}
               </div>
             </div>
           </div>

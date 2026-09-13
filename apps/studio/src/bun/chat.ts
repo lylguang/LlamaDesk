@@ -101,6 +101,20 @@ function emitChatStats(payload: ChatStats) {
 }
 
 /**
+ * 每个会话当前进行中的流式回合。对话页的「停止生成」经由它中断请求：
+ * 与语音通话抢话打断走同一条收尾路径 —— 保留已生成的部分内容、正常 emitDone。
+ */
+const activeTurns = new Map<number, AbortController>();
+
+/** 主动停止某会话的生成。返回是否存在进行中的回合。 */
+export function stopChatGeneration(conversationId: number): boolean {
+  const controller = activeTurns.get(conversationId);
+  if (!controller) return false;
+  controller.abort();
+  return true;
+}
+
+/**
  * 在没有 usage 元数据时估算 token 数：CJK（中日韩）字符约 1 token/字，
  * 其余字符按 4 字符/token 折算。仅用于展示吞吐量，精确值以 API 的 usage 为准。
  */
@@ -563,9 +577,14 @@ async function streamAssistantReply(opts: {
 
   const startedAt = performance.now();
   let usage: { prompt_tokens?: number; completion_tokens?: number } | undefined;
-  const requestSignal = opts.signal
-    ? AbortSignal.any([AbortSignal.timeout(600_000), opts.signal])
-    : AbortSignal.timeout(600_000);
+  // 本回合的中断句柄：外部 signal（语音通话抢话）与「停止生成」都汇到这里。
+  const turn = new AbortController();
+  activeTurns.set(conversationId, turn);
+  const requestSignal = AbortSignal.any([
+    AbortSignal.timeout(600_000),
+    turn.signal,
+    ...(opts.signal ? [opts.signal] : []),
+  ]);
   try {
     const res = await fetch(`${base}/v1/chat/completions`, {
       method: "POST",
@@ -634,8 +653,8 @@ async function streamAssistantReply(opts: {
     flushChunks();
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    // 被外部中断（语音通话抢话打断）：保留已生成的部分内容，不当作错误处理。
-    if (opts.signal?.aborted) {
+    // 被中断（语音通话抢话打断 / 用户点「停止生成」）：保留已生成的部分内容，不当作错误处理。
+    if (opts.signal?.aborted || turn.signal.aborted) {
       db.update(messages)
         .set({ content: full, reasoning: reasoning || null, citations: opts.citations ? JSON.stringify(opts.citations) : null })
         .where(eq(messages.id, assistantId))
@@ -668,6 +687,7 @@ async function streamAssistantReply(opts: {
     return { ok: false, error: msg, content: "" };
   } finally {
     if (flushTimer) clearTimeout(flushTimer);
+    if (activeTurns.get(conversationId) === turn) activeTurns.delete(conversationId);
   }
 
   const tokens = usage?.completion_tokens ?? estimateTokens(full);

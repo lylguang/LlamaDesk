@@ -4,6 +4,25 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
+## [0.0.9] - 2026-09-13
+
+### Fixed / 修复
+
+- **下载内核并发竞态（数据损坏）**：多分片下载某片失败时，`Promise.all` 一有 reject 就进入清理分支删分片文件，而其余在途分片仍握着同名 fd 继续 append —— 两轮布局交错写同一个 `.partN`，装配出内容偏移的坏文件。改为 `Promise.allSettled`：轮次收尾前绝不动磁盘与 sidecar。CI（较慢的 macOS runner）上偶现、本地全绿的三个 downloader 用例即此因；对应地给测试假服务器加了 `chunkDelayMs` 节流，让「下载到一半 abort」的前提稳定成立。
+- **`omi memory` / `omi benchmark` 读到空库**：商业化把规范库名从 `omni-studio.db` 改成 `llama-desk.db`，但 CLI 的 memory / benchmark 进程内兜底路径仍指旧名 —— `bun:sqlite` 的 `create: true` 会静默开一个全新空库，命令「成功」却全是空数据（比报错更隐蔽）。改回规范名；`backup/index.ts` 的 `resolveDbPath` 现先认 `llama-desk.db`，旧安装的 `omni-studio.db` 仅作回退。
+- **CI / 发布**：`release.yml` 的 release job 缺 `actions/checkout`，导致从 CHANGELOG 提取发布说明的 awk 读不到文件、回退成自动生成——补上 checkout（v0.0.8 正文已手工修好）；备份冒烟脚本的造数据与「坏库对照」检查改用规范库名，并修正远端列表断言的品牌前缀；`docs/omi-cli.md` 重新生成为 LlamaDesk 品牌。
+
+## [0.0.8] - 2026-09-13
+
+### Fixed / 修复
+
+- **对话 / 智能体「停止生成」**：生成过程中新增停止按钮，后端配套 abort RPC 中断推理流——此前小模型复读时全部控件禁用，只能干等或强杀应用。
+- **模型翻译超时与报错**：改为流式聚合并关闭 Bun fetch 的 300 秒默认空闲超时（长文翻译不再中途掐断）；自动剥离 `<think>` 推理段；英文原文报错（"The operation timed out."）换成友好中文提示。
+- **知识库嵌入失败提示**：推理服务不支持向量嵌入时（对话模型返回 HTTP 501/404/401），给可行动中文提示「当前推理服务不支持向量嵌入（只加载了对话模型）。请下载并启动一个嵌入模型…」，不再裸抛 HTTP 错误码。
+- **默认模型面板选择本地模型后自动启动推理服务**：文案承诺与实际行为对齐（此前只记选择、不启动服务，对话页模型选择器看不到 stopped 实例）。
+- **基准测试上下文档位**：按推理服务实际 `SERVER_CTX_SIZE` 截断，超限档位前端禁用——8k 上限的服务不再硬扫 16.4k/32.8k 必失败。
+- **修复 2 个过时断言的存量测试**：备份文件名格式断言（真机产物一直是正确的 `LlamaDesk-YYYYMMDD-HHMMSS.omnibackup`）、下载面板 14 条记录整份渲染断言。
+
 ## [0.0.7] - 2026-09-12
 
 ### Added / 新增

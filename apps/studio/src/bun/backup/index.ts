@@ -82,12 +82,17 @@ export interface BackupContext {
 export function resolveDbPath(explicit?: string): string {
   if (explicit) return explicit;
   if (process.env.OMNI_DB_PATH) return process.env.OMNI_DB_PATH;
-  const inDataDir = join(getDataDir(), "omni-studio.db");
-  if (existsSync(inDataDir)) return inDataDir;
+  // 规范名是 llama-desk.db（商业化更名,与 db/index.ts 一致）。指错名字不会报错,
+  // bun:sqlite 的 create:true 会静默建出一个空库,备份出"成功"但内容全空 —— 所以
+  // 这里先认规范名,旧安装（更名前）的 omni-studio.db 仅作回退。
+  const canonical = join(getDataDir(), "llama-desk.db");
+  if (existsSync(canonical)) return canonical;
+  const legacy = join(getDataDir(), "omni-studio.db");
+  if (existsSync(legacy)) return legacy;
   // 开发模式：db/index.ts 在无 OMNI_DATA_DIR / OMNI_DB_PATH 时用 CWD 下的 sqlite.db。
   const devDb = join(process.cwd(), "sqlite.db");
   if (!process.env.OMNI_DATA_DIR && existsSync(devDb)) return devDb;
-  return inDataDir;
+  return canonical;
 }
 
 export function currentBackupContext(overrides?: Partial<BackupContext>): BackupContext {

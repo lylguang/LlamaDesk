@@ -50,7 +50,7 @@ function targetLabel(r: { serverMode?: string | null; engine?: string | null }):
 async function appModules() {
   const dataDir = resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "omni-studio.db");
+  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
   const [benchmark, cloudProviders] = await Promise.all([
     import("../../bun/benchmark"),
     import("../../bun/cloud-providers"),

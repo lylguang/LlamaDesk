@@ -267,6 +267,12 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
+      # 发布说明要从 CHANGELOG.md 里 awk 出对应小节,没有 checkout 就读不到文件。
+      - name: Checkout tag
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
 

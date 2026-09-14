@@ -1,6 +1,6 @@
 /**
- * OmniStudio MCP 服务（挂在本地网关的 /mcp 端点上，Streamable HTTP 传输）：
- * 让 Claude Code / Cursor 等任意 MCP 客户端把 OmniStudio 的本地能力当作
+ * LlamaDesk MCP 服务（挂在本地网关的 /mcp 端点上，Streamable HTTP 传输）：
+ * 让 Claude Code / Cursor 等任意 MCP 客户端把 LlamaDesk 的本地能力当作
  * 外部工具来用。当前提供三组工具：
  * - 知识库：kb_search / kb_list（检索本地导入的文档资料）；
  * - 记忆：memory_search / memory_save / memory_list（所有 Agent 共享的长期记忆，

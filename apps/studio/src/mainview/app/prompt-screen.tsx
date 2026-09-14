@@ -129,7 +129,16 @@ function usePromptNow(item: PromptRow) {
 }
 
 /** 图片/封面：云端直链 → 加载失败时惰性下载到本地缓存 → 渐变占位。 */
-function PromptMedia({ item, className }: { item: PromptRow; className?: string }) {
+function PromptMedia({
+  item,
+  className,
+  fit = "cover",
+}: {
+  item: PromptRow;
+  className?: string;
+  /** 卡片墙要铺满裁切（cover）；详情要看到整张图（contain）。 */
+  fit?: "cover" | "contain";
+}) {
   const [src, setSrc] = useState<string | null>(item.image);
   const [triedLocal, setTriedLocal] = useState(false);
   const ratio = item.ratio || "1 / 1";
@@ -158,7 +167,7 @@ function PromptMedia({ item, className }: { item: PromptRow; className?: string 
               setSrc(null);
             }
           }}
-          className="absolute inset-0 size-full object-cover"
+          className={cn("absolute inset-0 size-full", fit === "contain" ? "object-contain" : "object-cover")}
         />
       ) : (
         <div className="absolute inset-0 grid place-items-center bg-gradient-to-br from-muted via-muted/40 to-background text-muted-foreground/50">
@@ -318,11 +327,13 @@ function PromptDetailDialog({
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent className="flex max-h-[85vh] max-w-4xl flex-col gap-0 overflow-hidden p-0 sm:rounded-2xl">
+      <DialogContent className="flex max-h-[85vh] max-w-[min(56rem,calc(100%-2rem))] flex-col gap-0 overflow-hidden p-0 sm:rounded-2xl">
         <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
           {hasMedia && (
             <div className="relative flex shrink-0 items-center justify-center bg-muted/50 p-4 md:w-1/2">
-              <PromptMedia item={item} className="rounded-lg border" />
+              {/* max-h-full：竖版（9:16 / 2:3 / 3:4 占题库大头）按宽度算出来的高度会顶穿
+                  85vh 的弹窗，这里压回面板高度，超出的部分由 contain 缩放而不是被裁掉。 */}
+              <PromptMedia item={item} className="max-h-full rounded-lg border" fit="contain" />
               {items.length > 1 && (
                 <>
                   <button
@@ -347,7 +358,7 @@ function PromptDetailDialog({
           )}
 
           <div className="flex min-h-0 flex-1 flex-col">
-            <div className="flex items-start justify-between gap-3 border-b px-5 py-4">
+            <div className="flex items-start justify-between gap-3 border-b py-4 pr-12 pl-5">
               <div className="min-w-0">
                 <DialogHeader>
                   <DialogTitle className="truncate text-left text-base">{item.name}</DialogTitle>
@@ -393,7 +404,7 @@ function PromptDetailDialog({
               </div>
             </ScrollArea>
 
-            <div className="flex items-center gap-2 border-t px-5 py-3.5">
+            <div className="flex flex-wrap items-center gap-2 border-t px-5 py-3.5">
               <CopyButton text={item.prompt} label={t("prompt.copyFull")} />
               <Button className="flex-1" disabled={!item.prompt} onClick={() => usePromptNow(item)}>
                 {t("prompt.useIt")}

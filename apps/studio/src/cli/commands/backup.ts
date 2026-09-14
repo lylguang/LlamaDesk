@@ -16,9 +16,7 @@ import {
 } from "../../shared/backup";
 import {
   createBackup,
-  currentBackupContext,
   defaultBackupDir,
-  deleteRemoteBackup,
   downloadRemoteBackup,
   inspectBackup,
   isRemoteConfigured,
@@ -115,8 +113,6 @@ async function readPassword(parsed: ParsedArgs): Promise<string | undefined> {
   }
   return optString(parsed.options, "password");
 }
-
-const t = (key: string, params?: Record<string, string>) => translate("zh", key, params);
 
 /** 需要密码时补一次交互输入（TTY 才有），避免用户重跑一遍长命令。 */
 async function askPassword(reason: string): Promise<string | undefined> {
@@ -290,7 +286,7 @@ async function cmdRestore(parsed: ParsedArgs): Promise<void> {
   if (!file) return;
   if (await isAppRunning()) {
     console.error(
-      "OmniStudio 正在运行，恢复需要独占数据库。\n" +
+      "LlamaDesk 正在运行，恢复需要独占数据库。\n" +
         "请先退出应用，或直接在应用内「设置 → 数据 → 备份与恢复」中恢复（那里可以看进度、跑完自动刷新界面）。",
     );
     process.exitCode = 1;

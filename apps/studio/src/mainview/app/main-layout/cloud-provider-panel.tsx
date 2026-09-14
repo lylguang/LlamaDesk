@@ -8,7 +8,6 @@ import {
   EyeIcon,
   EyeOffIcon,
   PlusIcon,
-  RefreshCwIcon,
   SearchIcon,
   StarIcon,
   Trash2Icon,
@@ -33,19 +32,41 @@ import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import {
   CLOUD_PRESETS,
+  modelTypeOf,
   providerColor,
   type CloudModelEntry,
+  type CloudModelType,
   type CloudProviderInfo,
+  type CloudVideoApi,
 } from "@/shared/cloud-providers";
-import { classifyModelName, MODEL_CATEGORIES, type ModelCategory } from "@/shared/modelscope";
-import { ModelCategoryBadge, ModelCategoryIcon } from "@components/model-category-badge";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
+import {
+  classifyModelName,
+  MODEL_CATEGORIES,
+  MODEL_CATEGORY_OPTIONS,
+  type ModelCategory,
+} from "@/shared/modelscope";
+import {
+  ModelCategoryBadge,
+  ModelCategoryIcon,
+  MODEL_CATEGORY_SHORT_KEYS,
+} from "@components/model-category-badge";
+import {
+  ModelCategoryChips,
+  type CategoryChipValue,
+} from "@components/model-category-chips";
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
  * 「模型云服务」面板：严格三栏布局（左设置导航由 SettingsScreen 提供）——
- * 中栏服务商源列表（搜索 + 启用开关 + 模型数 + 添加），右栏选中服务商的
+ * 中栏服务商源列表（搜索 + 启动开关 + 模型数 + 添加），右栏选中服务商的
  * 连接配置（API 密钥 / API 地址）与模型管理表格。
  * 所有操作即时落库（cloud_providers 表），激活行同步写回 VLLM_* 槽位。
+ *
+ * 关于「启动」：可以同时启动多个服务商。启动时会拿 /v1/models 校验密钥 ——
+ * 校验不过就不启动并把原因显示出来。功能页（生图 / 语音 / OCR / 视频）只列
+ * 已启动服务商的模型，页面里不再有地址与密钥输入框。
+ * 每个模型带「用途」（生图 / TTS / ASR / 视频 / 对话…），决定它出现在哪个功能页。
  */
 
 /**
@@ -189,12 +210,23 @@ export function CloudProviderPanel() {
     ? providers.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(vendorNeedle))
     : providers;
 
-  const activateMutation = useMutation({
-    mutationFn: (on: boolean) =>
-      on && selectedId
-        ? rpcClient.cloudProviderActivate({ id: selectedId })
-        : rpcClient.cloudProviderDeactivate(undefined),
-    onSuccess: invalidate,
+  /**
+   * 启动 / 停用服务商。启动时主进程会用 /v1/models 校验密钥，失败原因回填到
+   * `enableError` 显示在开关下面 —— 「启动」这个动作要保证之后各功能页能直接用。
+   */
+  const [enableError, setEnableError] = useState<{ id: string; message: string } | null>(null);
+  const enableMutation = useMutation({
+    mutationFn: ({ id, enabled }: { id: string; enabled: boolean }) =>
+      rpcClient.cloudProviderSetEnabled({ id, enabled }),
+    onSuccess: (result, vars) => {
+      if (!result.ok) {
+        setEnableError({ id: vars.id, message: result.error ?? t("cloud.enableFailed") });
+      } else {
+        setEnableError(null);
+      }
+      invalidate();
+    },
+    onError: (e, vars) => setEnableError({ id: vars.id, message: String(e) }),
   });
 
   // ------------------------------------------------------------------
@@ -208,6 +240,7 @@ export function CloudProviderPanel() {
     setDraftBase(selected?.baseUrl ?? "");
     setDraftKey(selected?.apiKey ?? "");
     setShowKey(false);
+    setFetchFailed(false);
   }, [selected?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const saveMutation = useMutation({
@@ -218,13 +251,28 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
+  const videoApiMutation = useMutation({
+    mutationFn: (videoApi: CloudVideoApi) => {
+      if (!selected) return Promise.resolve({ ok: false });
+      return rpcClient.cloudProviderUpdate({ id: selected.id, videoApi });
+    },
+    onSuccess: invalidate,
+  });
+
   const commitBase = () => {
     if (!selected) return;
-    if (draftBase.trim() !== selected.baseUrl) saveMutation.mutate({ baseUrl: draftBase });
+    if (draftBase.trim() !== selected.baseUrl) {
+      saveMutation.mutate({ baseUrl: draftBase });
+      // 地址 / 密钥改过了，上一次「拉不到清单」的结论不再成立。
+      setFetchFailed(false);
+    }
   };
   const commitKey = () => {
     if (!selected) return;
-    if (draftKey.trim() !== selected.apiKey) saveMutation.mutate({ apiKey: draftKey });
+    if (draftKey.trim() !== selected.apiKey) {
+      saveMutation.mutate({ apiKey: draftKey });
+      setFetchFailed(false);
+    }
   };
 
   const checkMutation = useMutation({
@@ -249,12 +297,27 @@ export function CloudProviderPanel() {
   const [modelSearch, setModelSearch] = useState("");
   const [modelTab, setModelTab] = useState<ModelCategory | "all">("all");
   const models = selected?.models ?? [];
-  // 每个模型按 id 判分类（云端返回的清单里对话 / 嵌入 / 重排 / 语音 / 生图混在一起，
-  // 按分类打标 + 筛选，用户才能一眼看出哪个模型该用在哪个场景）。
+  // 每个模型的用途：用户显式指定的优先，否则按 id 自动识别（云端返回的清单里
+  // 对话 / 嵌入 / 重排 / 语音 / 生图混在一起，按用途打标 + 筛选，用户才能一眼
+  // 看出哪个模型该用在哪个场景）。这个用途同时决定功能页里能不能选到它。
   const modelsWithCategory = useMemo(
-    () => models.map((m) => ({ entry: m, category: classifyModelName(m.id) })),
+    () => models.map((m) => ({ entry: m, category: modelTypeOf(m) })),
     [models],
   );
+
+  /** 改单个模型的用途：写回 models 数组（undefined = 恢复自动识别）。 */
+  const setModelTypeMutation = useMutation({
+    mutationFn: async ({ id, type }: { id: string; type?: CloudModelType }) => {
+      if (!selected) return;
+      const next = models.map((m) => {
+        if (m.id !== id) return m;
+        const { type: _drop, ...rest } = m;
+        return type ? { ...rest, type } : rest;
+      });
+      await rpcClient.cloudProviderUpdate({ id: selected.id, models: next });
+    },
+    onSuccess: invalidate,
+  });
   const modelNeedle = modelSearch.trim().toLowerCase();
   const filteredModels = useMemo(() => {
     const byTab =
@@ -273,11 +336,18 @@ export function CloudProviderPanel() {
       ? modelsWithCategory.length
       : modelsWithCategory.filter((m) => m.category === value).length;
   /** 只显示该服务商实际有的分类，避免一排 0 的 tab。 */
-  const modelTabs = MODEL_CATEGORIES.filter((c) => c.value === "all" || categoryCount(c.value) > 0);
+  const modelTabs = MODEL_CATEGORIES.filter(
+    (c) => c.value === "all" || categoryCount(c.value) > 0,
+  ).map((c) => c.value);
 
   // 「获取模型列表」只负责把服务商清单拉回来，弹框里让用户逐个挑：
   // 一个 /v1/models 动辄上百条，全量写进配置等于把模型列表塞爆。
+  //
+  // 拉不到（密钥不对 / 网络不通）时**不弹框**：空清单里挂一句上游报错原文，既解决不了
+  // 问题，又把「密钥过期」这种配置状态渲染成了页面错误。失败只在模型卡片里留一行结论
+  // （与旁边「检查」同一套文案），原始原因由主进程记进应用日志（cloud-provider.models.failed）。
   const [pickerOpen, setPickerOpen] = useState(false);
+  const [fetchFailed, setFetchFailed] = useState(false);
   const fetchModelsMutation = useMutation({
     mutationFn: async () => {
       if (!selected) return { ok: false, models: [] as string[], error: undefined };
@@ -286,7 +356,11 @@ export function CloudProviderPanel() {
         apiKey: draftKey.trim() || "EMPTY",
       });
     },
-    onSuccess: () => setPickerOpen(true),
+    onSuccess: (res) => {
+      setFetchFailed(!res?.ok);
+      if (res?.ok) setPickerOpen(true);
+    },
+    onError: () => setFetchFailed(true),
   });
   const remoteIds = fetchModelsMutation.data?.models ?? [];
 
@@ -295,6 +369,7 @@ export function CloudProviderPanel() {
   const [dlgName, setDlgName] = useState("");
   const [dlgGroup, setDlgGroup] = useState("");
   const [dlgRemark, setDlgRemark] = useState("");
+  const [dlgType, setDlgType] = useState<CloudModelType | "auto">("auto");
   const [dlgMore, setDlgMore] = useState(false);
 
   const addModelMutation = useMutation({
@@ -311,6 +386,7 @@ export function CloudProviderPanel() {
             name: dlgName.trim() || undefined,
             group: dlgGroup.trim() || undefined,
             remark: dlgRemark.trim() || undefined,
+            type: dlgType === "auto" ? undefined : dlgType,
           },
         ],
       });
@@ -320,6 +396,7 @@ export function CloudProviderPanel() {
       setDlgName("");
       setDlgGroup("");
       setDlgRemark("");
+      setDlgType("auto");
       setDlgMore(false);
       setShowAddModel(false);
       invalidate();
@@ -409,7 +486,6 @@ export function CloudProviderPanel() {
           </div>
           <div className="flex max-h-[560px] flex-col gap-0.5 overflow-y-auto rounded-xl bg-muted/40 p-1.5">
             {filteredProviders.map((p) => {
-              const isActive = p.id === activeId && remoteMode;
               const isSelected = p.id === selectedId;
               return (
                 <div
@@ -434,12 +510,12 @@ export function CloudProviderPanel() {
                     {p.models.length}
                   </span>
                   <Toggle
-                    checked={isActive}
-                    disabled={activateMutation.isPending}
-                    title={t("cloud.toggleTitle")}
+                    checked={p.enabled}
+                    disabled={enableMutation.isPending}
+                    title={t("cloud.enableTitle")}
                     onChange={() => {
                       setSelectedId(p.id);
-                      activateMutation.mutate(!isActive);
+                      enableMutation.mutate({ id: p.id, enabled: !p.enabled });
                     }}
                   />
                 </div>
@@ -460,6 +536,9 @@ export function CloudProviderPanel() {
             <PlusIcon data-icon="inline-start" className="size-3.5" />
             {t("cloud.add")}
           </Button>
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("cloud.enableAllHint")}
+          </p>
         </div>
 
         {/* 右栏：选中服务商详情 */}
@@ -478,13 +557,31 @@ export function CloudProviderPanel() {
               <div className="flex items-center gap-3.5">
                 <ProviderLogo provider={selected} size="lg" />
                 <div className="min-w-0 flex-1">
-                  <p className="truncate text-base font-semibold">{selected.name}</p>
+                  <p className="flex items-center gap-2 truncate text-base font-semibold">
+                    {selected.name}
+                    {selected.enabled ? (
+                      <span className="flex shrink-0 items-center gap-1 rounded-full bg-emerald-500/10 px-2 py-0.5 text-[10px] font-medium text-emerald-600 dark:text-emerald-400">
+                        <CheckIcon className="size-3" /> {t("cloud.enableOk")}
+                      </span>
+                    ) : null}
+                    {isSelectedActive && remoteMode ? (
+                      <span className="shrink-0 rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                        {t("cloud.using")}
+                      </span>
+                    ) : null}
+                  </p>
                   {selected.vendor && (
                     <p className="truncate text-xs text-muted-foreground" title={selected.vendor}>
                       {selected.vendor}
                     </p>
                   )}
                 </div>
+                <Toggle
+                  checked={selected.enabled}
+                  disabled={enableMutation.isPending}
+                  title={t("cloud.enableTitle")}
+                  onChange={() => enableMutation.mutate({ id: selected.id, enabled: !selected.enabled })}
+                />
                 <Button
                   variant="ghost"
                   size="icon-sm"
@@ -495,6 +592,21 @@ export function CloudProviderPanel() {
                   <Trash2Icon className="size-4" />
                 </Button>
               </div>
+
+              {/* 启动失败的密钥校验原因：直接显示在详情里，不让用户去猜 */}
+              {enableMutation.isPending && enableMutation.variables?.id === selected.id && (
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Spinner className="size-3" /> {t("cloud.enabling")}
+                </p>
+              )}
+              {enableError?.id === selected.id && !enableMutation.isPending && (
+                <p className="flex items-center gap-1.5 rounded-lg bg-destructive/10 px-3 py-2 text-xs text-destructive">
+                  <XCircleIcon className="size-3.5 shrink-0" />
+                  <span className="min-w-0">
+                    {t("cloud.enableFailed")}：{enableError.message}
+                  </span>
+                </p>
+              )}
 
               {/* 连接配置卡片：API 密钥 / API 地址 */}
               <div className="divide-y rounded-xl border bg-card shadow-sm">
@@ -592,6 +704,29 @@ export function CloudProviderPanel() {
                     </p>
                   )}
                 </div>
+
+                {/* 生视频接口：视频 API 各家不通用，选协议后该厂商才能用来生视频 */}
+                <div className="flex items-center gap-3 px-4 py-3.5">
+                  <div className="min-w-0 flex-1">
+                    <Label className="mb-1 block text-xs">{t("cloud.videoApi")}</Label>
+                    <Select
+                      value={selected.videoApi || "none"}
+                      onValueChange={(v) => videoApiMutation.mutate(v === "none" ? "" : (v as CloudVideoApi))}
+                    >
+                      <SelectTrigger size="sm" className="h-8 w-52 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">{t("cloud.videoApiNone")}</SelectItem>
+                        <SelectItem value="minimax">MiniMax（/v2/video_generation）</SelectItem>
+                        <SelectItem value="seedance">Seedance（火山方舟 Ark）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="max-w-72 text-[11px] text-muted-foreground">
+                    {t("cloud.videoApiHint")}
+                  </p>
+                </div>
               </div>
 
               {/* 模型管理卡片：工具栏 + 表格 */}
@@ -637,32 +772,23 @@ export function CloudProviderPanel() {
                 </div>
 
                 <div className="flex flex-col gap-2 p-3">
+                  {/* 拉不到清单只留这一行：与「检查」同一套结论，中性色，不写上游报错原文
+                      （401 / 超时的原文在 logs/app.log 的 cloud-provider.models.failed 里）。 */}
+                  {fetchFailed && !fetchModelsMutation.isPending && (
+                    <p className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                      <XCircleIcon className="size-3.5 shrink-0" />
+                      {t("cloud.checkFail")}
+                    </p>
+                  )}
                   {models.length > 0 && (
                     /* 分类筛选：模型带分类进场（云端清单里对话 / 嵌入 / 重排 / 语音…混在一起），
                        切 tab 只看一类，右侧标出该类模型数。 */
-                    <div className="flex flex-wrap items-center gap-1">
-                      {modelTabs.map((cat) => {
-                        const active = modelTab === cat.value;
-                        return (
-                          <button
-                            key={cat.value}
-                            type="button"
-                            onClick={() => setModelTab(cat.value)}
-                            className={cn(
-                              "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                              active
-                                ? "border-primary bg-primary/10 text-primary"
-                                : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                            )}
-                          >
-                            {t(cat.labelKey)}
-                            <span className="ml-1 tabular-nums opacity-60">
-                              {categoryCount(cat.value)}
-                            </span>
-                          </button>
-                        );
-                      })}
-                    </div>
+                    <ModelCategoryChips
+                      values={modelTabs}
+                      value={modelTab}
+                      countOf={categoryCount}
+                      onChange={setModelTab}
+                    />
                   )}
 
                   {models.length === 0 ? (
@@ -674,7 +800,9 @@ export function CloudProviderPanel() {
                       <thead>
                         <tr className="border-b text-left text-muted-foreground">
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colModel")}</th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colCategory")}</th>
+                          <th className="px-2 py-1.5 font-medium" title={t("cloud.modelTypeHint")}>
+                            {t("cloud.colType")}
+                          </th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colGroup")}</th>
                           <th className="px-2 py-1.5 font-medium">{t("cloud.colStatus")}</th>
                           <th className="px-2 py-1.5 text-right font-medium">
@@ -697,11 +825,47 @@ export function CloudProviderPanel() {
                                   )}
                                 </span>
                               </td>
+                              {/* 用途可改：自动识别认不出（other）或认错时，用户在这里
+                                  定死它属于哪个功能页。改完功能页的选择器立即跟着变。 */}
                               <td className="px-2 py-1.5">
-                                <ModelCategoryBadge
-                                  category={category}
-                                  label={t(`models.cat.${category}`)}
-                                />
+                                <Select
+                                  value={entry.type ?? "auto"}
+                                  onValueChange={(v) =>
+                                    setModelTypeMutation.mutate({
+                                      id: entry.id,
+                                      type: v === "auto" ? undefined : (v as CloudModelType),
+                                    })
+                                  }
+                                  disabled={setModelTypeMutation.isPending}
+                                >
+                                  <SelectTrigger
+                                    size="sm"
+                                    className="h-6 w-[7.5rem] gap-1 border-transparent bg-transparent px-1 text-[11px] hover:border-input"
+                                    title={`${t(`models.cat.${category}`)} · ${t("cloud.modelTypeHint")}`}
+                                  >
+                                    {/* 窄列里放两字短名（与筛选条一致），完整分类名在悬浮提示里 */}
+                                    <ModelCategoryBadge
+                                      category={category}
+                                      label={t(MODEL_CATEGORY_SHORT_KEYS[category])}
+                                    />
+                                  </SelectTrigger>
+                                  <SelectContent>
+                                    <SelectItem value="auto">
+                                      <span className="text-[11px]">{t("cloud.modelTypeAuto")}</span>
+                                    </SelectItem>
+                                    {MODEL_CATEGORY_OPTIONS.map((c) => (
+                                      <SelectItem key={c.value} value={c.value}>
+                                        <ModelCategoryIcon category={c.value} />
+                                        <span className="text-[11px]">
+                                          {t(MODEL_CATEGORY_SHORT_KEYS[c.value])}
+                                        </span>
+                                        <span className="text-[10px] text-muted-foreground/60">
+                                          {t(c.labelKey)}
+                                        </span>
+                                      </SelectItem>
+                                    ))}
+                                  </SelectContent>
+                                </Select>
                               </td>
                               <td className="px-2 py-1.5">
                                 {entry.group ? (
@@ -809,6 +973,47 @@ export function CloudProviderPanel() {
                 />
               </div>
             ))}
+            {/* 用途：决定这个模型出现在哪个功能页（留"自动识别"则按模型名判断） */}
+            <div className="flex items-center gap-3">
+              <Label htmlFor="dlg-model-type" className="w-20 shrink-0 text-xs">
+                {t("cloud.modelType")}
+              </Label>
+              <Select
+                value={dlgType}
+                onValueChange={(v) => setDlgType(v as CloudModelType | "auto")}
+              >
+                <SelectTrigger id="dlg-model-type" size="sm" className="h-8 min-w-0 flex-1 text-xs">
+                  {/* 选中项自己画：分类显示「图标 + 两字短名」（完整名在后面小字里） */}
+                  <SelectValue>
+                    {dlgType === "auto" ? (
+                      t("cloud.modelTypeAuto")
+                    ) : (
+                      <span className="flex items-center gap-1.5">
+                        <ModelCategoryIcon category={dlgType} />
+                        {t(MODEL_CATEGORY_SHORT_KEYS[dlgType])}
+                        <span className="text-[10px] text-muted-foreground/60">
+                          {t(`models.cat.${dlgType}`)}
+                        </span>
+                      </span>
+                    )}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="auto">{t("cloud.modelTypeAuto")}</SelectItem>
+                  {MODEL_CATEGORY_OPTIONS.map((c) => (
+                    <SelectItem key={c.value} value={c.value}>
+                      <ModelCategoryIcon category={c.value} />
+                      <span className="text-[11px]">
+                        {t(MODEL_CATEGORY_SHORT_KEYS[c.value])}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground/60">
+                        {t(c.labelKey)}
+                      </span>
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
             <button
               type="button"
               onClick={() => setDlgMore((v) => !v)}
@@ -864,23 +1069,17 @@ export function CloudProviderPanel() {
         </DialogContent>
       </Dialog>
 
-      {/* 获取模型列表 → 逐个挑模型 */}
+      {/* 获取模型列表 → 逐个挑模型（只在拉到了清单时打开） */}
       <RemoteModelsDialog
         open={pickerOpen}
         onOpenChange={setPickerOpen}
         providerName={selected?.name ?? ""}
         loading={fetchModelsMutation.isPending}
-        error={
-          fetchModelsMutation.data && !fetchModelsMutation.data.ok
-            ? fetchModelsMutation.data.error
-            : undefined
-        }
         remoteIds={remoteIds}
         models={models}
         busy={addModelsMutation.isPending || removeModelMutation.isPending}
         onAdd={(ids) => addModelsMutation.mutate(ids)}
         onRemove={(ids) => removeModelMutation.mutate(ids)}
-        onRetry={() => fetchModelsMutation.mutate()}
       />
 
       {/* 添加服务商弹窗 */}
@@ -904,31 +1103,30 @@ type RemoteModelRow = { id: string; category: ModelCategory; added: boolean; sta
  * 「获取模型列表」结果弹框：服务商的 /v1/models 会把对话 / 嵌入 / 重排 / 语音 / 生图
  * 一起返回，动辄几十上百条。这里按 id 前缀分组列出来，用户逐个「+」添加；
  * 顺带把本地配了、服务商已经不再返回的模型标成「失效」，可一键清理。
+ *
+ * 拉取失败不会走到这里（弹框只在拿到清单时打开）：空清单 + 一句上游报错，用户看不出
+ * 该改什么，只会以为页面坏了。失败结论留在模型卡片上。
  */
 function RemoteModelsDialog({
   open,
   onOpenChange,
   providerName,
   loading,
-  error,
   remoteIds,
   models,
   busy,
   onAdd,
   onRemove,
-  onRetry,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
   providerName: string;
   loading: boolean;
-  error?: string;
   remoteIds: string[];
   models: CloudModelEntry[];
   busy: boolean;
   onAdd: (ids: string[]) => void;
   onRemove: (ids: string[]) => void;
-  onRetry: () => void;
 }) {
   const t = useT();
   const [search, setSearch] = useState("");
@@ -991,10 +1189,7 @@ function RemoteModelsDialog({
         : candidates.filter((c) => c.category === value).length;
   // 分类是固定的：云端有没有这一类、请求通不通，都照常展示（计数可能是 0），
   // 免得每次拉取回来 tab 条都在变，用户也分不清是自己没拉到还是这一类本来就没有。
-  const tabs: { value: ModelCategory | "all" | "stale"; label: string }[] = [
-    ...MODEL_CATEGORIES.map((c) => ({ value: c.value, label: t(c.labelKey) })),
-    { value: "stale" as const, label: t("cloud.tabStale") },
-  ];
+  const tabValues: CategoryChipValue[] = [...MODEL_CATEGORIES.map((c) => c.value), "stale"];
 
   const toggleGroup = (key: string) =>
     setCollapsed((prev) => {
@@ -1006,8 +1201,10 @@ function RemoteModelsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      {/* DialogContent 自带 sm:max-w-sm，宽屏下得用同样的断点前缀才盖得住 */}
-      <DialogContent className="sm:max-w-2xl">
+      {/* 只在 ≥640px 放宽：小于断点时仍用 DialogContent 的默认宽度。
+          宽度取 3xl 而不是 2xl：固定十颗分类条一行要 ~681px，2xl（内容宽 624px）会被
+          折成两行，3xl 的内容宽 720px 才放得下；清单里的模型 id 也跟着宽裕些。 */}
+      <DialogContent className="sm:max-w-3xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             {t("cloud.pickTitle")}
@@ -1058,28 +1255,13 @@ function RemoteModelsDialog({
             )}
           </div>
 
-          {/* 分类筛选：切 tab 只看一类，右边跟数量 */}
-          <div className="flex flex-wrap items-center gap-1">
-            {tabs.map((item) => {
-              const active = tab === item.value;
-              return (
-                <button
-                  key={item.value}
-                  type="button"
-                  onClick={() => setTab(item.value)}
-                  className={cn(
-                    "rounded-full border px-2 py-0.5 text-[11px] transition-colors",
-                    active
-                      ? "border-primary bg-primary/10 text-primary"
-                      : "border-border text-muted-foreground hover:border-muted-foreground/50 hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                  <span className="ml-1 tabular-nums opacity-60">{tabCount(item.value)}</span>
-                </button>
-              );
-            })}
-          </div>
+          {/* 分类筛选：切 tab 只看一类，右边跟数量。固定十个分类，一行排不下就换行 */}
+          <ModelCategoryChips
+            values={tabValues}
+            value={tab}
+            countOf={tabCount}
+            onChange={setTab}
+          />
 
           {tab === "stale" && (
             <p className="text-[11px] text-muted-foreground">{t("cloud.staleHint")}</p>
@@ -1178,7 +1360,7 @@ function RemoteModelsDialog({
                 </div>
               );
             })}
-            {/* 清单为空分三种：正在拉、没拉到（网络/密钥问题）、这一类本来就没有 */}
+            {/* 清单为空分两种：正在拉、这一类本来就没有（拉不到清单根本不会打开弹框） */}
             {loading && (
               <div className="flex items-center justify-center gap-2 px-3 py-8 text-xs text-muted-foreground">
                 <Spinner className="size-4" />
@@ -1187,32 +1369,13 @@ function RemoteModelsDialog({
             )}
             {!loading && visible.length === 0 && (
               <div className="flex flex-col items-center gap-2 px-3 py-8">
-                <p
-                  className={cn(
-                    "text-center text-xs",
-                    error ? "text-destructive" : "text-muted-foreground",
-                  )}
-                >
-                  {error
-                    ? `${t("cloud.fetchFailed")}：${error}`
-                    : needle
-                      ? t("cloud.noModelMatch")
-                      : tab === "stale"
-                        ? t("cloud.staleEmpty")
-                        : t("cloud.pickEmpty")}
+                <p className="text-center text-xs text-muted-foreground">
+                  {needle
+                    ? t("cloud.noModelMatch")
+                    : tab === "stale"
+                      ? t("cloud.staleEmpty")
+                      : t("cloud.pickEmpty")}
                 </p>
-                {error && (
-                  <Button
-                    variant="outline"
-                    size="sm"
-                    className="h-7 text-xs"
-                    onClick={onRetry}
-                    disabled={busy}
-                  >
-                    <RefreshCwIcon data-icon="inline-start" className="size-3.5" />
-                    {t("common.retry")}
-                  </Button>
-                )}
               </div>
             )}
           </div>

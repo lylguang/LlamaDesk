@@ -3,6 +3,7 @@ import { AlertTriangleIcon, ArrowLeftIcon, RefreshCwIcon } from "lucide-react";
 import { Button } from "@ui/button";
 import { useRouter } from "@stores/router";
 import { useT } from "@stores/ui-lang";
+import { reportClientError } from "../lib/app-log";
 
 type Props = { children: ReactNode };
 type State = { error: Error | null };
@@ -21,6 +22,9 @@ export class ErrorBoundary extends Component<Props, State> {
   override componentDidCatch(error: Error, info: ErrorInfo) {
     // 保留原样传给 console，便于主进程日志 / 调试挂钩捕获真实堆栈。
     console.error("[render error]", error, info.componentStack);
+    // 同时写进统一日志（logs/app.log，source=client）：白屏 / 报错页在打包应用里
+    // 只有用户能看到，事后排查必须有一条持久记录。
+    reportClientError("client.render_error", error, { componentStack: info.componentStack });
   }
 
   reset = () => this.setState({ error: null });

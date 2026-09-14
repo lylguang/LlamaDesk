@@ -1,6 +1,6 @@
 import { existsSync } from "fs";
 import { spawn } from "bun";
-import { appBundlePath, controlSocketPath } from "./data-dir";
+import { appBundlePath, resolveControlSocket } from "./data-dir";
 
 export type ControlResult = {
   connected: boolean;
@@ -13,15 +13,18 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * 向运行中的应用发控制命令（HTTP over unix socket）。
- * `connected=false` 表示应用没在运行（socket 不存在或探测失败）。
+ * `connected=false` 表示应用没在运行（没有活着的控制通道）。
+ *
+ * socket 用 `resolveControlSocket()` 现探：dev / canary / stable 各有一份数据目录，
+ * 只看安装包或"socket 文件在不在"会在应用真的跑着时说"未运行"（残留 socket 更骗人）。
  */
 export async function controlRequest(
   cmd: string,
   payload?: Record<string, unknown>,
   timeoutMs = 20000,
 ): Promise<ControlResult> {
-  const socketPath = controlSocketPath();
-  if (!existsSync(socketPath)) {
+  const socketPath = await resolveControlSocket();
+  if (!socketPath || !existsSync(socketPath)) {
     return { connected: false, ok: false, error: "应用未运行（控制 socket 不存在）" };
   }
   try {

@@ -495,7 +495,7 @@ describe("归档不可信输入", () => {
     block.write("00000000000\0", 136, 12, "ascii");
     block.write("        ", 148, 8, "ascii"); // 校验和按 8 个空格计算后再写回
     block.write("0", 156, 1, "ascii");
-    block.write("ustar\0" + "00", 257, 8, "ascii");
+    block.write("ustar\u000000", 257, 8, "ascii");
     let sum = 0;
     for (const byte of block.subarray(0, 512)) sum += byte;
     block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "ascii");
@@ -544,7 +544,7 @@ describe("归档不可信输入", () => {
     await mkdir(freshDir, { recursive: true });
     await expect(
       restoreBackup({ ctx: { ...ctx(), dataDir: freshDir, dbPath: join(freshDir, "omni-studio.db") }, path: created.path, safety: false }),
-    ).rejects.toThrow(/还没有 OmniStudio 数据库/);
+    ).rejects.toThrow(/还没有 LlamaDesk 数据库/);
   });
 
   test("删除只认备份文件：非备份文件即便目录对得上也拒绝", async () => {

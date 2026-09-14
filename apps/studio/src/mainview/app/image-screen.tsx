@@ -51,6 +51,7 @@ import {
   CollapsibleTrigger,
 } from "@ui/collapsible";
 import { useT } from "@stores/ui-lang";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { MediaSourceBadge, MediaSourceFilter } from "@components/media-source-badge";
 import { useImageStore } from "@stores/image";
 import { useMlxInstallStore } from "@stores/mlx-install";
@@ -58,7 +59,7 @@ import { useMlxModelDownloadStore } from "@stores/mlx-model-download";
 import { useMlxModelRunStore } from "@stores/mlx-model-run";
 import type { ImageGenBackend, ImageRecordRow } from "../../bun/image-gen";
 import type { MediaSource } from "../../bun/db/schema";
-import type { MlxModelInfo, MlxGenStatus, MlxGenPhase } from "../../bun/mlx-gen";
+import type { MlxModelInfo } from "../../bun/mlx-gen";
 import { cn } from "@/mainview/lib/utils";
 
 // ---------------------------------------------------------------------------
@@ -573,8 +574,8 @@ function GenerateTab() {
 
   // ---------- 后端配置 ----------
   const [backend, setBackend] = useState<ImageGenBackend>("api");
-  const [apiBase, setApiBase] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // 云端只记厂商 id：地址 / 密钥在「设置 → 模型云服务」里（本页不再让用户填）。
+  const [providerId, setProviderId] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [configError, setConfigError] = useState<string>();
   const hydrated = useRef(false);
@@ -589,8 +590,7 @@ function GenerateTab() {
     if (!config || hydrated.current) return;
     hydrated.current = true;
     setBackend(config.backend);
-    setApiBase(config.apiBase);
-    setApiKey(config.apiKey);
+    setProviderId(config.providerId);
     setComfyBase(config.comfyBase);
     setModel(config.model);
     if (config.backend === "mlx") {
@@ -599,24 +599,27 @@ function GenerateTab() {
     }
   }, [config]);
 
+  // patch 用于「选完即存」：选择器刚回传的新值还没进 state，直接读 state 会存下旧厂商。
   const saveConfig = useMutation({
-    mutationFn: () =>
+    mutationFn: (patch: { providerId?: string; model?: string } = {}) =>
       rpcClient.saveImageGenConfig({
         backend,
-        apiBase: apiBase.trim(),
-        apiKey: apiKey.trim(),
+        providerId: (patch.providerId ?? providerId).trim(),
         comfyBase: comfyBase.trim(),
-        model: model.trim(),
+        model: (patch.model ?? model).trim(),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["image-gen-config"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["image-gen-config"] });
+      queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
+    },
   });
 
   const fetchModels = useMutation({
     mutationFn: () =>
       rpcClient.listImageGenModels({
         backend,
-        base: backend === "comfyui" ? comfyBase.trim() : apiBase.trim(),
-        apiKey: apiKey.trim(),
+        base: backend === "comfyui" ? comfyBase.trim() : "",
+        apiKey: "",
       }),
     onSuccess: (r) => {
       if (r.error) {
@@ -630,9 +633,10 @@ function GenerateTab() {
   });
 
   const { data: modelsData } = useQuery({
-    queryKey: ["image-gen-models", backend],
+    queryKey: ["image-gen-models", backend, comfyBase],
     queryFn: () => rpcClient.listImageGenModels({ backend }),
-    enabled: backend === "comfyui" ? !!comfyBase.trim() : !!apiBase.trim(),
+    // 云端模型清单来自服务商（选择器里已经按用途筛过），只有 ComfyUI 需要探测。
+    enabled: backend === "comfyui" && !!comfyBase.trim(),
   });
   const models = modelsData?.models ?? [];
 
@@ -661,7 +665,7 @@ function GenerateTab() {
     // 下载可能超过 RPC 超时（十几分钟 vs 大模型几十 GB），进度/完成消息也未必可靠，
     // 这里兜底轮询：只要有下载在进行，就每 2s 拉一次“已下载模型”，
     // 确保真正下完后 UI 能及时把“下载中”切到“已下载”标识。
-    refetchInterval: (q) => {
+    refetchInterval: () => {
       const dl = useMlxModelDownloadStore.getState().progress?.stage === "downloading";
       return dl ? 2000 : false;
     },
@@ -752,7 +756,8 @@ function GenerateTab() {
       ? (mlxStatus?.engineInstalled ?? false)
       : backend === "comfyui"
         ? !!comfyBase.trim()
-        : !!apiBase.trim();
+        : // 云端：选了已启用的厂商与模型才算配好（地址与密钥由厂商行提供）。
+          !!providerId.trim() && !!model.trim();
 
   // MLX 后端：引擎就绪 + 已选模型 + 权重已下载，才允许生图。
   const mlxModelReady =
@@ -785,11 +790,10 @@ function GenerateTab() {
         model: model.trim() || undefined,
         quantize: backend === "mlx" ? quantize : undefined,
         // 把页面上的实时配置一并带上，后端优先使用它们并落盘，
-        // 避免后台读到未保存的旧地址/key 而连错服务商。
+        // 避免后台读到未保存的旧厂商而连错服务商。
         config: {
           backend,
-          apiBase: apiBase.trim(),
-          apiKey: apiKey.trim(),
+          providerId: providerId.trim(),
           model: model.trim(),
           comfyBase: comfyBase.trim(),
         },
@@ -1115,79 +1119,67 @@ function GenerateTab() {
           ) : (
           <div className="flex flex-col gap-2.5 rounded-lg border bg-card p-3">
             {backend === "api" ? (
+              // 云端生图：只选厂商 + 模型（都是「设置 → 模型云服务」里配好并启动过的），
+              // 地址与密钥由厂商提供，这里不再出现输入框。
+              <div>
+                <Label className="mb-1 block text-xs">{t("image.config.cloudProvider")}</Label>
+                <CloudModelSelect
+                  kind="image"
+                  providerId={providerId}
+                  model={model}
+                  size="sm"
+                  onChange={(choice) => {
+                    setProviderId(choice.providerId);
+                    setModel(choice.model);
+                    saveConfig.mutate(choice);
+                  }}
+                />
+                <p className="mt-1.5 text-[10px] text-muted-foreground">{t("cloud.where")}</p>
+              </div>
+            ) : (
               <>
                 <div>
-                  <Label htmlFor="img-base" className="mb-1 block text-xs">
-                    {t("image.config.base")}
+                  <Label htmlFor="img-comfy-base" className="mb-1 block text-xs">
+                    {t("image.config.comfyBase")}
                   </Label>
                   <Input
-                    id="img-base"
-                    placeholder="https://api.siliconflow.cn/v1"
-                    value={apiBase}
-                    onChange={(e) => setApiBase(e.target.value)}
+                    id="img-comfy-base"
+                    placeholder="http://127.0.0.1:8188"
+                    value={comfyBase}
+                    onChange={(e) => setComfyBase(e.target.value)}
                     className="h-8 text-xs"
                   />
                 </div>
                 <div>
-                  <Label htmlFor="img-key" className="mb-1 block text-xs">
-                    {t("image.config.apiKey")}
+                  <Label htmlFor="img-model" className="mb-1 block text-xs">
+                    {t("image.config.model")}
                   </Label>
                   <Input
-                    id="img-key"
-                    type="password"
-                    placeholder="sk-…"
-                    value={apiKey}
-                    onChange={(e) => setApiKey(e.target.value)}
+                    id="img-model"
+                    list="image-gen-models"
+                    placeholder={t("image.config.checkpointPlaceholder")}
+                    value={model}
+                    onChange={(e) => setModel(e.target.value)}
                     className="h-8 text-xs"
                   />
+                  {models.length > 0 && (
+                    <datalist id="image-gen-models">
+                      {models.map((m) => (
+                        <option key={m} value={m} />
+                      ))}
+                    </datalist>
+                  )}
                 </div>
               </>
-            ) : (
-              <div>
-                <Label htmlFor="img-comfy-base" className="mb-1 block text-xs">
-                  {t("image.config.comfyBase")}
-                </Label>
-                <Input
-                  id="img-comfy-base"
-                  placeholder="http://127.0.0.1:8188"
-                  value={comfyBase}
-                  onChange={(e) => setComfyBase(e.target.value)}
-                  className="h-8 text-xs"
-                />
-              </div>
             )}
-
-            <div>
-              <Label htmlFor="img-model" className="mb-1 block text-xs">
-                {backend === "comfyui" ? t("image.config.model") : t("image.config.modelId")}
-              </Label>
-              <Input
-                id="img-model"
-                list="image-gen-models"
-                placeholder={
-                  backend === "comfyui"
-                    ? t("image.config.checkpointPlaceholder")
-                    : t("image.config.modelPlaceholder")
-                }
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="h-8 text-xs"
-              />
-              {models.length > 0 && (
-                <datalist id="image-gen-models">
-                  {models.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
-              )}
-            </div>
 
             <div className="flex flex-wrap items-center gap-2">
               <Button
                 size="sm"
-                onClick={() => saveConfig.mutate()}
+                onClick={() => saveConfig.mutate({})}
                 disabled={
-                  saveConfig.isPending || (backend === "api" ? !apiBase.trim() : !comfyBase.trim())
+                  saveConfig.isPending ||
+                  (backend === "api" ? !providerId.trim() : !comfyBase.trim())
                 }
               >
                 {saveConfig.isPending ? (
@@ -1195,17 +1187,20 @@ function GenerateTab() {
                 ) : null}
                 {t("image.config.save")}
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => fetchModels.mutate()}
-                disabled={fetchModels.isPending || !configured}
-              >
-                {fetchModels.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : null}
-                {t("image.config.fetchModels")}
-              </Button>
+              {/* 云端模型清单来自服务商，不需要在这里扫；ComfyUI 的 checkpoint 仍要探测。 */}
+              {backend === "comfyui" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => fetchModels.mutate()}
+                  disabled={fetchModels.isPending || !configured}
+                >
+                  {fetchModels.isPending ? (
+                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                  ) : null}
+                  {t("image.config.fetchModels")}
+                </Button>
+              )}
               {configured && (
                 <Badge variant="secondary" className="gap-1 text-[10px]">
                   <CircleIcon className="size-2.5 fill-current text-emerald-500" />
@@ -1213,7 +1208,7 @@ function GenerateTab() {
                 </Badge>
               )}
             </div>
-            {models.length > 0 && (
+            {backend === "comfyui" && models.length > 0 && (
               <p className="text-[10px] text-muted-foreground tabular-nums">
                 {models.length} {t("image.config.modelsCount")}
               </p>
@@ -1534,8 +1529,7 @@ function EditTab() {
 
   // ---------- 后端配置（与生图页共用同一套配置与落盘） ----------
   const [backend, setBackend] = useState<ImageGenBackend>("api");
-  const [apiBase, setApiBase] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  const [providerId, setProviderId] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [configError, setConfigError] = useState<string>();
   const hydrated = useRef(false);
@@ -1550,48 +1544,27 @@ function EditTab() {
     if (!config || hydrated.current) return;
     hydrated.current = true;
     setBackend(config.backend);
-    setApiBase(config.apiBase);
-    setApiKey(config.apiKey);
+    setProviderId(config.providerId);
     setComfyBase(config.comfyBase);
     setModel(config.model);
   }, [config]);
 
+  // patch 用于「选完即存」：选择器刚回传的新值还没进 state，直接读 state 会存下旧厂商。
   const saveConfig = useMutation({
-    mutationFn: () =>
+    mutationFn: (patch: { providerId?: string; model?: string } = {}) =>
       rpcClient.saveImageGenConfig({
         backend,
-        apiBase: apiBase.trim(),
-        apiKey: apiKey.trim(),
+        providerId: (patch.providerId ?? providerId).trim(),
         comfyBase: comfyBase.trim(),
-        model: model.trim(),
+        model: (patch.model ?? model).trim(),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["image-gen-config"] }),
-  });
-
-  const fetchModels = useMutation({
-    mutationFn: () =>
-      rpcClient.listImageGenModels({
-        backend,
-        base: backend === "comfyui" ? comfyBase.trim() : apiBase.trim(),
-        apiKey: apiKey.trim(),
-      }),
-    onSuccess: (r) => {
-      if (r.error) {
-        setConfigError(r.error);
-        return;
-      }
-      setConfigError(undefined);
-      if (r.models.length > 0 && !r.models.includes(model)) setModel(r.models[0]!);
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["image-gen-config"] });
+      queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
-    onError: (e) => setConfigError(String(e)),
   });
 
-  const { data: modelsData } = useQuery({
-    queryKey: ["image-gen-models", backend],
-    queryFn: () => rpcClient.listImageGenModels({ backend }),
-    enabled: backend === "comfyui" ? !!comfyBase.trim() : !!apiBase.trim(),
-  });
-  const models = modelsData?.models ?? [];
+  // 修图只用云端后端（见 image.edit.backendNote），模型清单来自厂商的选择器。
 
   // ---------- 参考图选择 ----------
   const pickReference = useMutation({
@@ -1627,8 +1600,7 @@ function EditTab() {
         // 页面上的实时配置一并带上，后端优先使用它们并落盘（同生图页）。
         config: {
           backend,
-          apiBase: apiBase.trim(),
-          apiKey: apiKey.trim(),
+          providerId: providerId.trim(),
           model: model.trim(),
           comfyBase: comfyBase.trim(),
         },
@@ -1652,9 +1624,14 @@ function EditTab() {
     queryFn: () => rpcClient.listImageRecords(undefined),
   });
 
-  // 参考图修图必须：选了图 + 填了提示词 + 云端后端（MLX/ComfyUI 不支持）。
+  // 参考图修图必须：选了图 + 填了提示词 + 云端后端（MLX/ComfyUI 不支持）+ 选好厂商。
   const canGenerate =
-    !!reference && !!prompt.trim() && backend === "api" && !!apiBase.trim() && !generate.isPending;
+    !!reference &&
+    !!prompt.trim() &&
+    backend === "api" &&
+    !!providerId.trim() &&
+    !!model.trim() &&
+    !generate.isPending;
   const ratio = RATIOS[ratioIdx]!;
 
   return (
@@ -1694,86 +1671,41 @@ function EditTab() {
           </div>
 
           {backend === "api" ? (
+            // 云端修图：与生图页相同 —— 只选厂商 + 模型，不做地址 / 密钥输入。
             <div className="flex flex-col gap-2.5 rounded-lg border bg-card p-3">
               <div>
-                <Label htmlFor="edit-base" className="mb-1 block text-xs">
-                  {t("image.config.base")}
-                </Label>
-                <Input
-                  id="edit-base"
-                  placeholder="https://api.siliconflow.cn/v1"
-                  value={apiBase}
-                  onChange={(e) => setApiBase(e.target.value)}
-                  className="h-8 text-xs"
+                <Label className="mb-1 block text-xs">{t("image.config.cloudProvider")}</Label>
+                <CloudModelSelect
+                  kind="image"
+                  providerId={providerId}
+                  model={model}
+                  size="sm"
+                  onChange={(choice) => {
+                    setProviderId(choice.providerId);
+                    setModel(choice.model);
+                    saveConfig.mutate(choice);
+                  }}
                 />
-              </div>
-              <div>
-                <Label htmlFor="edit-key" className="mb-1 block text-xs">
-                  {t("image.config.apiKey")}
-                </Label>
-                <Input
-                  id="edit-key"
-                  type="password"
-                  placeholder="sk-…"
-                  value={apiKey}
-                  onChange={(e) => setApiKey(e.target.value)}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor="edit-model" className="mb-1 block text-xs">
-                  {t("image.config.modelId")}
-                </Label>
-                <Input
-                  id="edit-model"
-                  list="image-edit-models"
-                  placeholder={t("image.config.modelPlaceholder")}
-                  value={model}
-                  onChange={(e) => setModel(e.target.value)}
-                  className="h-8 text-xs"
-                />
-                {models.length > 0 && (
-                  <datalist id="image-edit-models">
-                    {models.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
-                )}
+                <p className="mt-1.5 text-[10px] text-muted-foreground">{t("cloud.where")}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2">
                 <Button
                   size="sm"
-                  onClick={() => saveConfig.mutate()}
-                  disabled={saveConfig.isPending || !apiBase.trim()}
+                  onClick={() => saveConfig.mutate({})}
+                  disabled={saveConfig.isPending || !providerId.trim()}
                 >
                   {saveConfig.isPending ? (
                     <Loader2Icon data-icon="inline-start" className="animate-spin" />
                   ) : null}
                   {t("image.config.save")}
                 </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => fetchModels.mutate()}
-                  disabled={fetchModels.isPending || !apiBase.trim()}
-                >
-                  {fetchModels.isPending ? (
-                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                  ) : null}
-                  {t("image.config.fetchModels")}
-                </Button>
-                {apiBase.trim() && (
+                {providerId.trim() && (
                   <Badge variant="secondary" className="gap-1 text-[10px]">
                     <CircleIcon className="size-2.5 fill-current text-emerald-500" />
                     {t("image.config.configured")}
                   </Badge>
                 )}
               </div>
-              {models.length > 0 && (
-                <p className="text-[10px] text-muted-foreground tabular-nums">
-                  {models.length} {t("image.config.modelsCount")}
-                </p>
-              )}
               {configError && <ResultError error={configError} />}
             </div>
           ) : (

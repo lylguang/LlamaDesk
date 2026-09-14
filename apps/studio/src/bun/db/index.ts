@@ -5,6 +5,7 @@ import { join } from "path";
 import { appendFileSync, copyFileSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import * as schema from "./schema";
 import { getDataDir } from "../paths";
+import { logEvent } from "../app-log";
 
 const isDev = import.meta.env.NODE_ENV === "development";
 
@@ -80,6 +81,15 @@ function backupBeforeMigrate(): void {
 
 /** 迁移失败日志：应用可能因此起不来，留下可诊断的现场。 */
 function logMigrateFailure(error: unknown): void {
+  // 双写：统一日志（`omi logs` 应用没运行时直接读文件，照样能看到）+
+  // 这份专用纯文本 —— 迁移失败时应用可能整个起不来，错误信息里指的就是它。
+  logEvent({
+    level: "error",
+    source: "app",
+    event: "db.migrate.failed",
+    message: error instanceof Error ? error.message : String(error),
+    detail: { dbPath, error },
+  });
   try {
     const dir = join(getDataDir(), "logs");
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });

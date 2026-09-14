@@ -10,12 +10,6 @@ export type Route =
       tab?: string;
     }
   | {
-      path: "server";
-    }
-  | {
-      path: "stats";
-    }
-  | {
       path: "model-detail";
     }
   | {

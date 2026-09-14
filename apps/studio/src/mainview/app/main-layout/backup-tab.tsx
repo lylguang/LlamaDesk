@@ -46,7 +46,6 @@ import {
   type BackupProgress,
   type BackupRemoteConfig,
   type BackupRemoteEntry,
-  type BackupScopeGroup,
   type BackupScopeId,
   type BackupSummary,
 } from "@/shared/backup";
@@ -820,7 +819,7 @@ function RemoteSection({
           value={draft.prefix}
           onChange={(e) => patch({ prefix: e.target.value })}
           className="h-8 text-xs"
-          placeholder="OmniStudio"
+          placeholder="LlamaDesk"
         />
       </SettingRow>
 

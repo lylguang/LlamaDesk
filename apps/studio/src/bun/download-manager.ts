@@ -5,6 +5,7 @@ import { concurrentFileLimit, type DownloadProgress } from "./downloader";
 import { setModelMeta } from "./model-store";
 import { getSetting, updateSettings } from "./db/settings";
 import type { ModelCategory, ModelSource } from "../shared/modelscope";
+import { logEvent } from "./app-log";
 
 export type DownloadStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "canceled";
 
@@ -242,6 +243,13 @@ export class DownloadManager {
       task.status = "failed";
       task.error = `非法的下载路径：${fileName}`;
       this.tasks.set(task.id, task);
+      logEvent({
+        level: "error",
+        source: "download",
+        event: "download.invalid_path",
+        message: task.error,
+        detail: { repo, fileName },
+      });
       this.emit(true);
       return task;
     }
@@ -405,6 +413,15 @@ export class DownloadManager {
           task.status = "failed";
           task.error = message;
           task.speed = 0;
+          // 下载失败最常见的三个原因（磁盘满 / 镜像 404 / 网络被墙）都会在这条里，
+          // 排查时不必再让用户复现。
+          logEvent({
+            level: "error",
+            source: "download",
+            event: "download.failed",
+            message,
+            detail: { id: task.id, repo: task.repo, fileName: task.fileName, source: task.source, retries: used + 1 },
+          });
           this.emit(true);
         } else {
           task.retries = used + 1;

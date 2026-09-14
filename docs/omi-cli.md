@@ -22,7 +22,7 @@ cd apps/studio && bun link
 OMNI_DATA_DIR=<数据目录> omi models
 ```
 
-默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/com.lylguang.llamadesk/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
+默认自动探测数据目录：先找正在运行的实例（真的 ping 控制通道，从源码 / build/ 里跑的 dev、canary 包也算），没有则取最近用过的 channel（macOS：~/Library/Application Support/com.lylguang.llamadesk/<channel>）。无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。
 
 ## 启动应用与推理服务器
 
@@ -60,6 +60,19 @@ omi server <list|start|stop|restart|info|logs>
 `omi server list` — 可用引擎清单（● 为活动引擎）。
 `omi server info` — 引擎 / 状态 / PID / 地址。
 `omi server logs` — 最近 200 行服务器日志，排错先看这里。
+
+```bash
+omi logs [--level] [--source] [--search] [-f] [--json]
+```
+
+查看统一应用日志：生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 / Agent 等子系统的失败与关键事件都记在同一份 logs/app.log 里（逐行 JSONL，2MB 轮转，密钥自动脱敏）。应用在运行时读内存 + 文件；应用没运行或已闪退时直接读磁盘 —— 排查「应用起不来」同样可用。
+- 按子系统过滤：--source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …
+- --verbose 打印结构化上下文（后端、模型、地址、堆栈）；-f 持续跟踪，让用户复现时实时看。
+
+`omi logs --level error --limit 50 -v` — 最近 50 条错误及完整上下文。
+`omi logs --source image --verbose` — 生图失败的原因（后端 / 模型 / 提示词）。
+`omi logs -f --source agent` — 跟踪 Agent 运行日志。
+`omi logs --json` — 输出 JSON，交给脚本或 Agent 分析。
 
 ## 无界面常驻运行（serve）
 
@@ -137,6 +150,33 @@ omi benchmark --list
 ```
 
 列出最近 20 条测速记录（ID / 时间 / 模型 / 平均 TPS / 耗时）；应用里的「基准测试」页有完整历史与图表。
+
+## 无头执行：跑一次 Agent 回合
+
+给脚本、CI、编辑器插件用的入口：跑一个无人值守的 Agent 回合，拿到最终回答或事件流。会话照常落库，跑完可以在界面里打开继续追问。
+
+```bash
+omi agent run <提示词> [--workspace <目录>] [--mode agent|plan|goal]
+```
+
+跑一次无头回合并打印最终回答（默认模式 agent）。--workspace 指定工作区，--mode 选模式；--conversation <id> 可以接着已有会话往下跑。提示词也能从管道读进来（`echo "…" | omi agent run`）。
+
+`omi agent run "把 README 的安装步骤补全"` — 在当前工作区跑一次，打印它最终的回答。
+`omi agent run "继续" --conversation 12 --mode plan` — 接着 12 号会话、用 plan 模式再跑一轮。
+
+```bash
+omi agent run <提示词> --json [--chunks]
+```
+
+输出 NDJSON：每行一个 JSON（`start` / `event` 轨迹事件 / `result` 最终结果；加 --chunks 还有正文增量）。给脚本边跑边消费 —— 比如 `jq -r 'select(.type=="event") | .event.toolName'` 实时看它在调什么工具。
+
+`omi agent run "跑测试并总结失败原因" --json | jq -r 'select(.type=="event") | .event.toolName'` — 实时打印这一轮用到的工具名。
+
+```bash
+  --timeout <毫秒>
+```
+
+等待上限（默认 600000，即 10 分钟）。到点客户端停止等待并退出非零，应用侧的回合仍会跑完并落库。
 
 ## 记忆：写入、检索、接入
 

@@ -1,8 +1,10 @@
 import { randomUUID } from "crypto";
 
+import * as CloudProviders from "./cloud-providers";
 import * as ImageGen from "./image-gen";
 import * as MlxGen from "./mlx-gen";
 import { filterModelIds, MODEL_CATEGORY_SETS } from "../shared/modelscope";
+import { providerConfigured, providerModelsOfType } from "../shared/cloud-providers";
 
 /**
  * Agent 的「需要用户介入」通道。
@@ -30,6 +32,11 @@ export type MediaSetupCandidate = {
   note?: string;
   /** 已经可以直接用（已下载，或远端扫描到的模型）。 */
   ready?: boolean;
+  /**
+   * 来自「云端模型」的候选：选中就把该厂商设为生图后端（地址 / Key 由厂商提供），
+   * 不必再手填连接信息。本地 MLX / ComfyUI 的候选没有这个字段。
+   */
+  providerId?: string;
 };
 
 export type MediaSetupBackendOption = {
@@ -49,8 +56,8 @@ export type MediaSetupPayload = {
   message: string;
   backend: ImageGen.ImageGenBackend;
   config: {
-    apiBase: string;
-    apiKey: string;
+    /** 云端生图选中的服务商（只给 id：地址 / Key 在服务商行里，弹窗不再让用户填）。 */
+    providerId: string;
     comfyBase: string;
     model: string;
   };
@@ -62,8 +69,7 @@ export type MediaSetupAnswer = {
   action: "confirm" | "cancel";
   backend?: string;
   model?: string;
-  apiBase?: string;
-  apiKey?: string;
+  providerId?: string;
   comfyBase?: string;
 };
 
@@ -147,8 +153,8 @@ export function applyMediaSetupAnswer(answer: MediaSetupAnswer): void {
   if (answer.backend === "api" || answer.backend === "mlx" || answer.backend === "comfyui") {
     patch.backend = answer.backend;
   }
-  if (answer.apiBase !== undefined) patch.apiBase = answer.apiBase;
-  if (answer.apiKey !== undefined) patch.apiKey = answer.apiKey;
+  // 连接信息不落盘：云端只记住选中的服务商，地址 / Key 由服务商行提供。
+  if (answer.providerId !== undefined) patch.providerId = answer.providerId;
   if (answer.comfyBase !== undefined) patch.comfyBase = answer.comfyBase;
   if (answer.model !== undefined) patch.model = answer.model;
   if (Object.keys(patch).length > 0) ImageGen.saveImageGenConfig(patch);
@@ -158,16 +164,70 @@ export function applyMediaSetupAnswer(answer: MediaSetupAnswer): void {
 // 候选模型 / 后端状态
 // ---------------------------------------------------------------------------
 
+/**
+ * 「云端模型」（设置里的云服务商）中已经配好的生图模型。
+ *
+ * 生图后端与云服务商本来是两套配置：用户在设置里配过服务商与模型之后，生图这条路
+ * 完全看不到它们，于是弹窗只会让他把地址和 Key 再手填一遍。这里把它们翻出来当候选 ——
+ * 只有一个就直接用，多个让用户挑。候选只来自**已启用**的厂商（启用时已校验过密钥）。
+ */
+export function cloudImageCandidates(): MediaSetupCandidate[] {
+  const out: MediaSetupCandidate[] = [];
+  const seen = new Set<string>();
+  for (const provider of CloudProviders.listEnabledCloudProviders()) {
+    if (!providerConfigured(provider)) continue;
+    for (const model of providerModelsOfType(provider, "image")) {
+      if (seen.has(model.id)) continue;
+      seen.add(model.id);
+      out.push({
+        id: model.id,
+        label: `${provider.name} · ${model.id}`,
+        note: provider.baseUrl,
+        ready: true,
+        providerId: provider.id,
+      });
+    }
+  }
+  return out;
+}
+
+/** 候选去重合并：先来的优先（扫到的排在前，云端候选补在后面）。 */
+function mergeCandidates(
+  primary: MediaSetupCandidate[],
+  extra: MediaSetupCandidate[],
+): MediaSetupCandidate[] {
+  const seen = new Set(primary.map((c) => c.id));
+  return [...primary, ...extra.filter((c) => !seen.has(c.id))];
+}
+
+/**
+ * 把候选落盘成生图配置。带服务商的候选（来自「云端模型」）连后端与厂商一起写，
+ * 否则光写个模型 id 会落到另一个厂商的地址上。
+ */
+function adoptCandidate(candidate: MediaSetupCandidate): void {
+  const patch: Partial<ImageGen.ImageGenConfig> = { model: candidate.id };
+  if (candidate.providerId) {
+    patch.backend = "api";
+    patch.providerId = candidate.providerId;
+  }
+  ImageGen.saveImageGenConfig(patch);
+}
+
 /** 扫描某个后端下可用的模型（弹窗里「扫描模型」与工具侧的二次确认共用）。 */
 export async function scanSetupCandidates(input: {
   kind?: string;
   backend?: string;
   base?: string;
   apiKey?: string;
+  /** 弹窗里刚选中的厂商：地址 / 密钥按它取（此时还没落盘，不能用已保存的配置）。 */
+  providerId?: string;
 }): Promise<{ candidates: MediaSetupCandidate[]; error?: string }> {
   if ((input.kind ?? "image") !== "image") return { candidates: [], error: "暂不支持该素材类型" };
   const cfg = ImageGen.getImageGenConfig();
   const backend = (input.backend as ImageGen.ImageGenBackend) || cfg.backend;
+  const picked = CloudProviders.resolveCloudProvider(input.providerId);
+  const apiBase = picked?.baseUrl.trim() || cfg.apiBase;
+  const apiKey = picked?.apiKey.trim() || cfg.apiKey;
 
   try {
     if (backend === "mlx") {
@@ -193,9 +253,9 @@ export async function scanSetupCandidates(input: {
       const models = await ImageGen.listComfyCheckpoints(base);
       return { candidates: models.map((m) => ({ id: m, label: m, ready: true })) };
     }
-    const base = (input.base ?? cfg.apiBase).trim();
-    if (!base) return { candidates: [], error: "请先填写服务地址" };
-    const models = await ImageGen.listImageApiModels(base, (input.apiKey ?? cfg.apiKey).trim());
+    const base = (input.base ?? apiBase).trim();
+    if (!base) return { candidates: [], error: "请先在「设置 → 模型云服务」里启用一个厂商" };
+    const models = await ImageGen.listImageApiModels(base, (input.apiKey ?? apiKey).trim());
     // 生图服务的 /v1/models 也会列对话模型：只挑生图模型，认不出时保留全量。
     const picked = filterModelIds(models, MODEL_CATEGORY_SETS.image, { relax: true });
     return { candidates: picked.ids.map((m) => ({ id: m, label: m, ready: true })) };
@@ -207,6 +267,7 @@ export async function scanSetupCandidates(input: {
 /** 三个生图后端 + 各自是否就绪（弹窗顶部让用户切换用）。 */
 export async function imageBackendOptions(): Promise<MediaSetupBackendOption[]> {
   const cfg = ImageGen.getImageGenConfig();
+  const cloud = cloudImageCandidates();
   let mlxReady = false;
   let mlxNote = "无法检测";
   try {
@@ -225,8 +286,11 @@ export async function imageBackendOptions(): Promise<MediaSetupBackendOption[]> 
     {
       id: "api",
       labelKey: "image.backend.cloud",
-      ready: !!cfg.apiBase && !!cfg.model,
-      note: cfg.apiBase || "未填服务地址",
+      // 已启用厂商里配好的生图模型也算这个后端就绪：选中即把厂商与模型一起用上。
+      ready: (!!cfg.providerId && !!cfg.model) || cloud.length > 0,
+      note:
+        cfg.apiBase ||
+        (cloud.length > 0 ? `云端模型里有 ${cloud.length} 个生图模型` : "还没启用云厂商"),
     },
     { id: "mlx", labelKey: "image.backend.mlx", ready: mlxReady, note: mlxNote },
     {
@@ -252,15 +316,16 @@ async function checkImageReadiness(
   model: string,
 ): Promise<ImageReadiness> {
   if (cfg.backend === "api") {
-    if (!cfg.apiBase) {
+    if (!cfg.providerId) {
       return {
         ok: false,
         reason: "missing-config",
-        message: "生图后端是「OpenAI 兼容 API」，但还没填写服务地址（Base URL）。",
+        message:
+          "生图后端是云端模型，但还没选定云厂商。请到「设置 → 模型云服务」启用厂商（会在启用时校验密钥），再回来挑生图模型。",
       };
     }
     if (!model) {
-      return { ok: false, reason: "choose-model", message: "服务地址已填，但还没选定生图模型。" };
+      return { ok: false, reason: "choose-model", message: "云厂商已选，但还没选定生图模型。" };
     }
     return { ok: true };
   }
@@ -330,8 +395,7 @@ function dialogPayload(
     message,
     backend: cfg.backend,
     config: {
-      apiBase: cfg.apiBase,
-      apiKey: cfg.apiKey,
+      providerId: cfg.providerId,
       comfyBase: cfg.comfyBase,
       model: cfg.model,
     },
@@ -350,24 +414,60 @@ const CANCEL_MESSAGE =
 export async function prepareImageGeneration(
   opts: { signal?: AbortSignal; explicitModel?: string } = {},
 ): Promise<{ ok: true; model: string } | { ok: false; message: string }> {
+  const explicit = opts.explicitModel?.trim();
   let cfg = ImageGen.getImageGenConfig();
-  let state = await checkImageReadiness(cfg, opts.explicitModel?.trim() || cfg.model);
+  let state = await checkImageReadiness(cfg, explicit || cfg.model);
+
+  // 启用过云厂商的用户不该再被问一遍连接：地址与 Key 直接来自服务商。
+  const cloud = cloudImageCandidates();
+  if (!state.ok && state.reason === "missing-config" && cfg.backend === "api" && cloud.length > 0) {
+    if (cloud.length === 1) {
+      adoptCandidate(cloud[0]!);
+    } else {
+      const picked = await requestMediaSetup(
+        dialogPayload(
+          "choose-model",
+          `生图还没选云厂商，但云端模型里已经配好 ${cloud.length} 个生图模型，请确认用哪个。`,
+          cfg,
+          { candidates: cloud, backends: await imageBackendOptions() },
+        ),
+        { signal: opts.signal },
+      );
+      if (picked.action !== "confirm") return { ok: false, message: CANCEL_MESSAGE };
+      applyMediaSetupAnswer(picked);
+      // 没点具体模型时用第一个候选，避免又落回"缺配置"再弹一次。
+      if (!picked.model?.trim()) adoptCandidate(cloud[0]!);
+    }
+    cfg = ImageGen.getImageGenConfig();
+    state = await checkImageReadiness(cfg, explicit || cfg.model);
+  }
 
   if (!state.ok) {
+    // 能自己扫候选的后端照旧（弹窗打开时会自动扫）；扫不了的（没选厂商）才把
+    // 「云端模型」里的现成模型摆出来，让用户至少有的选。
+    const canScan = cfg.backend === "comfyui" ? !!cfg.comfyBase : !!cfg.providerId;
+    const preset = cfg.backend === "mlx" || canScan ? [] : cloud;
     const answer = await requestMediaSetup(
-      dialogPayload(state.reason, state.message, cfg, { backends: await imageBackendOptions() }),
+      dialogPayload(state.reason, state.message, cfg, {
+        candidates: preset,
+        backends: await imageBackendOptions(),
+      }),
       { signal: opts.signal },
     );
     if (answer.action !== "confirm") return { ok: false, message: CANCEL_MESSAGE };
     applyMediaSetupAnswer(answer);
     cfg = ImageGen.getImageGenConfig();
-    state = await checkImageReadiness(cfg, opts.explicitModel?.trim() || cfg.model);
+    state = await checkImageReadiness(cfg, explicit || cfg.model);
   }
 
-  // 用户没在弹窗里指定模型（比如只填了地址）：扫一遍候选，多个候选再确认一次用哪个。
-  if (!opts.explicitModel?.trim() && !cfg.model) {
+  // 用户没在弹窗里指定模型（比如只选了厂商）：扫一遍候选，多个候选再确认一次用哪个。
+  if (!explicit && !cfg.model) {
     const { candidates, error } = await scanSetupCandidates({ kind: "image", backend: cfg.backend });
-    const ready = candidates.filter((c) => c.ready !== false);
+    // 扫到的 + 「云端模型」里配好的：后者的厂商 / 密钥是现成的，选中就能直接生图。
+    const ready = mergeCandidates(
+      candidates.filter((c) => c.ready !== false),
+      cfg.backend === "mlx" ? [] : cloud,
+    );
     if (ready.length === 0) {
       // 有两种"没有可用候选"：扫不到（地址/服务不通），或扫到了但都还没下载好。
       const detail =
@@ -380,12 +480,12 @@ export async function prepareImageGeneration(
       };
     }
     if (ready.length === 1) {
-      ImageGen.saveImageGenConfig({ model: ready[0]!.id });
+      adoptCandidate(ready[0]!);
     } else {
       const picked = await requestMediaSetup(
         dialogPayload(
           "choose-model",
-          `生图后端已就绪，扫描到 ${ready.length} 个可用模型，请确认用哪个生图。`,
+          `生图后端已就绪，有 ${ready.length} 个可用模型，请确认用哪个生图。`,
           ImageGen.getImageGenConfig(),
           { candidates: ready, backends: await imageBackendOptions() },
         ),
@@ -394,10 +494,10 @@ export async function prepareImageGeneration(
       if (picked.action !== "confirm") return { ok: false, message: CANCEL_MESSAGE };
       applyMediaSetupAnswer(picked);
       // 用户没点具体模型时用第一个候选，避免又回到"缺模型"的状态。
-      if (!picked.model?.trim()) ImageGen.saveImageGenConfig({ model: ready[0]!.id });
+      if (!picked.model?.trim()) adoptCandidate(ready[0]!);
     }
     cfg = ImageGen.getImageGenConfig();
-    state = await checkImageReadiness(cfg, opts.explicitModel?.trim() || cfg.model);
+    state = await checkImageReadiness(cfg, explicit || cfg.model);
   }
 
   if (!state.ok) {
@@ -406,5 +506,5 @@ export async function prepareImageGeneration(
       message: `${state.message}（用户还没完成准备，先不要重试生图；等他准备好再继续。）`,
     };
   }
-  return { ok: true, model: opts.explicitModel?.trim() || cfg.model };
+  return { ok: true, model: explicit || cfg.model };
 }

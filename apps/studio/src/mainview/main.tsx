@@ -6,6 +6,11 @@ import "katex/dist/katex.min.css";
 import { App } from "./app";
 import { ErrorBoundary } from "./components/error-boundary";
 import { Providers } from "./components/providers";
+import { installClientErrorReporting } from "./lib/app-log";
+
+// 全局错误也进统一日志（主进程 logs/app.log，source=client）：
+// 渲染边界之外的未捕获错误、未处理的 Promise rejection 原本无处可查。
+installClientErrorReporting();
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { Button } from "@ui/button";
 import { ScrollArea } from "@ui/scroll-area";
 import { Spinner } from "@ui/spinner";
@@ -67,7 +68,8 @@ const COMFY_SIZES: Record<string, { width: number; height: number }> = {
   "3:4": { width: 528, height: 704 },
 };
 
-const DURATION_RANGE: Record<VideoGenBackend, { min: number; max: number }> = {
+/** 时长范围按接口协议给：云端厂商在设置里选了 MiniMax / Seedance 协议。 */
+const DURATION_RANGE: Record<"minimax" | "seedance" | "comfyui", { min: number; max: number }> = {
   minimax: { min: 4, max: 15 },
   seedance: { min: 3, max: 12 },
   comfyui: { min: 3, max: 15 },
@@ -82,9 +84,8 @@ const RESOLUTIONS: Record<"minimax" | "seedance", string[]> = {
 const POLL_INTERVAL_MS = 5000;
 
 const BACKEND_ITEMS: { key: VideoGenBackend; label: string }[] = [
+  { key: "cloud", label: "video.backend.cloud" },
   { key: "comfyui", label: "video.backend.comfyui" },
-  { key: "minimax", label: "video.backend.minimax" },
-  { key: "seedance", label: "video.backend.seedance" },
 ];
 
 function formatTime(ts: number): string {
@@ -544,13 +545,10 @@ function GenerateTab() {
   }, [pendingPrompt]);
 
   // ---------- 后端配置 ----------
-  const [backend, setBackend] = useState<VideoGenBackend>("minimax");
-  const [minimaxBase, setMinimaxBase] = useState("");
-  const [minimaxKey, setMinimaxKey] = useState("");
-  const [minimaxModel, setMinimaxModel] = useState("");
-  const [seedanceBase, setSeedanceBase] = useState("");
-  const [seedanceKey, setSeedanceKey] = useState("");
-  const [seedanceModel, setSeedanceModel] = useState("");
+  const [backend, setBackend] = useState<VideoGenBackend>("cloud");
+  // 云端只记厂商 + 模型：地址 / 密钥 / 接口协议都在「设置 → 模型云服务」里。
+  const [providerId, setProviderId] = useState("");
+  const [cloudModel, setCloudModel] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [comfyCkpt, setComfyCkpt] = useState("");
   const [comfyClip, setComfyClip] = useState("");
@@ -564,29 +562,48 @@ function GenerateTab() {
   });
   const config = configData?.config;
 
+  // 当前厂商的生视频协议（决定分辨率档位与时长范围）；没选厂商时按 MiniMax 显示。
+  const providersQuery = useQuery({
+    queryKey: ["cloud-providers"],
+    queryFn: () => rpcClient.cloudProviderList(undefined),
+  });
+  const selectedProvider =
+    (providersQuery.data?.providers ?? []).find((p) => p.id === providerId) ?? null;
+  const protocol: "minimax" | "seedance" =
+    selectedProvider?.videoApi === "seedance" ? "seedance" : "minimax";
+
   useEffect(() => {
     if (!config || hydrated.current) return;
     hydrated.current = true;
     setBackend(config.backend);
-    setMinimaxBase(config.minimaxBase);
-    setMinimaxKey(config.minimaxKey);
-    setMinimaxModel(config.minimaxModel);
-    setSeedanceBase(config.seedanceBase);
-    setSeedanceKey(config.seedanceKey);
-    setSeedanceModel(config.seedanceModel);
+    setProviderId(config.providerId);
+    setCloudModel(config.model);
     setComfyBase(config.comfyBase);
     setComfyCkpt(config.comfyCkpt);
     setComfyClip(config.comfyClip);
     setComfyVae(config.comfyVae);
   }, [config]);
 
+  // 档位按**协议**分，换厂商等于换协议：MiniMax 的 480P/768P/2K 与 Seedance 的
+  // 480p/720p/1080p 互不认，时长上限也不同（15s vs 12s）。不跟着收敛就会把
+  // 上一个厂商的档位原样发给上游。
+  useEffect(() => {
+    const options = RESOLUTIONS[protocol];
+    setResolution((r) => (options.includes(r) ? r : (options[1] ?? options[0]!)));
+    const range = DURATION_RANGE[protocol];
+    setDuration((d) => Math.min(Math.max(d, range.min), range.max));
+  }, [protocol]);
+
   const switchBackend = (key: VideoGenBackend) => {
     setBackend(key);
     // 切后端时收敛时长与分辨率到该后端支持的档位。
-    const range = DURATION_RANGE[key];
+    const key2 = key === "comfyui" ? "comfyui" : protocol;
+    const range = DURATION_RANGE[key2];
     setDuration((d) => Math.min(Math.max(d, range.min), range.max));
-    if (key === "minimax" && !RESOLUTIONS.minimax.includes(resolution)) setResolution("768P");
-    if (key === "seedance" && !RESOLUTIONS.seedance.includes(resolution)) setResolution("720p");
+    if (key !== "comfyui") {
+      const options = RESOLUTIONS[protocol];
+      if (!options.includes(resolution)) setResolution(options[1] ?? options[0]!);
+    }
     void rpcClient.saveVideoGenConfig({ backend: key });
   };
 
@@ -594,65 +611,44 @@ function GenerateTab() {
     mutationFn: () =>
       rpcClient.saveVideoGenConfig({
         backend,
-        minimaxBase: minimaxBase.trim(),
-        minimaxKey: minimaxKey.trim(),
-        minimaxModel: minimaxModel.trim(),
-        seedanceBase: seedanceBase.trim(),
-        seedanceKey: seedanceKey.trim(),
-        seedanceModel: seedanceModel.trim(),
+        providerId: providerId.trim(),
+        model: cloudModel.trim(),
         comfyBase: comfyBase.trim(),
         comfyCkpt: comfyCkpt.trim(),
         comfyClip: comfyClip.trim(),
         comfyVae: comfyVae.trim(),
       }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["video-gen-config"] }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["video-gen-config"] });
+      queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
+    },
   });
 
   const configured =
-    backend === "comfyui"
-      ? !!comfyBase.trim()
-      : backend === "minimax"
-        ? !!minimaxBase.trim()
-        : !!seedanceBase.trim() && !!seedanceKey.trim();
+    backend === "comfyui" ? !!comfyBase.trim() : !!providerId.trim() && !!cloudModel.trim();
 
   const fetchModels = useMutation({
-    mutationFn: () =>
-      rpcClient.listVideoGenModels({
-        backend,
-        base:
-          backend === "comfyui"
-            ? comfyBase.trim()
-            : backend === "minimax"
-              ? minimaxBase.trim()
-              : seedanceBase.trim(),
-      }),
+    mutationFn: () => rpcClient.listVideoGenModels({ backend, base: comfyBase.trim() }),
     onSuccess: (r) => {
       if (r.error) {
         setConfigError(r.error);
         return;
       }
       setConfigError(undefined);
-      // ComfyUI：未手填的模型名自动挑最像 Wan 的；云端：仅在空时填第一个预设。
-      if (backend === "comfyui") {
-        const pick = (list: string[], re: RegExp) => list.find((n) => re.test(n)) ?? list[0] ?? "";
-        setComfyCkpt((v) => v.trim() || pick(r.checkpoints, /wan/i));
-        setComfyClip((v) => v.trim() || pick(r.clips, /umt5|wan/i));
-        setComfyVae((v) => v.trim() || pick(r.vaes, /wan/i));
-      } else if (backend === "minimax") {
-        setMinimaxModel((v) => v.trim() || (r.models[0] ?? ""));
-      } else {
-        setSeedanceModel((v) => v.trim() || (r.models[0] ?? ""));
-      }
+      // ComfyUI：未手填的模型名自动挑最像 Wan 的。
+      const pick = (list: string[], re: RegExp) => list.find((n) => re.test(n)) ?? list[0] ?? "";
+      setComfyCkpt((v) => v.trim() || pick(r.checkpoints, /wan/i));
+      setComfyClip((v) => v.trim() || pick(r.clips, /umt5|wan/i));
+      setComfyVae((v) => v.trim() || pick(r.vaes, /wan/i));
     },
     onError: (e) => setConfigError(String(e)),
   });
 
   const { data: modelsData } = useQuery({
-    queryKey: ["video-gen-models", backend],
-    queryFn: () => rpcClient.listVideoGenModels({ backend }),
-    enabled: configured,
+    queryKey: ["video-gen-models", backend, comfyBase],
+    queryFn: () => rpcClient.listVideoGenModels({ backend, base: comfyBase.trim() }),
+    enabled: backend === "comfyui" && !!comfyBase.trim(),
   });
-  const cloudModels = modelsData?.models ?? [];
   const comfyCheckpoints = modelsData?.checkpoints ?? [];
   const comfyClips = modelsData?.clips ?? [];
   const comfyVaes = modelsData?.vaes ?? [];
@@ -721,22 +717,14 @@ function GenerateTab() {
         steps: backend === "comfyui" ? steps : undefined,
         cfg: backend === "comfyui" ? cfg : undefined,
         seed: Number.isFinite(parsedSeed) && parsedSeed > 0 ? parsedSeed : undefined,
-        model: backend === "minimax"
-          ? minimaxModel.trim() || undefined
-          : backend === "seedance"
-            ? seedanceModel.trim() || undefined
-            : undefined,
+        model: isCloud ? cloudModel.trim() || undefined : undefined,
         firstFrameRef: isCloud ? firstFrame?.ref : undefined,
         watermark: isCloud ? watermark : undefined,
-        // 把页面上的实时配置一并带上，后端优先使用它们并落盘。
+        // 页面上的实时配置一并带上，后端优先使用它们并落盘（连接信息来自厂商行）。
         config: {
           backend,
-          minimaxBase: minimaxBase.trim(),
-          minimaxKey: minimaxKey.trim(),
-          minimaxModel: minimaxModel.trim(),
-          seedanceBase: seedanceBase.trim(),
-          seedanceKey: seedanceKey.trim(),
-          seedanceModel: seedanceModel.trim(),
+          providerId: providerId.trim(),
+          model: cloudModel.trim(),
           comfyBase: comfyBase.trim(),
           comfyCkpt: comfyCkpt.trim(),
           comfyClip: comfyClip.trim(),
@@ -758,7 +746,7 @@ function GenerateTab() {
 
   const canGenerate = !!prompt.trim() && !generate.isPending && configured;
 
-  const range = DURATION_RANGE[backend];
+  const range = DURATION_RANGE[backend === "comfyui" ? "comfyui" : protocol];
   const clampedDuration = Math.min(Math.max(duration, range.min), range.max);
   const ratio = RATIOS[ratioIdx]!;
   const comfySize = COMFY_SIZES[ratio] ?? COMFY_SIZES["16:9"]!;
@@ -794,9 +782,9 @@ function GenerateTab() {
               {t(
                 backend === "comfyui"
                   ? "video.backend.comfyuiDesc"
-                  : backend === "minimax"
-                    ? "video.backend.minimaxDesc"
-                    : "video.backend.seedanceDesc",
+                  : protocol === "seedance"
+                    ? "video.backend.seedanceDesc"
+                    : "video.backend.minimaxDesc",
               )}
             </p>
           </div>
@@ -880,102 +868,24 @@ function GenerateTab() {
                   </div>
                 </div>
               </>
-            ) : backend === "minimax" ? (
-              <>
-                <div>
-                  <Label htmlFor="video-minimax-base" className="mb-1 block text-xs">
-                    {t("video.config.base")}
-                  </Label>
-                  <Input
-                    id="video-minimax-base"
-                    placeholder="https://api.minimaxi.com"
-                    value={minimaxBase}
-                    onChange={(e) => setMinimaxBase(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="video-minimax-key" className="mb-1 block text-xs">
-                    {t("video.config.apiKey")}
-                  </Label>
-                  <Input
-                    id="video-minimax-key"
-                    type="password"
-                    placeholder="eyJ… / Bearer Token"
-                    value={minimaxKey}
-                    onChange={(e) => setMinimaxKey(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="video-minimax-model" className="mb-1 block text-xs">
-                    {t("video.config.model")}
-                  </Label>
-                  <Input
-                    id="video-minimax-model"
-                    list="video-minimax-model-list"
-                    placeholder="MiniMax-H3"
-                    value={minimaxModel}
-                    onChange={(e) => setMinimaxModel(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                  {cloudModels.length > 0 && (
-                    <datalist id="video-minimax-model-list">
-                      {cloudModels.map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
-                  )}
-                </div>
-              </>
             ) : (
-              <>
-                <div>
-                  <Label htmlFor="video-seedance-base" className="mb-1 block text-xs">
-                    {t("video.config.base")}
-                  </Label>
-                  <Input
-                    id="video-seedance-base"
-                    placeholder="https://ark.cn-beijing.volces.com/api/v3"
-                    value={seedanceBase}
-                    onChange={(e) => setSeedanceBase(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="video-seedance-key" className="mb-1 block text-xs">
-                    {t("video.config.apiKey")}
-                  </Label>
-                  <Input
-                    id="video-seedance-key"
-                    type="password"
-                    placeholder="ARK_API_KEY"
-                    value={seedanceKey}
-                    onChange={(e) => setSeedanceKey(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                </div>
-                <div>
-                  <Label htmlFor="video-seedance-model" className="mb-1 block text-xs">
-                    {t("video.config.model")}
-                  </Label>
-                  <Input
-                    id="video-seedance-model"
-                    list="video-seedance-model-list"
-                    placeholder="doubao-seedance-1-0-lite-t2v-250428"
-                    value={seedanceModel}
-                    onChange={(e) => setSeedanceModel(e.target.value)}
-                    className="h-8 text-xs"
-                  />
-                  {cloudModels.length > 0 && (
-                    <datalist id="video-seedance-model-list">
-                      {cloudModels.map((m) => (
-                        <option key={m} value={m} />
-                      ))}
-                    </datalist>
-                  )}
-                </div>
-              </>
+              // 云端生视频：只选厂商 + 模型。厂商要在设置里选好生视频接口
+              // （MiniMax / Seedance），否则这里选不到它。
+              <div>
+                <Label className="mb-1 block text-xs">{t("video.config.cloudProvider")}</Label>
+                <CloudModelSelect
+                  kind="video"
+                  requireVideoApi
+                  providerId={providerId}
+                  model={cloudModel}
+                  size="sm"
+                  onChange={(choice) => {
+                    setProviderId(choice.providerId);
+                    if (choice.model) setCloudModel(choice.model);
+                  }}
+                />
+                <p className="mt-1.5 text-[10px] text-muted-foreground">{t("cloud.where")}</p>
+              </div>
             )}
 
             <div className="flex flex-wrap items-center gap-2">
@@ -985,17 +895,20 @@ function GenerateTab() {
                 ) : null}
                 {t("video.config.save")}
               </Button>
-              <Button
-                size="sm"
-                variant="outline"
-                onClick={() => fetchModels.mutate()}
-                disabled={fetchModels.isPending || !configured}
-              >
-                {fetchModels.isPending ? (
-                  <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                ) : null}
-                {backend === "comfyui" ? t("video.config.fetchModels") : t("video.config.presetModels")}
-              </Button>
+              {/* 云端模型清单来自厂商，不需要在这里扫；ComfyUI 才要探测模型名。 */}
+              {backend === "comfyui" && (
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => fetchModels.mutate()}
+                  disabled={fetchModels.isPending || !configured}
+                >
+                  {fetchModels.isPending ? (
+                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
+                  ) : null}
+                  {t("video.config.fetchModels")}
+                </Button>
+              )}
               {configured && (
                 <Badge variant="secondary" className="gap-1 text-[10px]">
                   <span className="size-2 rounded-full bg-emerald-500" />
@@ -1140,7 +1053,7 @@ function GenerateTab() {
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
-                    {RESOLUTIONS[backend === "minimax" ? "minimax" : "seedance"].map((r) => (
+                    {RESOLUTIONS[protocol].map((r) => (
                       <SelectItem key={r} value={r} className="text-xs">
                         {r}
                       </SelectItem>
@@ -1230,7 +1143,7 @@ function GenerateTab() {
                         onCheckedChange={setWatermark}
                       />
                     </div>
-                    {backend === "seedance" && (
+                    {protocol === "seedance" && (
                       <div>
                         <Label htmlFor="video-seed" className="mb-1 block text-[11px] text-muted-foreground">
                           {t("video.params.seed")}

@@ -9,6 +9,7 @@ import { chatImageUrl } from "../shared/server-info";
 import { TTS_REFERENCE_AUDIO_FIELD } from "../shared/tts-reference-audio";
 import { edgeSynthesize } from "./edge-tts";
 import { synthesizeCallLocal } from "./tts-local";
+import * as CloudProviders from "./cloud-providers";
 
 export type VoiceRecordKind = "tts" | "asr" | "clone";
 
@@ -176,29 +177,44 @@ export async function stageAudio(paths: string[]): Promise<{ ref: string; url: s
 // ---------------------------------------------------------------------------
 
 export type TTSProviderConfig = {
+  /** 选中的云服务商 id（地址 / 密钥从 cloud_providers 表解析）。 */
+  providerId: string;
   base: string;
   apiKey: string;
   model: string;
 };
 
 export function getTTSProviderConfig(): TTSProviderConfig {
+  const providerId = (getSetting("TTS_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   return {
-    base: (getSetting("TTS_PROVIDER_BASE") || "").trim(),
-    apiKey: (getSetting("TTS_PROVIDER_API_KEY") || "").trim(),
+    providerId,
+    base: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model: (getSetting("TTS_PROVIDER_MODEL") || "").trim(),
   };
 }
 
+/**
+ * 保存三方 TTS 配置：语音页只选「厂商 + 模型」，地址 / 密钥属于服务商
+ * （在「设置 → 模型云服务」里维护并启用），这里不再接收 base / apiKey。
+ */
 export function saveTTSProviderConfig(cfg: {
-  base?: string;
-  apiKey?: string;
+  providerId?: string;
   model?: string;
 }): void {
   const settings: Record<string, string> = {};
-  if (cfg.base !== undefined) settings.TTS_PROVIDER_BASE = cfg.base.trim();
-  if (cfg.apiKey !== undefined) settings.TTS_PROVIDER_API_KEY = cfg.apiKey.trim();
+  if (cfg.providerId !== undefined) settings.TTS_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.model !== undefined) settings.TTS_PROVIDER_MODEL = cfg.model.trim();
   updateSettings(settings);
+  if (cfg.providerId && cfg.model) {
+    CloudProviders.saveAppModelChoice({
+      settingKey: "TTS_PROVIDER_ID",
+      providerId: cfg.providerId.trim(),
+      model: cfg.model,
+      type: "tts",
+    });
+  }
 }
 
 /** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */
@@ -208,24 +224,20 @@ function normalizeApiBase(base: string): string {
   return b;
 }
 
-/** 从 OpenAI 兼容 /v1/models 拉取可用模型列表。 */
+/**
+ * 从 OpenAI 兼容 /models 拉取可用模型列表。
+ *
+ * 地址候选与响应解析都交给 CloudProviders.fetchRemoteModels：与设置页「获取模型列表」
+ * 用同一份实现 —— 两边各写一套时，同一个上游会一边列得出模型、一边报错。
+ */
 export async function listProviderModels(
   base: string,
   apiKey: string,
 ): Promise<string[]> {
-  const cleanBase = normalizeApiBase(base);
-  if (!cleanBase) throw new Error("Missing API base URL");
-  const res = await fetch(`${cleanBase}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(await errorMessage(res, "Failed to list models"));
-  const json = (await res.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-  const data = json?.data;
-  if (!Array.isArray(data)) return [];
-  return data
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!base.trim()) throw new Error("Missing API base URL");
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
+  if (!r.ok) throw new Error(r.error);
+  return r.models;
 }
 
 // ---------------------------------------------------------------------------

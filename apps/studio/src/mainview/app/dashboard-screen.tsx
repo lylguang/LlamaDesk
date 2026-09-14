@@ -11,6 +11,7 @@ import {
   Loader2Icon,
   MemoryStickIcon,
   PlayIcon,
+  PowerIcon,
   RefreshCwIcon,
   ServerIcon,
   SquareIcon,
@@ -24,6 +25,7 @@ import { useRouter } from "@stores/router";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
 import { Spinner } from "@ui/spinner";
+import { Switch } from "@ui/switch";
 import { useT } from "@stores/ui-lang";
 import { useServedStore } from "@stores/served";
 import { useServerStore } from "@stores/server";
@@ -211,6 +213,15 @@ export function DashboardScreen() {
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["dashboard"] }),
   });
 
+  const saveAutoStart = useMutation({
+    mutationFn: (on: boolean) =>
+      rpcClient.updateSettings({ settings: { AUTO_START_SERVER: on ? "1" : "0" } }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["dashboard"] });
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    },
+  });
+
   if (isLoading || !data) {
     return (
       <div className="flex h-full items-center justify-center">
@@ -227,6 +238,7 @@ export function DashboardScreen() {
   const endpoint = `http://${host}:${port}`;
   const uptime = stats.serverStartedAt ? Date.now() - stats.serverStartedAt : 0;
   const busy = action.isPending;
+  const autoStart = (settings.AUTO_START_SERVER ?? "1") === "1";
 
   const statusPill = (
     <span
@@ -371,6 +383,20 @@ export function DashboardScreen() {
                 {data.serverError}
               </span>
             )}
+          </div>
+
+          {/* 启动行为跟着服务器走：与启停按钮同页，不再单开设置页。 */}
+          <div className="mt-4 flex items-center justify-between gap-3 border-t pt-3">
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <PowerIcon className="size-3.5" />
+              {t("settings.autoStart")}
+            </span>
+            <Switch
+              checked={autoStart}
+              disabled={saveAutoStart.isPending}
+              onCheckedChange={(on) => saveAutoStart.mutate(on)}
+              aria-label={t("settings.autoStart")}
+            />
           </div>
 
           {/* Throughput heartbeat */}

@@ -28,6 +28,8 @@ export const HELP_TEXT = `LlamaDesk — 本地大模型一体化桌面工作台�
   backup <子命令>      全局备份 / 恢复：list / create / inspect / restore
   status               查看服务器 / 网关状态
   server <action>      管理服务器：list | start | stop | restart | info | logs
+  logs                 查看统一应用日志（各子系统失败与关键事件都在这儿）
+  agent run <提示词>    无头跑一个 Agent 回合；--json 输出 NDJSON 事件流（供脚本消费）
   benchmark [model]    跑基准测速（本地引擎 / 云端 API），结果入库
   install              检查推理引擎依赖（llama.cpp / vLLM / SGLang / MLX）
   guide                打印完整使用手册（--md / --json / --lang en）
@@ -45,10 +47,31 @@ export const HELP_TEXT = `LlamaDesk — 本地大模型一体化桌面工作台�
   omi memory add "偏好用中文回答"     写入一条共享记忆
   omi backup create --out ~/Backups  把设置 / 技能 / 聊天 / 记忆等打包备份
   omi launch claude --model qwen3-4b  用当前模型启动 Claude Code
+  omi agent run "跑一遍测试并总结" --json  无头执行并把事件流交给脚本
 
 运行 'omi help <命令>' 查看单命令详情，'omi guide' 查看完整手册（含记忆接入与 code 加载）。`;
 
 export const CMD_HELP: Record<string, string> = {
+  agent: `无头跑一个 Agent 回合（对齐 Codex 的 codex exec）。
+
+用法：omi agent run <提示词> [选项]
+     echo "提示词" | omi agent run
+
+选项：
+  --json                输出 NDJSON 事件流（每行一个 JSON），供脚本消费
+  --chunks              在 --json 里连正文增量一起输出
+  --workspace <目录>     指定工作区（默认用应用里配置的那个）
+  --mode <模式>          agent（默认）| plan | goal
+  --conversation <id>   在已有会话里接着跑（默认新建一条）
+  --timeout <毫秒>       等待上限（默认 600000）
+
+说明：
+  会话照常落库（标题取提示词前 40 字），跑完可以在界面里打开继续追问。
+  无人值守：不会弹授权卡片，被策略拦下的动作直接以拒绝理由回到模型。
+
+示例：
+  omi agent run "把 README 的安装步骤补全"
+  omi agent run "跑测试并总结失败" --json | jq -r 'select(.type=="event") | .event.toolName'`,
   start: `启动 LlamaDesk 应用；未运行时自动拉起（安装路径或 --app-path）。
 
 用法：omi start [options]
@@ -212,6 +235,35 @@ actions:
   logs        打印服务器日志尾部（最近 200 行）
 
 子命令帮助：omi help server <action>`,
+  logs: `查看统一应用日志 —— 生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 /
+Agent 等子系统的失败与关键事件都记在同一份 app.log 里。
+
+用法：omi logs [options]
+
+选项：
+  --limit <n>       显示最近 n 条（默认 50）
+  --level <l>       只看该级别及以上：debug | info | warn | error
+  --source <s>      只看某个子系统：image | video | tts | asr | ocr | server |
+                    agent | download | gateway | media-server | client | app ...
+  --search <text>   消息 / 事件名 / 上下文包含该文本（报错原文、builtin…）
+  --event <name>    事件名包含该子串（如 generate.failed）
+  --verbose         额外打印结构化上下文（detail）；注意 -v 是全局的 --version
+  -f, --follow      持续跟踪（等同 tail -f；应用重启也不断）
+  --json            输出 JSON 数组（给脚本/Agent 用）
+  --path            只打印日志文件路径
+  --clear           清空当前日志（保留已轮转的历史文件）
+
+说明：
+  应用在运行时通过控制通道读取（含本次运行的全部现场）；应用没运行或已闪退时
+  直接读磁盘上的 <数据目录>/logs/app.log —— 排查"起不来"这类问题同样可用。
+  日志逐行 JSONL，2MB 轮转，保留最近 5 份（app-<时间戳>.log）。
+
+示例：
+  omi logs                         最近 50 条
+  omi logs --level error --limit 20
+  omi logs --source image --verbose       生图失败及原因
+  omi logs -f --source agent       跟踪 Agent 日志
+  omi logs --json | jq '.[].message'`,
   backup: `全局备份 / 恢复：把应用设置与云端模型、本地技能、提示词、聊天记录、
 记忆库、生成的音频 / 图片 / 视频打包成一个文件，换机或重装后恢复。
 

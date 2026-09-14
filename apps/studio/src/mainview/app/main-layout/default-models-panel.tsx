@@ -13,7 +13,9 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { ENGINE_SHORT_NAMES } from "@/shared/engines";
+import { modelNameFromRef } from "@/shared/modelscope";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import {
@@ -208,10 +210,16 @@ function ChatModelCard() {
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
   const activePath = settings?.LOCAL_MODEL_PATH ?? "";
-  const current = mode === "remote" ? apiModel || chatModel : activePath || chatModel;
 
   const options = modelsQuery.data?.models ?? [];
+  // 本地先认「正在用的那个实例」：值对上了下拉框才显示模型名，而不是把
+  // LOCAL_MODEL_PATH / MLX 的请求 id（绝对路径）当名字摆出来。
+  const currentLocal = options.find((o) => o.type === "local" && o.isActive);
+  const current =
+    mode === "remote" ? apiModel || chatModel : (currentLocal?.value ?? (activePath || chatModel));
   const currentOption = options.find((o) => o.value === current);
+  // 清单里没有的当前值（老数据 / 厂商那边删掉的模型）：本地同样收敛成模型名再展示。
+  const currentLabel = currentOption?.label ?? modelNameFromRef(current);
 
   const selectMutation = useMutation({
     mutationFn: (opt: { type: "local" | "api"; value: string }) => rpcClient.selectChatModel(opt),
@@ -287,7 +295,7 @@ function ChatModelCard() {
           {current && !currentOption && (
             <SelectGroup>
               <SelectItem value={current}>
-                <span className="truncate">{current}</span>
+                <span className="truncate">{currentLabel}</span>
                 <span className="truncate text-[10px] text-muted-foreground/70">
                   {t("defaults.current")}
                 </span>
@@ -364,6 +372,77 @@ function ChatModelCard() {
   );
 }
 
+/**
+ * 云模型默认值卡片（TTS / ASR / 生图 / OCR）：与功能页同一套选择器 ——
+ * 先选已启用的云厂商，再选该用途下的模型；地址与密钥来自厂商，卡片里不出现。
+ */
+function CloudModelCard({
+  title,
+  desc,
+  icon,
+  kind,
+  providerKey,
+  modelKey,
+}: {
+  title: string;
+  desc: string;
+  icon: ReactNode;
+  kind: "image" | "tts" | "asr" | "chat";
+  providerKey: string;
+  modelKey: string;
+}) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const s = data?.settings;
+  const savedProviderId = (s?.[providerKey as keyof typeof s] as string | undefined) ?? "";
+  const savedModel = (s?.[modelKey as keyof typeof s] as string | undefined) ?? "";
+
+  const [providerId, setProviderId] = useState(savedProviderId);
+  const [model, setModel] = useState(savedModel);
+  useEffect(() => setProviderId(savedProviderId), [savedProviderId]);
+  useEffect(() => setModel(savedModel), [savedModel]);
+
+  const save = useMutation({
+    mutationFn: (next: { providerId: string; model: string }) =>
+      rpcClient.updateSettings({
+        settings: { [providerKey]: next.providerId, [modelKey]: next.model },
+      }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+      queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
+    },
+  });
+
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border bg-card p-4 shadow-sm">
+      <div className="flex items-start gap-2.5">
+        <span className="mt-0.5 text-muted-foreground">{icon}</span>
+        <div className="min-w-0 flex-1">
+          <p className="text-sm font-medium">{title}</p>
+          <p className="mt-0.5 text-[11px] leading-snug text-muted-foreground">{desc}</p>
+        </div>
+      </div>
+      <CloudModelSelect
+        kind={kind}
+        providerId={providerId}
+        model={model}
+        size="sm"
+        onChange={(choice) => {
+          setProviderId(choice.providerId);
+          setModel(choice.model);
+          save.mutate(choice);
+        }}
+      />
+      {save.isError && <p className="text-[11px] text-destructive">{String(save.error)}</p>}
+      <p className="text-[10px] leading-snug text-muted-foreground">{t("cloud.where")}</p>
+    </div>
+  );
+}
+
 export function DefaultModelsPanel() {
   const t = useT();
   const queryClient = useQueryClient();
@@ -410,63 +489,40 @@ export function DefaultModelsPanel() {
           />
         </ModelCard>
 
-        <ModelCard
+        <CloudModelCard
           title={t("defaults.tts")}
           desc={t("defaults.ttsDesc")}
           icon={<AudioLinesIcon className="size-4" />}
-          value={s?.TTS_PROVIDER_MODEL ?? ""}
-          settingsKey="TTS_PROVIDER_MODEL"
-          fetchModels={() =>
-            rpcClient.listProviderModels({
-              base: s?.TTS_PROVIDER_BASE,
-              apiKey: s?.TTS_PROVIDER_API_KEY,
-              kind: "tts",
-            })
-          }
+          kind="tts"
+          providerKey="TTS_PROVIDER_ID"
+          modelKey="TTS_PROVIDER_MODEL"
         />
 
-        <ModelCard
+        <CloudModelCard
           title={t("defaults.asr")}
           desc={t("defaults.asrDesc")}
           icon={<MicIcon className="size-4" />}
-          value={s?.ASR_PROVIDER_MODEL ?? ""}
-          settingsKey="ASR_PROVIDER_MODEL"
-          fetchModels={() =>
-            rpcClient.listProviderModels({
-              base: s?.ASR_PROVIDER_BASE,
-              apiKey: s?.ASR_PROVIDER_API_KEY,
-              kind: "asr",
-            })
-          }
+          kind="asr"
+          providerKey="ASR_PROVIDER_ID"
+          modelKey="ASR_PROVIDER_MODEL"
         />
 
-        <ModelCard
+        <CloudModelCard
           title={t("defaults.image")}
           desc={t("defaults.imageDesc")}
           icon={<ImageIcon className="size-4" />}
-          value={s?.IMG_MODEL ?? ""}
-          settingsKey="IMG_MODEL"
-          fetchModels={() =>
-            rpcClient.listImageGenModels({
-              backend: "api",
-              base: s?.IMG_API_BASE,
-              apiKey: s?.IMG_API_KEY,
-            })
-          }
+          kind="image"
+          providerKey="IMG_PROVIDER_ID"
+          modelKey="IMG_MODEL"
         />
 
-        <ModelCard
+        <CloudModelCard
           title={t("defaults.ocr")}
           desc={t("defaults.ocrDesc")}
           icon={<ScanTextIcon className="size-4" />}
-          value={s?.OCR_PROVIDER_MODEL ?? ""}
-          settingsKey="OCR_PROVIDER_MODEL"
-          fetchModels={() =>
-            rpcClient.listOcrProviderModels({
-              base: s?.OCR_PROVIDER_BASE,
-              apiKey: s?.OCR_PROVIDER_API_KEY,
-            })
-          }
+          kind="chat"
+          providerKey="OCR_PROVIDER_ID"
+          modelKey="OCR_PROVIDER_MODEL"
         />
       </div>
 

@@ -951,13 +951,13 @@ export async function inspectBackup(params: {
     }
     await entry.discard();
   }
-  if (!manifest) throw new Error("不是有效的 OmniStudio 备份：缺少 manifest.json");
+  if (!manifest) throw new Error("不是有效的 LlamaDesk 备份：缺少 manifest.json");
   if (manifest.format !== BACKUP_FORMAT) throw new Error(`备份格式不匹配：${manifest.format}`);
   if (!Number.isInteger(manifest.version) || manifest.version < 1) {
     throw new Error("备份清单里的版本号不合法（文件可能已损坏）");
   }
   if (manifest.version > BACKUP_VERSION) {
-    throw new Error(`备份由更新版本的应用创建（v${manifest.version}），请先升级 OmniStudio`);
+    throw new Error(`备份由更新版本的应用创建（v${manifest.version}），请先升级 LlamaDesk`);
   }
   // 清单是归档里的 JSON：字段可能缺失或类型不对。这里一次挡掉，
   // 免得 `manifest.db.tables` 这种取值在恢复页渲染时变成 TypeError（整页白屏）。
@@ -1083,8 +1083,8 @@ export async function restoreBackup(params: RestoreBackupParams): Promise<Backup
 
   if (!ctx.connection && !hasAppSchema(ctx.dbPath)) {
     throw new Error(
-      "本机还没有 OmniStudio 数据库，恢复无法建表（它只做整表替换）。\n" +
-        "请先启动一次 OmniStudio 让它在本地初始化数据库，退出后再恢复；" +
+      "本机还没有 LlamaDesk 数据库，恢复无法建表（它只做整表替换）。\n" +
+        "请先启动一次 LlamaDesk 让它在本地初始化数据库，退出后再恢复；" +
         "或直接在应用内「设置 → 数据 → 备份与恢复」里恢复。",
     );
   }

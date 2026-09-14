@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, setDefaultTimeout, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
@@ -11,6 +11,11 @@ import { downloadWithResume, partialBytesFor, removePartialFiles } from "./downl
  *
  * 数据用 index % 251 生成，逐字节可校验；不依赖外网。
  */
+
+// 每个用例都在回环上真搬 20 MiB（有的还刻意给分片加间隔来制造中断窗口），
+// bun 默认的 5s 在负载高的 CI runner 上会偶发超时 —— 实测「服务器瞬时 503」
+// 就是因为 5002ms 撞线而挂。超时是上限、不是等待，跑得快的用例不受影响。
+setDefaultTimeout(30_000);
 
 function makeData(size: number): Uint8Array {
   const buf = new Uint8Array(size);
@@ -28,18 +33,16 @@ type ServerConfig = {
   stallOnce?: boolean;
   /** 卡死时长。 */
   stallOnceMs?: number;
+  /**
+   * 分片之间的间隔（毫秒）。回环 + 64KB 分片下，512KB 常在客户端处理第一次进度
+   * 回调之前就发完了，「下到一半中断」这类用例于是在快机器上随机失败；给分片之间
+   * 加一点间隔，中断点才是确定的。
+   */
+  chunkDelayMs?: number;
   /** 服务器忽略 Range，总是回 200 全量。 */
   ignoreRange?: boolean;
   /** 只让「从 0 开始的区间」失败（构造前缀分片失败的场景）。 */
   failFromZero?: boolean;
-  /**
-   * 每个 64KiB 块之间 `Bun.sleep` 这么久。测「下载到一半 abort」的用例必须开：
-   * start() 里同步 enqueue 会把整个响应体一次性排进队列（ReadableStream 无背压），
-   * abort 追不上已入队的数据。本地事件循环快、取消能插队；CI 调度下整文件会在
-   * 取消生效前下完，`0 < 已下 < 全量` 的断言就成了掷硬币。加一点节流让
-   * `onProgress` 的阈值稳定落在中途。
-   */
-  chunkDelayMs?: number;
   /** 统计。 */
   requests?: { ranges: string[]; total: number };
 };
@@ -81,8 +84,8 @@ function startServer(cfg: ServerConfig) {
                 first = false;
                 await Bun.sleep(cfg.stallOnceMs ?? 200);
               }
-              // 节流：让整条流按块下发，abort 才能稳定落在中途而不是下完之后。
-              if (cfg.chunkDelayMs) await Bun.sleep(cfg.chunkDelayMs);
+              // 分片间隔：让"下到一半中断"有确定的窗口（见 chunkDelayMs 注释）。
+              if (cfg.chunkDelayMs && offset <= to) await Bun.sleep(cfg.chunkDelayMs);
             }
             controller.close();
           },
@@ -176,9 +179,8 @@ describe("多路并发 + 断点续传", () => {
 
   test("暂停后重启：只请求缺失区间，不从头重下", async () => {
     const data = makeData(BIG);
-    // chunkDelayMs 让流按块下发：不节流的话整份 20MiB 会在一个微任务风暴里下完，
-    // abort 追不上，"部分下载"的前提不成立（CI 上就是这么翻车的）。
-    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
+    // 分片之间留间隔，取消才确定落在下载中途而不是整份下完之后（CI 上就是这么翻车的）。
+    const { server, requests } = startServer({ data, chunkDelayMs: 5 });
     servers.push(server);
     const dest = path.join(dir, "big.gguf");
 
@@ -216,7 +218,7 @@ describe("多路并发 + 断点续传", () => {
 describe("重试与容错", () => {
   test("服务器瞬时 503：自动重试后成功，不把任务判死", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data, failFirst: 2 });
+    const { server } = startServer({ data, failFirst: 2 });
     servers.push(server);
     const dest = path.join(dir, "retry.bin");
 
@@ -231,7 +233,7 @@ describe("重试与容错", () => {
   test("分片连接卡死（长时间无字节）：掐掉重连续传，最终完整", async () => {
     const data = makeData(BIG);
     // 首条请求卡死 250ms、空闲阈值 50ms → 客户端掐线重连，重连后正常下完。
-    const { server, requests } = startServer({ data, stallOnce: true, stallOnceMs: 250 });
+    const { server } = startServer({ data, stallOnce: true, stallOnceMs: 250 });
     servers.push(server);
     const dest = path.join(dir, "stall.bin");
 
@@ -246,7 +248,7 @@ describe("重试与容错", () => {
 
   test("服务器忽略 Range：自动回退单流，内容正确", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data, ignoreRange: true });
+    const { server } = startServer({ data, ignoreRange: true });
     servers.push(server);
     const dest = path.join(dir, "norange.bin");
 
@@ -261,7 +263,7 @@ describe("重试与容错", () => {
   test("Content-Range 与请求不符：不写坏数据，重试后仍失败要报错", async () => {
     const data = makeData(BIG);
     // 每个分片第一次都收到错区间；重试后正常 → 应该能救回来。
-    const { server, requests } = startServer({ data, wrongRangeOnce: true });
+    const { server } = startServer({ data, wrongRangeOnce: true });
     servers.push(server);
     const dest = path.join(dir, "wrongrange.bin");
 
@@ -278,7 +280,13 @@ describe("重试与容错", () => {
 describe("远端变化与旧格式", () => {
   test("远端文件大小变了：丢弃旧分片重下，不拼出坏文件", async () => {
     const first = makeData(BIG);
-    const { server: firstServer, requests: firstRequests } = startServer({ data: first });
+    // 分片之间留间隔：否则回环上这份文件可能在第一次进度回调之前就下完，取消落到
+    // 结束之后（sidecar 已被清理），「留下了续传信息」这条断言就会随机失败 ——
+    // 与「暂停后重启」是同一类 flake，CI 上实测挂过。
+    const { server: firstServer } = startServer({
+      data: first,
+      chunkDelayMs: 5,
+    });
     servers.push(firstServer);
     const dest = path.join(dir, "changed.bin");
 
@@ -393,7 +401,7 @@ describe("远端变化与旧格式", () => {
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);
-    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
+    const { server } = startServer({ data });
     servers.push(server);
     const dest = path.join(dir, "cleanup.bin");
 
@@ -415,8 +423,9 @@ describe("旁路数据管理", () => {
   test("小文件走单流也能断点续传", async () => {
     const size = 512 * 1024; // 低于并行门槛
     const data = makeData(size);
-    // 节流理由同上：不延迟的话 512KiB 一瞬下完，30% 的 abort 阈值形同虚设。
-    const { server, requests } = startServer({ data, chunkDelayMs: 1 });
+    // 分片之间留间隔：否则整个文件可能在第一次进度回调被处理前就发完了，
+    // 「中断」落到下载结束之后，断言随即随机失败（CI 上就是这样挂的）。
+    const { server, requests } = startServer({ data, chunkDelayMs: 25 });
     servers.push(server);
     const dest = path.join(dir, "small.json");
 
@@ -425,7 +434,7 @@ describe("旁路数据管理", () => {
       total: size,
       signal: ac.signal,
       onProgress: (p) => {
-        if (p.received > size * 0.3) ac.abort();
+        if (p.received > 0) ac.abort();
       },
     }).catch(() => undefined);
 

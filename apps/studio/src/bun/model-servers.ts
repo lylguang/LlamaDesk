@@ -17,6 +17,7 @@ import {
   type ModelFileKind,
 } from "../shared/modelscope";
 import type { ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
+import { logEvent } from "./app-log";
 
 export type { ServedModelInfo, ServedModelsSnapshot } from "../shared/served-models";
 
@@ -366,6 +367,15 @@ function attachListeners(entry: Entry) {
       }
       if (status === "error") {
         entry.info.error = runtime.getLastError() || "Server failed to start";
+        // 启动之后才挂掉的（OOM / 权重损坏 / 端口被抢）走这条：
+        // 此时日志缓冲里最后一屏就是根因，先记下错误行本身。
+        logEvent({
+          level: "error",
+          source: "server",
+          event: "served_model.crashed",
+          message: entry.info.error,
+          detail: { id: info.id, engine: info.engine, port: info.port, model: info.modelRef },
+        });
       }
       // 自己退出（进程挂了 / 被外部杀掉）：条目留着让 UI 显示原因；
       // 正常停止由 stopServedModel 负责摘除，这里不能抢先删。
@@ -468,12 +478,26 @@ export async function startServedModel(params: StartParams): Promise<StartServed
     if (!result.ok) {
       info.status = "error";
       info.error = result.error || "Failed to start server";
+      logEvent({
+        level: "error",
+        source: "server",
+        event: "served_model.start.failed",
+        message: info.error,
+        detail: { id, engine, port: info.port, model: info.modelRef, trigger: "startServedModel" },
+      });
       emitChangeNow();
       return { ok: false, error: info.error, model: getServedModel(id) };
     }
   } catch (e) {
     info.status = "error";
     info.error = e instanceof Error ? e.message : String(e);
+    logEvent({
+      level: "error",
+      source: "server",
+      event: "served_model.start.threw",
+      message: info.error,
+      detail: { id, engine, port: info.port, model: info.modelRef, error: e },
+    });
     emitChangeNow();
     return { ok: false, error: info.error, model: getServedModel(id) };
   }

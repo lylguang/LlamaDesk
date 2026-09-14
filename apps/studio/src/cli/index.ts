@@ -26,6 +26,8 @@ export const COMMANDS: Record<string, () => Promise<Handler>> = {
   "model-info": async () => (await import("./commands/models")).cmdModelInfo,
   status: async () => (await import("./commands/app")).cmdStatus,
   server: async () => (await import("./commands/app")).cmdServer,
+  logs: async () => (await import("./commands/logs")).cmdLogs,
+  agent: async () => (await import("./commands/agent")).cmdAgent,
   install: async () => (await import("./commands/install")).cmdInstall,
   guide: async () => (await import("./commands/guide")).cmdGuide,
   benchmark: async () => (await import("./commands/benchmark")).cmdBenchmark,

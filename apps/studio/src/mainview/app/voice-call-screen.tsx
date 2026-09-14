@@ -19,15 +19,7 @@ import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Markdown } from "@components/markdown";
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectLabel,
-  SelectTrigger,
-  SelectValue,
-} from "@ui/select";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import type { ChatMessage } from "../../bun/chat";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
@@ -36,14 +28,9 @@ import { useVoiceCallStore, type CallPhase } from "@stores/voice-call";
 import { useVoiceCallEngine } from "@hooks/use-voice-call";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-
-/** 云端实时模型（qwen-audio-agent 默认即 plus 档）。 */
-const REALTIME_MODEL_OPTIONS = [
-  "qwen-audio-3.0-realtime-plus",
-  "qwen-audio-3.0-realtime-flash",
-  "qwen3.5-omni-flash-realtime",
-  "qwen3.5-omni-plus-realtime",
-];
+// 只从 shared 取值：bun/realtime-voice.ts 会被主进程的 db / paths 拖进来，
+// 而 webview 里没有 os / fs，值导入它等于整页白屏（常量本身也不再重复一份）。
+import { DEFAULT_REALTIME_MODEL, REALTIME_MODELS } from "../../shared/realtime-voice";
 
 /**
  * 实时语音通话（电话式协作）：
@@ -212,8 +199,11 @@ function PreflightRow({
   );
 }
 
-/** 云端模式配置引导：步骤化引导 + 保存并测试连接（未配置时全量展开，已就绪后收成一行）。 */
-function CloudSetupGuide({ configured }: { configured: boolean }) {
+/**
+ * 云端模式配置引导：步骤化引导 + 保存并测试连接（未配置时全量展开，已就绪后收成一行）。
+ * 导出供回归测试直接渲染（厂商列表非空是曾经的崩溃条件，见 voice-call-screen.test.tsx）。
+ */
+export function CloudSetupGuide({ configured }: { configured: boolean }) {
   const t = useT();
   const queryClient = useQueryClient();
   const { data } = useQuery({
@@ -221,14 +211,25 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
     queryFn: () => rpcClient.voicecallGetProviderConfig(undefined),
   });
   const cfg = data?.config;
-  const [apiKey, setApiKey] = useState("");
+  // 旧版手填的 Key 仅作只读兜底：新配置一律从云厂商取。
+  const providersQuery = useQuery({
+    queryKey: ["cloud-providers"],
+    queryFn: () => rpcClient.cloudProviderList(undefined),
+  });
+  const providerList = providersQuery.data?.providers ?? [];
+  // 实时通话的密钥来自云厂商（与其它功能页一致），页面不再要求手填 Key。
+  // 必须声明在 selectedProvider 之前：下面 .find 的回调在本行执行前就会读到它。
+  const [providerId, setProviderId] = useState("");
+  const selectedProvider = providerList.find((p) => p.id === providerId) ?? null;
+  /** 主进程解析出来的 Key（厂商的 Key，或没选厂商时旧版手填的那个）。 */
+  const resolvedKey = cfg?.apiKey ?? "";
   const [baseUrl, setBaseUrl] = useState("");
   const [model, setModel] = useState("");
   const [voice, setVoice] = useState("");
   const [showForm, setShowForm] = useState(false);
   useEffect(() => {
     if (!cfg) return;
-    setApiKey(cfg.apiKey);
+    setProviderId(cfg.providerId);
     setBaseUrl(cfg.baseUrl);
     setModel(cfg.model);
     setVoice(cfg.voice);
@@ -236,7 +237,7 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
     // 把用户正在编辑的表单意外收起。是否展开只由用户操作决定。
   }, [cfg]);
   const saveMutation = useMutation({
-    mutationFn: (c: { apiKey?: string; baseUrl?: string; model?: string; voice?: string }) =>
+    mutationFn: (c: { providerId?: string; apiKey?: string; baseUrl?: string; model?: string; voice?: string }) =>
       rpcClient.voicecallSaveProviderConfig({ provider: "cloud", ...c }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["voicecall-provider-config"] });
@@ -253,14 +254,20 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
   const saveAndTest = async () => {
     setTestResult(null);
     try {
-      await saveMutation.mutateAsync({ apiKey, baseUrl, model, voice });
+      await saveMutation.mutateAsync({ providerId, baseUrl, model, voice });
     } catch (e) {
       setTestResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
       return;
     }
     setTesting(true);
     try {
-      const res = await rpcClient.voicecallTestRealtime({ apiKey, baseUrl, model, voice });
+      // 连接测试用厂商的 Key（主进程按 providerId 解析；这里传已解析好的值兜底）。
+      const res = await rpcClient.voicecallTestRealtime({
+        apiKey: selectedProvider?.apiKey ?? resolvedKey,
+        baseUrl,
+        model,
+        voice,
+      });
       setTestResult(res);
       if (res.ok) setShowForm(false);
     } finally {
@@ -307,14 +314,42 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
             <li>{t("voicecall.guideStep3")}</li>
           </ol>
           <div className="space-y-1">
-            <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudApiKey")}</Label>
-            <Input
-              type="password"
-              value={apiKey}
-              onChange={(e) => setApiKey(e.target.value)}
-              className="h-8 text-xs"
-              placeholder="sk-…"
-            />
+            <Label className="text-[11px] text-muted-foreground">{t("voicecall.cloudProvider")}</Label>
+            {/* 只列已启动的厂商：密钥从它取（启动时校验过），页面不再手填 API Key */}
+            <Select
+              value={providerId || undefined}
+              onValueChange={(v) => {
+                setProviderId(v);
+                const p = providerList.find((x) => x.id === v);
+                // 顺手把该厂商的实时对话模型填上（有的话），省一步选择。
+                const realtime = p?.models.find((m) => m.id === DEFAULT_REALTIME_MODEL);
+                if (realtime) setModel(realtime.id);
+              }}
+            >
+              <SelectTrigger size="sm" className="h-8 text-xs">
+                <SelectValue placeholder={t("cloud.pick.vendor")} />
+              </SelectTrigger>
+              <SelectContent position="popper" align="start" sideOffset={4}>
+                {/* 实时接口是 DashScope 专有的：百炼厂商排前面，其它厂商排在后面
+                    （自建中转同样可用，只是需要用户自己确认是百炼的 Key）。 */}
+                {providerList
+                  .filter((p) => p.enabled)
+                  .sort(
+                    (a, b) =>
+                      Number(!/dashscope|aliyuncs/i.test(a.baseUrl)) -
+                      Number(!/dashscope|aliyuncs/i.test(b.baseUrl)),
+                  )
+                  .map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      <span className="truncate">{p.name}</span>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground">{t("cloud.where")}</p>
+            {!selectedProvider && resolvedKey ? (
+              <p className="text-[10px] text-amber-600">{t("voicecall.cloudKeyLegacy")}</p>
+            ) : null}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div className="space-y-1">
@@ -324,7 +359,12 @@ function CloudSetupGuide({ configured }: { configured: boolean }) {
                   <SelectValue placeholder={t("voicecall.cloudModel")} />
                 </SelectTrigger>
                 <SelectContent position="popper" align="start" sideOffset={4}>
-                  {REALTIME_MODEL_OPTIONS.map((m) => (
+                  {[
+                    ...new Set([
+                      ...(selectedProvider?.models.map((m) => m.id) ?? []),
+                      ...REALTIME_MODELS,
+                    ]),
+                  ].map((m) => (
                     <SelectItem key={m} value={m}>
                       <span className="truncate">{m}</span>
                     </SelectItem>

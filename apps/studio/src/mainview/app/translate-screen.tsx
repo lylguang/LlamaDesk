@@ -28,7 +28,6 @@ import { useT } from "@stores/ui-lang";
 import { useTranslateStore } from "@stores/translate";
 import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { cn } from "@/mainview/lib/utils";
-import type { TranslationRecordRow } from "../../bun/translate";
 import { LiveTranslateTab } from "./live-translate";
 import {
   TRANSLATION_LANGUAGES,
@@ -64,7 +63,6 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
   const mode = settings?.SERVER_MODE ?? "local";
   const chatModel = settings?.CHAT_MODEL ?? "";
   const apiModel = settings?.VLLM_MODEL_NAME ?? "";
-  const activePath = settings?.LOCAL_MODEL_PATH ?? "";
   const engineKey = isGoogle ? "google" : "model";
 
   const allOptions = modelsQuery.data?.models ?? [];
@@ -76,6 +74,17 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
       (o.state === "running" || o.state === "starting" || o.state === "downloading"),
   );
   const apiOptions = allOptions.filter((o) => o.type === "api");
+  // 云端模型按厂商分组：先认厂商名（可同时启用多个），再选它下面的模型。
+  const apiGroups = (() => {
+    const groups = new Map<string, { name: string; items: typeof apiOptions }>();
+    for (const o of apiOptions) {
+      const key = o.providerId ?? o.providerName ?? "";
+      const group = groups.get(key);
+      if (group) group.items.push(o);
+      else groups.set(key, { name: o.providerName ?? t("chat.modelApi"), items: [o] });
+    }
+    return [...groups.entries()];
+  })();
   const current =
     mode === "remote"
       ? apiOptions.find((o) => o.isActive)?.value ?? apiModel ?? chatModel ?? ""
@@ -191,21 +200,21 @@ export function TranslationEnginePicker({ disabled }: { disabled?: boolean }) {
                     ))}
                 </SelectGroup>
               )}
-              {apiOptions.length > 0 && (
-                <SelectGroup>
-                  <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-                  {apiOptions.map((o) => (
-                      <SelectItem key={`api-${o.value}`} value={o.value}>
-                        <span className="truncate">{o.label}</span>
-                        {o.detail && (
-                          <span className="truncate text-[10px] text-muted-foreground/70">
-                            {o.detail}
-                          </span>
-                        )}
-                      </SelectItem>
-                    ))}
+              {apiGroups.map(([key, group]) => (
+                <SelectGroup key={`api-group-${key}`}>
+                  <SelectLabel>{group.name}</SelectLabel>
+                  {group.items.map((o) => (
+                    <SelectItem key={`api-${o.providerId ?? "x"}-${o.value}`} value={o.value}>
+                      <span className="truncate">{o.label}</span>
+                      {o.detail && (
+                        <span className="truncate text-[10px] text-muted-foreground/70">
+                          {o.detail}
+                        </span>
+                      )}
+                    </SelectItem>
+                  ))}
                 </SelectGroup>
-              )}
+              ))}
               {localOptions.length === 0 && apiOptions.length === 0 && (
                 <div className="px-2 py-3 text-center text-xs text-muted-foreground">
                   {t("chat.modelEmpty")}

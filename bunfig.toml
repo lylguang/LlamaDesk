@@ -1,0 +1,10 @@
+# 从**仓库根目录**跑 `bun test` 时也要隔离数据目录。
+#
+# 隔离脚本本来只挂在 apps/studio/bunfig.toml 上，于是 `bun run test`（走
+# apps/studio）是安全的，但直接在根目录敲 `bun test` 不会加载它 —— db/index.ts
+# 在 import 阶段就打开并迁移 SQLite，测试会直接写开发者真实的
+# `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>/`：实测出现过
+# 云端厂商测试在 dev 库里建出 `127.0.0.1`（地址指向应用自己的网关）这类孤儿行。
+# 两个入口指向同一份脚本，避免再各写一份。
+[test]
+preload = ["./apps/studio/test-preload.ts"]

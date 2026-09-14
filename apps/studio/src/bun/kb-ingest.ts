@@ -30,6 +30,7 @@ import { chunkContentHash, contextText, splitIntoChunksWithMeta } from "./kb-chu
 import { peekKbIndex } from "./kb-index";
 import { recordKbEvent } from "./kb-events";
 import { getSetting, getActiveServerPort } from "./db/settings";
+import * as CloudProviders from "./cloud-providers";
 import { convertFileToImages, generate, type ModelEndpoint } from "./vllm";
 import { getLocalModelName } from "./vllm/model";
 import type { KbIngestJobView } from "../shared/knowledge";
@@ -65,13 +66,15 @@ const KB_TEXT_FILE_RE =
   /\.(txt|md|markdown|json|csv|tsv|log|xml|yml|yaml|html?|htm|js|jsx|ts|tsx|mjs|cjs|css|scss|less|py|rb|rs|go|java|kt|swift|c|h|cpp|hpp|cs|php|sh|bash|zsh|toml|ini|cfg|conf|sql|vue|svelte|graphql|proto)$/i;
 const KB_TEXT_MAX_BYTES = 16 * 1024 * 1024;
 
-/** PDF/图片走 VLM OCR：优先 OCR 页配置的远程服务，其次全局（本地推理/云服务商）。 */
+/** PDF/图片走 VLM OCR：优先 OCR 页选中的云厂商，其次全局（本地推理/云服务商）。 */
 function ocrEndpoint(): ModelEndpoint {
-  const ocrBase = (getSetting("OCR_PROVIDER_BASE") || "").trim();
+  // 地址与密钥统一来自服务商（OCR 页只选厂商 + 模型）。
+  const ocrProvider = CloudProviders.resolveCloudProvider(getSetting("OCR_PROVIDER_ID"));
+  const ocrBase = ocrProvider?.baseUrl.trim() ?? "";
   if (ocrBase) {
     return {
       base: ocrBase,
-      apiKey: (getSetting("OCR_PROVIDER_API_KEY") || "").trim(),
+      apiKey: (ocrProvider?.apiKey ?? "").trim(),
       model: (getSetting("OCR_PROVIDER_MODEL") || "").trim() || undefined,
     };
   }
@@ -110,7 +113,7 @@ async function extractWebText(url: string): Promise<string> {
     signal: AbortSignal.timeout(30_000),
     headers: {
       "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 OmniStudio/1.0",
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36 LlamaDesk/1.0",
       Accept: "text/html,application/xhtml+xml",
     },
     redirect: "follow",

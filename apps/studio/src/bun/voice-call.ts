@@ -1,6 +1,5 @@
 import { eq, asc } from "drizzle-orm";
 import path from "path";
-import { appendFileSync } from "fs";
 
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
@@ -10,6 +9,7 @@ import { getTTSProviderConfig, synthesizeCallSpeech } from "./voice";
 import { isTtsLocalActive } from "./tts-local";
 import { createConversation, getChatBaseUrl, streamChatTurn, type Conversation } from "./chat";
 import { getChatModelLabel } from "./chat-model";
+import { logEvent } from "./app-log";
 import {
   RealtimeVoiceClient,
   getVoiceCallProvider,
@@ -68,14 +68,9 @@ type Listener = (msg: VoiceCallOutgoing) => void;
 
 const listeners = new Set<Listener>();
 
-/** 通话调试日志（便于排查无声音输出）。 */
-const CALL_LOG = "/tmp/omni-voicecall.log";
+/** 通话调试日志：进统一日志（`logs/app.log`，source=tts、event=voicecall）。 */
 function callLog(line: string): void {
-  try {
-    appendFileSync(CALL_LOG, `[${new Date().toISOString()}] ${line}\n`);
-  } catch {
-    // 日志失败不影响主流程
-  }
+  logEvent({ level: "debug", source: "tts", event: "voicecall", message: line });
 }
 
 export function onVoiceCallEvent(cb: Listener): () => void {

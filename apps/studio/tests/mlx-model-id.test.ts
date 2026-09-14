@@ -109,11 +109,14 @@ describe("MLX 请求模型 id", () => {
     }
   });
 
-  test("远端模式不换算（id 就是云端模型 id）", async () => {
+  test("远端模式不换算：云端请求填的是云端模型名，不看还在跑的本地模型", async () => {
     await withSettings(
       {
         SERVER_MODE: "remote",
-        CHAT_MODEL: "deepseek-chat",
+        VLLM_MODEL_NAME: "deepseek-chat",
+        // 本地激活留下的旧值（切云端不会清它）：当云端模型名发出去就是
+        // 「Model does not exist」。
+        CHAT_MODEL: "/tmp/whatever",
         INFERENCE_ENGINE: "mlx",
         LOCAL_MODEL_PATH: "/tmp/whatever",
       },
@@ -133,6 +136,8 @@ describe("MLX 请求模型 id", () => {
       await withSettings(
         {
           SERVER_MODE: "remote",
+          // 云端模型名显式留空：这条例子的场景就是「没配云端模型」
+          VLLM_MODEL_NAME: "",
           CHAT_MODEL: "",
           LOCAL_MODEL_PATH: repoDir,
           LOCAL_MODEL_NAME: "my-mlx-4bit",
@@ -141,7 +146,7 @@ describe("MLX 请求模型 id", () => {
         () => {
           // 本地 id 不看 SERVER_MODE：已确定走本地的调用（网关）也能拿到它
           expect(getLocalRequestModelId()).toBe(repoDir);
-          // 而按当前模式取名字仍然照旧（云端模式 + 没配 CHAT_MODEL → 空）
+          // 而按当前模式取名字仍然照旧（云端模式 + 没配云端模型 → 空）
           expect(getChatRequestModelId()).toBe("");
         },
       );

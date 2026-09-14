@@ -154,17 +154,54 @@ function assertFileOk(row: VideoRecordRow, label: string) {
   check(`${label}: 落盘内容正确`, existsSync(abs) && Buffer.compare(readFileSync(abs), Buffer.from(FAKE_MP4)) === 0);
 }
 
+/**
+ * 云端生视频的配置方式是「厂商 + 模型」：这里建两行服务商（MiniMax / Seedance 协议），
+ * 后面切后端只需要把 VIDEO_PROVIDER_ID 指到对应厂商 —— 与界面上的选择一致。
+ */
+async function seedCloudProvider(input: {
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  videoApi: "minimax" | "seedance";
+  model: string;
+}): Promise<string> {
+  const CloudProviders = await import("../src/bun/cloud-providers");
+  const created = CloudProviders.createCloudProvider({ name: input.name, baseUrl: input.baseUrl });
+  const id = created.id!;
+  CloudProviders.updateCloudProvider(id, {
+    apiKey: input.apiKey,
+    videoApi: input.videoApi,
+    models: [{ id: input.model, type: "video" }],
+  });
+  return id;
+}
+
 async function main() {
   const VideoGen = (await import("../src/bun/video-gen")) as typeof VideoGenT;
   const { updateSettings } = await import("../src/bun/db/settings");
   const imageServer = await import("../src/bun/image-server");
   getImagesBaseDir = imageServer.getImagesBaseDir;
 
+  // 两个厂商（MiniMax 协议 / Seedance 协议），模型清单里各有一个生视频模型。
+  const minimaxProvider = await seedCloudProvider({
+    name: "MiniMax（冒烟）",
+    baseUrl: `http://localhost:${minimax.port}`,
+    apiKey: "test-key",
+    videoApi: "minimax",
+    model: "MiniMax-H3",
+  });
+  const seedanceProvider = await seedCloudProvider({
+    name: "Seedance（冒烟）",
+    baseUrl: `http://localhost:${seedance.port}/api/v3`,
+    apiKey: "ark-test",
+    videoApi: "seedance",
+    model: "doubao-seedance-1-0-pro-t2v-250528",
+  });
+
   updateSettings({
-    VIDEO_BACKEND: "minimax",
-    VIDEO_MINIMAX_BASE: `http://localhost:${minimax.port}`,
-    VIDEO_MINIMAX_API_KEY: "test-key",
-    VIDEO_MINIMAX_MODEL: "MiniMax-H3",
+    VIDEO_BACKEND: "cloud",
+    VIDEO_PROVIDER_ID: minimaxProvider,
+    VIDEO_MODEL: "MiniMax-H3",
   });
 
   // ---------- MiniMax ----------
@@ -199,10 +236,9 @@ async function main() {
   // ---------- Seedance ----------
   console.log("Seedance 链路：");
   updateSettings({
-    VIDEO_BACKEND: "seedance",
-    VIDEO_SEEDANCE_BASE: `http://localhost:${seedance.port}/api/v3`,
-    VIDEO_SEEDANCE_API_KEY: "ark-test",
-    VIDEO_SEEDANCE_MODEL: "doubao-seedance-1-0-pro-t2v-250528",
+    VIDEO_BACKEND: "cloud",
+    VIDEO_PROVIDER_ID: seedanceProvider,
+    VIDEO_MODEL: "doubao-seedance-1-0-pro-t2v-250528",
   });
   {
     const r = await VideoGen.submitVideoGeneration({

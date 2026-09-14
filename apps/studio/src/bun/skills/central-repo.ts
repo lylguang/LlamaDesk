@@ -18,6 +18,7 @@ import {
   SKILLS_META_DIR,
 } from "../../shared/skills";
 import { isSkillDir, parseSkillMd } from "./metadata";
+import { safeJoin, safeName } from "../path-safety";
 
 /** 中央库根目录（git 备份仓库根）。 */
 export function getCentralRepoDir(): string {
@@ -35,6 +36,18 @@ export function expandHome(p: string): string {
 /** 中央库存放技能的目录。 */
 export function getSkillsDir(): string {
   return getCentralRepoDir();
+}
+
+/**
+ * 中央库里某个技能的目录。非法 id 返回 null。
+ *
+ * skillId 会从 webview（同步 / 卸载 / 读文档）、DB 行、远端仓库一路流到文件系统：
+ * 不校验就是让 `../../..` 把"同步技能"变成把软链 / 拷贝写到任意目录，
+ * 卸载与重推时还会先 rmSync 目标目录（递归）。同目录名之外的输入一律拒绝。
+ */
+export function centralSkillDir(skillId: string): string | null {
+  const id = safeName(skillId);
+  return id ? safeJoin(getCentralRepoDir(), id) : null;
 }
 
 /** 跨设备元数据目录（随 git 提交）。 */

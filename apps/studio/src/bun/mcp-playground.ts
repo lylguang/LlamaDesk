@@ -1,5 +1,5 @@
 /**
- * OmniStudio MCP 调试工作台（浏览器打开 GET /mcp 即得）。
+ * LlamaDesk MCP 调试工作台（浏览器打开 GET /mcp 即得）。
  *
  * 参照 FastMCP Playground / MCP Inspector 的形态：连接 → 枚举工具 →
  * 按 inputSchema 生成表单 → 调用 → 查看结果；附原始 JSON-RPC 控制台。
@@ -12,9 +12,9 @@ export function mcpPlaygroundHtml(): string {
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>OmniStudio MCP Playground</title>
+<title>LlamaDesk MCP Playground</title>
 <style>
-  /* 与 OmniStudio 客户端同源的设计令牌（src/mainview/styles/index.css 的 oklch 值），
+  /* 与 LlamaDesk 客户端同源的设计令牌（src/mainview/styles/index.css 的 oklch 值），
      并跟随系统深浅色 —— 单色调、Plus Jakarta Sans、0.625rem 圆角体系。 */
   :root {
     --background: oklch(1 0 0);
@@ -105,7 +105,7 @@ export function mcpPlaygroundHtml(): string {
 <body>
 <header>
   <span class="dot" id="dot"></span>
-  <h1>OmniStudio MCP Playground</h1>
+  <h1>LlamaDesk MCP Playground</h1>
   <span class="badge" id="endpoint"></span>
   <span class="badge" id="server" style="display:none"></span>
   <div class="keybox">

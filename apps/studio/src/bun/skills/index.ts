@@ -11,6 +11,7 @@ import {
   stopCentralWatch,
   getCentralRepoDir,
   getCentralInfo,
+  centralSkillDir,
   onCentralChanged,
   muteSelfWrites,
   setCentralRepoPath,
@@ -73,8 +74,10 @@ import {
 } from "./projects";
 import { dirSizeBytes } from "./metadata";
 import { listSkillRows } from "./store";
+import { seedBuiltinSkills } from "../builtin-skills";
 
 export { listSkillRows };
+export { seedBuiltinSkills, BUILTIN_SKILLS_DIR, listBundledSkillIds } from "../builtin-skills";
 
 /** 安装进度订阅（rpc 的 initSkillsBroadcast 用）。 */
 export function onInstallProgressForRpc(fn: (p: import("../../shared/skills").SkillsInstallProgress) => void) {
@@ -85,6 +88,8 @@ export function onInstallProgressForRpc(fn: (p: import("../../shared/skills").Sk
 export function initSkills() {
   ensureCentralRepo();
   cleanupTmp();
+  // 内置技能先播种，再做索引 —— 顺序反了首启要等下一次扫描才看得到。
+  seedBuiltinSkills();
   // 首次：目录里有技能但 DB 空（比如接管已有 ~/.agents/skills）→ 收编。
   reindexCentralRepo();
   ensurePresetReady();
@@ -111,7 +116,8 @@ export function listSkills(): ManagedSkill[] {
 
 /** 技能 SKILL.md 文档。 */
 export function getSkillDoc(skillId: string): { markdown: string } | null {
-  const dir = join(getCentralRepoDir(), skillId);
+  const dir = centralSkillDir(skillId);
+  if (!dir) return null;
   for (const marker of ["SKILL.md", "skill.md"]) {
     const p = join(dir, marker);
     if (existsSync(p)) {
@@ -215,6 +221,7 @@ export {
   ensureCentralRepo,
   reindexCentralRepo,
   getCentralRepoDir,
+  centralSkillDir,
   onCentralChanged,
   muteSelfWrites,
   setCentralRepoPath,

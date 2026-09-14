@@ -30,7 +30,11 @@ async function getMainViewUrl(): Promise<string> {
     const DEV_SERVER_PORT = 5173;
     const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
     try {
-      await fetch(DEV_SERVER_URL, { method: "HEAD" });
+      // 必须校验响应本身，不能只看 fetch 有没有抛：系统/代理软件（Clash 等）会让
+      // 未监听的端口也返回 502/代理错误页，fetch 照样 resolve。这里若误判成"HMR 可用"，
+      // webview 就指向一个错误页，整个界面白屏。
+      const res = await fetch(DEV_SERVER_URL, { method: "HEAD" });
+      if (!res.ok) throw new Error(`status ${res.status}`);
       console.log(`HMR enabled: Using Vite dev server at ${DEV_SERVER_URL}`);
       return DEV_SERVER_URL;
     } catch {

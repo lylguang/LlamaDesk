@@ -15,7 +15,7 @@ export const MEMORY_MCP_TOOLS = [
     name: "memory_search",
     description:
       "Search the user's shared long-term memory (facts, preferences, past decisions, lessons), ranked by relevance, importance and freshness. " +
-      "Shared across OmniStudio and all connected CLI agents.",
+      "Shared across LlamaDesk and all connected CLI agents.",
     inputSchema: {
       type: "object",
       properties: {

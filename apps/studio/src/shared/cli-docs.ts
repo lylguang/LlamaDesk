@@ -112,10 +112,12 @@ export const CLI_SECTIONS: CliSection[] = [
       {
         cmd: "OMNI_DATA_DIR=<数据目录> omi models",
         zh:
-          "默认自动探测最新使用过的 channel 数据目录（macOS：~/Library/Application Support/com.lylguang.llamadesk/<channel>）。" +
+          "默认自动探测数据目录：先找正在运行的实例（真的 ping 控制通道，从源码 / build/ 里跑的 dev、canary 包也算），" +
+          "没有则取最近用过的 channel（macOS：~/Library/Application Support/com.lylguang.llamadesk/<channel>）。" +
           "无头 / 多份数据时用 OMNI_DATA_DIR 指定目录，OMNI_DB_PATH 可再单独指定数据库文件。",
         en:
-          "By default omi auto-detects the most recently used channel data directory (macOS: ~/Library/Application Support/com.lylguang.llamadesk/<channel>). " +
+          "The data directory is auto-detected: first the running instance (the control channel is actually pinged, so dev/canary builds run from source or build/ count too), " +
+          "otherwise the most recently used channel (macOS: ~/Library/Application Support/com.lylguang.llamadesk/<channel>). " +
           "For headless setups or multiple profiles, point OMNI_DATA_DIR at a directory; OMNI_DB_PATH overrides the database file alone.",
       },
     ],
@@ -161,6 +163,32 @@ export const CLI_SECTIONS: CliSection[] = [
           { cmd: "omi server list", zh: "可用引擎清单（● 为活动引擎）。", en: "Engine list with ● marking the active one." },
           { cmd: "omi server info", zh: "引擎 / 状态 / PID / 地址。", en: "Engine, status, PID and address." },
           { cmd: "omi server logs", zh: "最近 200 行服务器日志，排错先看这里。", en: "Last 200 log lines — the first place to look when debugging." },
+        ],
+      },
+      {
+        cmd: "omi logs [--level] [--source] [--search] [-f] [--json]",
+        zh:
+          "查看统一应用日志：生图 / 生视频 / 语音 / OCR / 推理服务器 / 下载 / 网关 / Agent 等子系统的失败" +
+          "与关键事件都记在同一份 logs/app.log 里（逐行 JSONL，2MB 轮转，密钥自动脱敏）。" +
+          "应用在运行时读内存 + 文件；应用没运行或已闪退时直接读磁盘 —— 排查「应用起不来」同样可用。",
+        en:
+          "Read the unified app log: failures and key events from image/video/TTS/ASR/OCR, the inference server, downloads, the gateway and the Agent all land in one logs/app.log (JSONL, 2 MB rotation, secrets redacted). " +
+          "Reads memory + file while the app runs, and the file alone when it is down — so it still works for crash triage.",
+        notes: [
+          {
+            zh: "按子系统过滤：--source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …",
+            en: "Filter by subsystem: --source image | video | tts | asr | ocr | server | agent | download | gateway | client | app …",
+          },
+          {
+            zh: "--verbose 打印结构化上下文（后端、模型、地址、堆栈）；-f 持续跟踪，让用户复现时实时看。",
+            en: "--verbose prints structured context (backend, model, address, stack); -f follows live while the user reproduces.",
+          },
+        ],
+        examples: [
+          { cmd: "omi logs --level error --limit 50 -v", zh: "最近 50 条错误及完整上下文。", en: "The last 50 errors with full context." },
+          { cmd: "omi logs --source image --verbose", zh: "生图失败的原因（后端 / 模型 / 提示词）。", en: "Why image generation failed (backend, model, prompt)." },
+          { cmd: "omi logs -f --source agent", zh: "跟踪 Agent 运行日志。", en: "Follow the Agent log live." },
+          { cmd: "omi logs --json", zh: "输出 JSON，交给脚本或 Agent 分析。", en: "JSON output for scripts or agents." },
         ],
       },
     ],
@@ -259,6 +287,51 @@ export const CLI_SECTIONS: CliSection[] = [
         cmd: "omi benchmark --list",
         zh: "列出最近 20 条测速记录（ID / 时间 / 模型 / 平均 TPS / 耗时）；应用里的「基准测试」页有完整历史与图表。",
         en: "List the 20 most recent speed records (id, time, model, average TPS, duration); the in-app Benchmark page has the full history and charts.",
+      },
+    ],
+  },
+  {
+    id: "agent",
+    titleZh: "无头执行：跑一次 Agent 回合",
+    titleEn: "Headless run: one agent turn",
+    descZh:
+      "给脚本、CI、编辑器插件用的入口：跑一个无人值守的 Agent 回合，拿到最终回答或事件流。会话照常落库，跑完可以在界面里打开继续追问。",
+    descEn:
+      "For scripts, CI and editor plugins: run one unattended agent turn and get the final answer or an event stream. The session is persisted, so you can open it in the app afterwards.",
+    entries: [
+      {
+        cmd: "omi agent run <提示词> [--workspace <目录>] [--mode agent|plan|goal]",
+        zh: "跑一次无头回合并打印最终回答（默认模式 agent）。--workspace 指定工作区，--mode 选模式；--conversation <id> 可以接着已有会话往下跑。提示词也能从管道读进来（`echo \"…\" | omi agent run`）。",
+        en: "Run one headless turn and print the final answer (agent mode by default). --workspace picks the workspace, --mode the mode, and --conversation <id> continues an existing session. The prompt can also come from a pipe.",
+        examples: [
+          {
+            cmd: 'omi agent run "把 README 的安装步骤补全"',
+            zh: "在当前工作区跑一次，打印它最终的回答。",
+            en: "Run once in the current workspace and print the final answer.",
+          },
+          {
+            cmd: 'omi agent run "继续" --conversation 12 --mode plan',
+            zh: "接着 12 号会话、用 plan 模式再跑一轮。",
+            en: "Continue session 12 in plan mode.",
+          },
+        ],
+      },
+      {
+        cmd: "omi agent run <提示词> --json [--chunks]",
+        zh: "输出 NDJSON：每行一个 JSON（`start` / `event` 轨迹事件 / `result` 最终结果；加 --chunks 还有正文增量）。给脚本边跑边消费 —— 比如 `jq -r 'select(.type==\"event\") | .event.toolName'` 实时看它在调什么工具。",
+        en: "Emit NDJSON: one JSON per line (start / event / result, plus content deltas with --chunks) so scripts can consume the run as it happens, e.g. watch tool calls with jq.",
+        examples: [
+          {
+            cmd: `omi agent run "跑测试并总结失败原因" --json | jq -r 'select(.type=="event") | .event.toolName'`,
+            zh: "实时打印这一轮用到的工具名。",
+            en: "Print the tools used during the turn, live.",
+          },
+        ],
+      },
+      {
+        cmd: "  --timeout <毫秒>",
+        zh: "等待上限（默认 600000，即 10 分钟）。到点客户端停止等待并退出非零，应用侧的回合仍会跑完并落库。",
+        en: "Client-side wait limit (default 600000 ms). On timeout the client stops waiting and exits non-zero; the turn still finishes in the app and is persisted.",
       },
     ],
   },

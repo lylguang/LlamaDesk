@@ -1273,7 +1273,7 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
 } {
   const data = payload as Partial<KbExportPayload> | null;
   if (!data || typeof data !== "object" || data.format !== KB_EXPORT_FORMAT) {
-    throw new Error("不是 OmniStudio 知识库导出文件");
+    throw new Error("不是 LlamaDesk 知识库导出文件");
   }
   if (typeof data.version !== "number" || data.version > KB_EXPORT_VERSION) {
     throw new Error(`导出文件版本过新（${String(data.version)}），请先升级应用`);

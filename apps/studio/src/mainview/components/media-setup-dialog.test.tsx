@@ -53,6 +53,8 @@ mock.module("@lib/rpc", () => ({
   rpcClient: {
     scanMediaSetupCandidates: async () => ({ candidates: [] }),
     resolveMediaSetup: async () => ({ ok: true }),
+    // 弹窗里的「厂商 → 模型」选择器要读云服务商列表（这里给空表：走"去设置配置"分支）。
+    cloudProviderList: async () => ({ providers: [], activeId: null }),
     getMlxGenStatus: async () => ({ supported: true, engineInstalled: true }),
     getDownloadedMlxModels: async () => ({ downloaded: [] }),
     downloadMlxGenEngine: async () => ({ ok: true }),
@@ -103,7 +105,7 @@ test("choose-model 弹窗列出扫描到的模型，并给出确认 / 取消", a
     reason: "choose-model",
     message: "生图后端已就绪，扫描到 2 个可用模型，请确认用哪个生图。",
     backend: "api",
-    config: { apiBase: "http://127.0.0.1:9/v1", apiKey: "", comfyBase: "", model: "" },
+    config: { providerId: "", comfyBase: "", model: "" },
     candidates: [
       { id: "flux-dev", label: "flux-dev", ready: true },
       { id: "sdxl-turbo", label: "sdxl-turbo", note: "快速出图", ready: true },
@@ -127,23 +129,28 @@ test("choose-model 弹窗列出扫描到的模型，并给出确认 / 取消", a
   expect(text).not.toContain("media.setup.");
 });
 
-test("missing-config 弹窗给出地址输入、API Key 与扫描按钮", async () => {
+test("missing-config 弹窗给的是厂商选择器（不再让用户填地址与密钥）", async () => {
   useMediaSetupStore.getState().setRequest({
     id: "req-2",
     kind: "image",
     reason: "missing-config",
-    message: "生图后端是「OpenAI 兼容 API」，但还没填写服务地址（Base URL）。",
+    message: "生图后端是云端模型，但还没选定云厂商。",
     backend: "api",
-    config: { apiBase: "", apiKey: "", comfyBase: "", model: "" },
+    config: { providerId: "", comfyBase: "", model: "" },
     candidates: [],
-    backends: [{ id: "api", labelKey: "image.backend.cloud", ready: false, note: "未填服务地址" }],
+    backends: [{ id: "api", labelKey: "image.backend.cloud", ready: false, note: "还没启用云厂商" }],
   });
 
   const text = await renderDialog();
   expect(text).toContain(zh("media.setup.image.title.missing-config"));
-  expect(text).toContain(zh("image.config.base"));
-  expect(text).toContain(zh("image.config.apiKey"));
+  // 云端分支：厂商 / 模型两个选择器 + 空厂商时的「去设置」入口。
+  expect(text).toContain(zh("cloud.pick.vendor"));
+  expect(text).toContain(zh("cloud.pick.model"));
+  expect(text).toContain(zh("cloud.pick.configure"));
   expect(text).toContain(zh("media.setup.scan"));
   expect(text).toContain(zh("media.setup.waiting"));
+  // 页面里不再出现地址 / 密钥输入与相关文案。
+  expect(text).not.toContain(zh("image.config.base"));
+  expect(text).not.toContain(zh("image.config.apiKey"));
   expect(text).not.toContain("media.setup.");
 });

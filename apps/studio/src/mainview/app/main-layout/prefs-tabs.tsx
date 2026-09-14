@@ -1,90 +1,13 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { CheckIcon, LanguagesIcon, PaletteIcon, SlidersHorizontalIcon } from "lucide-react";
+import { CheckIcon, LanguagesIcon, PaletteIcon } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Spinner } from "@ui/spinner";
-import { Switch } from "@ui/switch";
 import { useT, useUILang } from "@stores/ui-lang";
 import { LANGS, type UILang } from "@/shared/i18n";
 import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
-
-/** 设置 → 偏好 → 通用：更新与启动行为。 */
-export function GeneralPrefsTab({
-  form,
-  updateField,
-}: {
-  form: Record<string, string>;
-  updateField: (key: string, value: string) => void;
-}) {
-  const t = useT();
-  const queryClient = useQueryClient();
-
-  const saveMutation = useMutation({
-    mutationFn: () => {
-      const settings: Record<string, string> = {};
-      for (const k of ["UPDATE_CHANNEL", "AUTO_UPDATE", "AUTO_START_SERVER"]) {
-        if (form[k] !== undefined) settings[k] = form[k];
-      }
-      return rpcClient.updateSettings({ settings });
-    },
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
-  });
-
-  return (
-    <div className="flex flex-col gap-4">
-      <PageHeader title={t("settings.prefs.general")} description={t("settings.prefs.generalDesc")} />
-
-      <SettingsSection>
-        <SettingRow title={t("settings.updateChannel.title")} description={t("settings.updateChannel.desc")} stacked>
-          <Select
-            value={form.UPDATE_CHANNEL ?? "stable"}
-            onValueChange={(v) => updateField("UPDATE_CHANNEL", v)}
-          >
-            <SelectTrigger className="h-8 w-full text-xs sm:w-56">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="stable">{t("settings.updateChannel.stable")}</SelectItem>
-              <SelectItem value="beta">{t("settings.updateChannel.beta")}</SelectItem>
-            </SelectContent>
-          </Select>
-        </SettingRow>
-
-        <SettingRow title={t("settings.prefs.autoUpdate")} description={t("settings.prefs.autoUpdateDesc")}>
-          <Switch
-            checked={(form.AUTO_UPDATE ?? "1") === "1"}
-            onCheckedChange={(v) => updateField("AUTO_UPDATE", v ? "1" : "0")}
-          />
-        </SettingRow>
-
-        <SettingRow
-          title={t("settings.prefs.autoStartServer")}
-          description={t("settings.prefs.autoStartServerDesc")}
-        >
-          <Switch
-            checked={(form.AUTO_START_SERVER ?? "1") === "1"}
-            onCheckedChange={(v) => updateField("AUTO_START_SERVER", v ? "1" : "0")}
-          />
-        </SettingRow>
-      </SettingsSection>
-
-      <div className="flex items-center gap-3">
-        <Button size="sm" onClick={() => saveMutation.mutate()} disabled={saveMutation.isPending}>
-          {saveMutation.isPending ? (
-            <Spinner data-icon="inline-start" />
-          ) : saveMutation.isSuccess ? (
-            <CheckIcon data-icon="inline-start" />
-          ) : (
-            <SlidersHorizontalIcon data-icon="inline-start" />
-          )}
-          {saveMutation.isSuccess ? t("common.saved") : t("common.save")}
-        </Button>
-      </div>
-    </div>
-  );
-}
 
 export const THEME_OPTIONS = ["system", "light", "dark"] as const;
 export type ThemeOption = (typeof THEME_OPTIONS)[number];

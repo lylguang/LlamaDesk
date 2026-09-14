@@ -10,6 +10,9 @@ import { getImagesBaseDir } from "./image-server";
 import { chatImageUrl } from "../shared/server-info";
 import * as MlxGen from "./mlx-gen";
 import { findMlxModel } from "./mlx-gen";
+import * as CloudProviders from "./cloud-providers";
+import { logEvent } from "./app-log";
+import { providerLabelFor, recordUsageEvent } from "./usage";
 
 /**
  * AI 生图模块。
@@ -55,6 +58,12 @@ export type ImageRecordRow = {
 
 export type ImageGenConfig = {
   backend: ImageGenBackend;
+  /**
+   * 云端后端选中的服务商 id（「设置 → 模型云服务」里配置的厂商）。
+   * 地址与密钥由服务商行提供 —— 图像页只挑厂商 + 模型，不再单独保存连接信息。
+   */
+  providerId: string;
+  /** 服务商地址 / 密钥（只读派生：从 providerId 解析，见 `getImageGenConfig`）。 */
   apiBase: string;
   apiKey: string;
   model: string;
@@ -91,23 +100,39 @@ type RecordRow = typeof imageRecords.$inferSelect;
 
 export function getImageGenConfig(): ImageGenConfig {
   const backend = getSetting("IMG_BACKEND");
+  const providerId = (getSetting("IMG_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   return {
     backend: backend === "comfyui" || backend === "mlx" ? backend : "api",
-    apiBase: (getSetting("IMG_API_BASE") || "").trim(),
-    apiKey: (getSetting("IMG_API_KEY") || "").trim(),
+    providerId,
+    // 地址与密钥只有一个来源：选中的云厂商。
+    apiBase: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model: (getSetting("IMG_MODEL") || "").trim(),
     comfyBase: (getSetting("IMG_COMFY_BASE") || "").trim(),
   };
 }
 
+/**
+ * 保存生图配置。后端页面只写 backend / providerId / model —— 地址与密钥属于
+ * 服务商（设置页维护），旧调用方传 apiBase/apiKey 时忽略，避免又出现第二份连接信息。
+ */
 export function saveImageGenConfig(cfg: Partial<ImageGenConfig>): void {
   const settings: Record<string, string> = {};
   if (cfg.backend !== undefined) settings.IMG_BACKEND = cfg.backend;
-  if (cfg.apiBase !== undefined) settings.IMG_API_BASE = cfg.apiBase.trim();
-  if (cfg.apiKey !== undefined) settings.IMG_API_KEY = cfg.apiKey.trim();
+  if (cfg.providerId !== undefined) settings.IMG_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.model !== undefined) settings.IMG_MODEL = cfg.model.trim();
   if (cfg.comfyBase !== undefined) settings.IMG_COMFY_BASE = cfg.comfyBase.trim();
   updateSettings(settings);
+  // 选中的模型并进厂商清单（带"生图"分类），下次打开选择器就能看到它。
+  if (cfg.providerId && cfg.model) {
+    CloudProviders.saveAppModelChoice({
+      settingKey: "IMG_PROVIDER_ID",
+      providerId: cfg.providerId.trim(),
+      model: cfg.model,
+      type: "image",
+    });
+  }
 }
 
 /** 把用户填的地址规整成带 /v1 后缀的形式（兼容填不填 /v1 两种写法）。 */
@@ -137,24 +162,20 @@ async function errorMessage(res: Response, fallback: string): Promise<string> {
 // 模型列表
 // ---------------------------------------------------------------------------
 
-/** 从 OpenAI 兼容 /v1/models 拉取可用模型列表。 */
+/**
+ * 从 OpenAI 兼容 /models 拉取可用模型列表。
+ *
+ * 地址候选与响应解析都交给 CloudProviders.fetchRemoteModels：与设置页「获取模型列表」
+ * 用同一份实现 —— 两边各写一套时，同一个上游会一边列得出模型、一边报错。
+ */
 export async function listImageApiModels(
   base: string,
   apiKey: string,
 ): Promise<string[]> {
-  const cleanBase = normalizeApiBase(base);
-  if (!cleanBase) throw new Error("Missing API base URL");
-  const res = await fetch(`${cleanBase}/models`, {
-    headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {},
-    signal: AbortSignal.timeout(15_000),
-  });
-  if (!res.ok) throw new Error(`请求失败（${res.status}）`);
-  const json = (await res.json().catch(() => null)) as { data?: { id?: string }[] } | null;
-  const data = json?.data;
-  if (!Array.isArray(data)) return [];
-  return data
-    .map((m) => m.id)
-    .filter((id): id is string => typeof id === "string" && id.length > 0);
+  if (!base.trim()) throw new Error("Missing API base URL");
+  const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
+  if (!r.ok) throw new Error(r.error);
+  return r.models;
 }
 
 /** 从 ComfyUI /object_info 拉取可用 checkpoint 列表。 */
@@ -348,11 +369,50 @@ async function generateViaMlx(
 
 type ApiImageItem = { b64_json?: string; url?: string };
 
+/**
+ * 生图接口的 usage（gpt-image-1 这一类按 token 计费的服务才会回）。
+ * 字段名沿用 OpenAI 的 `usage`：`input_tokens` / `output_tokens`。
+ */
+type ApiImageUsage = { input_tokens?: number; output_tokens?: number; total_tokens?: number };
+
+/**
+ * 记一次生图调用。
+ *
+ * 生图和对话不是一套口径：多数服务只回图片、不回 token，所以**照样记一行**
+ * （token 为 0，只计次数）—— 用户眼里「我这个月生了几百张图」本身就是用量，
+ * 统计页里看不到反而奇怪。接口给了 usage 就照实填（gpt-image-1 会回）。
+ */
+function recordImageUsage(
+  backend: string,
+  provider: string,
+  model: string,
+  usage?: ApiImageUsage | null,
+): void {
+  recordUsageEvent({
+    channel: "image",
+    upstream: backend === "api" ? "cloud" : "local",
+    provider,
+    model,
+    inputTokens: usage?.input_tokens,
+    outputTokens: usage?.output_tokens,
+  });
+}
+
+/** 生图后端的厂商展示名：云端取服务商名，本地是引擎名。 */
+function imageProviderLabel(backend: string, providerId: string): string {
+  if (backend === "mlx") return "MLX";
+  if (backend === "comfyui") return "ComfyUI";
+  return CloudProviders.resolveCloudProvider(providerId)?.name ?? providerLabelFor("cloud");
+}
+
 /** 解析 OpenAI 兼容图片接口的返回，逐张落盘并返回 ref 列表。 */
-async function saveApiItems(res: Response): Promise<string[]> {
-  const json = (await res.json().catch(() => null)) as { data?: ApiImageItem[] } | null;
+async function saveApiItems(res: Response, ctx: { provider: string; model: string }): Promise<string[]> {
+  const json = (await res.json().catch(() => null)) as
+    | { data?: ApiImageItem[]; usage?: ApiImageUsage }
+    | null;
   const items = json?.data ?? [];
   if (items.length === 0) throw new Error("服务未返回任何图片");
+  recordImageUsage("api", ctx.provider, ctx.model, json?.usage);
 
   const refs: string[] = [];
   for (const item of items) {
@@ -379,6 +439,7 @@ async function generateViaApi(
 
   const count = Math.max(1, Math.min(params.count ?? 1, 8));
   const size = `${params.width ?? 1024}x${params.height ?? 1024}`;
+  const usageCtx = { provider: imageProviderLabel("api", cfg.providerId), model };
 
   // AI 修图：带参考图时走 /v1/images/edits（multipart 以图改图）；否则走纯文生图。
   if (params.referenceImageRef) {
@@ -406,7 +467,7 @@ async function generateViaApi(
       signal: AbortSignal.timeout(600_000),
     });
     if (!res.ok) throw new Error(await errorMessage(res, "修图请求失败"));
-    return saveApiItems(res);
+    return saveApiItems(res, usageCtx);
   }
 
   const body: Record<string, unknown> = {
@@ -428,7 +489,7 @@ async function generateViaApi(
     signal: AbortSignal.timeout(600_000),
   });
   if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
-  return saveApiItems(res);
+  return saveApiItems(res, usageCtx);
 }
 
 // ---------------------------------------------------------------------------
@@ -577,17 +638,18 @@ async function generateViaComfy(
 export async function generateImage(
   params: GenerateImageParams,
 ): Promise<{ records: ImageRecordRow[]; error?: string }> {
-  // 优先使用前端实时配置（用户可能改了地址/key 但还没点“保存”，生成时应直接用页面上的值），
-  // 缺失字段回退到数据库里已保存的配置；同时把实时配置落盘，避免下次读到旧值。
+  // 优先使用前端实时配置（用户可能换了厂商 / 模型但还没点“保存”），缺失字段回退到
+  // 数据库里已保存的配置；同时把实时配置落盘，避免下次读到旧值。
+  // 地址与密钥不来自页面：一律按选中的服务商现取（页面只存 providerId）。
   const dbCfg = getImageGenConfig();
+  const providerId =
+    params.config?.providerId !== undefined ? params.config.providerId.trim() : dbCfg.providerId;
+  const provider = CloudProviders.resolveCloudProvider(providerId);
   const cfg: ImageGenConfig = {
     backend: params.config?.backend ?? dbCfg.backend,
-    apiBase:
-      params.config?.apiBase !== undefined
-        ? params.config.apiBase.trim()
-        : dbCfg.apiBase,
-    apiKey:
-      params.config?.apiKey !== undefined ? params.config.apiKey.trim() : dbCfg.apiKey,
+    providerId,
+    apiBase: provider?.baseUrl.trim() ?? "",
+    apiKey: provider?.apiKey.trim() ?? "",
     model:
       params.config?.model !== undefined ? params.config.model.trim() : dbCfg.model,
     comfyBase:
@@ -619,6 +681,11 @@ export async function generateImage(
         : cfg.backend === "comfyui"
           ? await generateViaComfy(cfg, params)
           : await generateViaApi(cfg, params);
+    // 本地两个后端（MLX / ComfyUI）不走 HTTP 计费，也不回 usage —— 但一次生成
+    // 就是一次调用，照样记一行；模型名分别是 MLX 模型 id 与 ComfyUI 的 checkpoint。
+    if (cfg.backend !== "api") {
+      recordImageUsage(cfg.backend, imageProviderLabel(cfg.backend, cfg.providerId), params.model?.trim() || cfg.model);
+    }
 
     const records = refs.map((ref) =>
       toRow(
@@ -640,6 +707,27 @@ export async function generateImage(
     return { records };
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    // 统一日志：失败记录入库之外也落一份现场（含后端与提示词，便于复盘）。
+    // 「没配置后端 / 模型」这类问题看这条就能直接定位，不必重现。
+    logEvent({
+      level: "error",
+      source: "image",
+      event: "image.generate.failed",
+      message,
+      detail: {
+        backend: cfg.backend,
+        model: params.model?.trim() || cfg.model || null,
+        apiBase: cfg.apiBase || null,
+        comfyBase: cfg.comfyBase || null,
+        hasApiKey: Boolean(cfg.apiKey),
+        prompt: prompt.slice(0, 300),
+        width: params.width ?? null,
+        height: params.height ?? null,
+        reference: params.referenceImageRef ?? null,
+        source: params.source ?? "manual",
+        error: e,
+      },
+    });
     insertImageRecord({
       status: "failed",
       source: params.source ?? "manual",

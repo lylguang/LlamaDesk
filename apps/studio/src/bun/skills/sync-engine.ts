@@ -12,7 +12,7 @@ import {
   copyFileSync,
 } from "fs";
 import type { SyncMode, SkillTargetView } from "../../shared/skills";
-import { getCentralRepoDir, muteSelfWrites } from "./central-repo";
+import { centralSkillDir, getCentralRepoDir, muteSelfWrites } from "./central-repo";
 import {
   adapterSkillsPath,
   getAdapter,
@@ -180,7 +180,9 @@ export function syncSkillToTool(skillId: string, toolKey: string, opts?: { overw
   if (listToolInfos().find((t) => t.key === toolKey)?.isCentral) {
     return { ok: false, error: "central-root tool needs no sync" };
   }
-  const sourceDir = join(getCentralRepoDir(), skillId);
+  // skillId 来自 webview：非法 id（含 `..` / 分隔符）绝不能拼到中央库或工具目录上。
+  const sourceDir = centralSkillDir(skillId);
+  if (!sourceDir) return { ok: false, error: "非法的技能 id" };
   if (!existsSync(sourceDir)) return { ok: false, error: "skill dir missing" };
   const targetDir = join(adapterSkillsPath(adapter), skillId);
   muteSelfWrites();
@@ -193,7 +195,8 @@ export function syncSkillToTool(skillId: string, toolKey: string, opts?: { overw
 
 /** 卸载技能的某个工具部署。 */
 export function unsyncSkillFromTool(skillId: string, toolKey: string): { ok: boolean; error?: string } {
-  const sourceDir = join(getCentralRepoDir(), skillId);
+  const sourceDir = centralSkillDir(skillId);
+  if (!sourceDir) return { ok: false, error: "非法的技能 id" };
   muteSelfWrites();
   const result = removeRecordedTarget(skillId, sourceDir, toolKey);
   if (result.ok) audit("unsync", `${skillId} <- ${toolKey}`);
@@ -202,8 +205,8 @@ export function unsyncSkillFromTool(skillId: string, toolKey: string): { ok: boo
 
 /** copy 模式目标重推（源更新后）。 */
 export function resyncCopyTargets(skillId: string) {
-  const sourceDir = join(getCentralRepoDir(), skillId);
-  if (!existsSync(sourceDir)) return;
+  const sourceDir = centralSkillDir(skillId);
+  if (!sourceDir || !existsSync(sourceDir)) return;
   const hash = hashSkillDir(sourceDir);
   muteSelfWrites();
   for (const row of listTargetRows().filter((t) => t.skillId === skillId)) {
@@ -260,7 +263,8 @@ function centralRoot(): string {
 export function targetConflicts(skillId: string, toolKey: string): boolean {
   const adapter = getAdapter(toolKey);
   if (!adapter) return false;
-  const sourceDir = join(getCentralRepoDir(), skillId);
+  const sourceDir = centralSkillDir(skillId);
+  if (!sourceDir) return false;
   const targetDir = join(adapterSkillsPath(adapter), skillId);
   const live = classifyTarget(targetDir, sourceDir);
   return live === "real-dir" || live === "real-file" || live === "foreign-link";

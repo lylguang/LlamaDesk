@@ -24,7 +24,7 @@ export interface McpToolDef {
 }
 
 const PROTOCOL_VERSION = "2025-06-18";
-const CLIENT_INFO = { name: "OmniStudio", version: "1.0.0" };
+const CLIENT_INFO = { name: "LlamaDesk", version: "1.0.0" };
 const INIT_TIMEOUT_MS = 20_000;
 const LIST_TIMEOUT_MS = 30_000;
 const CALL_TIMEOUT_MS = 180_000;

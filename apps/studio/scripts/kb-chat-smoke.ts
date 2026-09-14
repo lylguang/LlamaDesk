@@ -34,11 +34,14 @@ try {
   const { updateSettings } = await import("../src/bun/db/settings");
 
   // 远程模式指向假服务，避免本地推理服务器启动路径。
+  // 远程模式下「当前模型」取云端槽位（VLLM_MODEL_NAME）；CHAT_MODEL 是本地激活时写的，
+  // 只填它在远程模式会被当成「没有配置模型」（见 chat-model.ts 的 getChatModelName）。
   updateSettings({
     SERVER_MODE: "remote",
     VLLM_API_BASE: "http://127.0.0.1:18777/v1",
     VLLM_API_KEY: "EMPTY",
     CHAT_MODEL: "fake-chat",
+    VLLM_MODEL_NAME: "fake-chat",
   });
 
   // 建库 + 数据源 + 向量

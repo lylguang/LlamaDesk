@@ -10,7 +10,6 @@ import {
   Loader2Icon,
   MicIcon,
   PlayIcon,
-  RefreshCwIcon,
   SaveIcon,
   ServerIcon,
   SquareIcon,
@@ -20,7 +19,6 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
-import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import {
   Select,
@@ -30,16 +28,12 @@ import {
   SelectValue,
 } from "@ui/select";
 import { useT } from "@stores/ui-lang";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { useMicRecorder } from "@hooks/use-mic-recorder";
 import type { AsrSegment } from "../../bun/asr";
 import type { AsrAudioCppModelInfo } from "../../bun/asr-audiocpp";
 import { mergeSegments, fmtClock } from "./voice-asr-result";
 import { TranslationEnginePicker, useTranslationEngine } from "./translate-screen";
-import {
-  DEFAULT_VOICE_BASE_URL,
-  VOICE_PROVIDER_PRESETS,
-  matchVoiceProvider,
-} from "./voice-provider-presets";
 import {
   TRANSLATION_LANGUAGES,
   TRANSLATION_SOURCE_AUTO,
@@ -211,60 +205,31 @@ export function LiveTranslateTab() {
     queryFn: () => rpcClient.getASRProviderConfig(),
   });
   const provider = providerData?.config;
-  const apiReady = !!provider?.base;
-  const [pBase, setPBase] = useState("");
-  const [pKey, setPKey] = useState("");
+  const apiReady = !!provider?.providerId;
+  // 与语音页共用同一份 ASR 厂商配置：这里也只选厂商 + 模型。
+  const [pProviderId, setPProviderId] = useState("");
   const [pModel, setPModel] = useState("");
-  const [presetId, setPresetId] = useState("");
   const [pError, setPError] = useState<string>();
   const providerSynced = useRef(false);
   useEffect(() => {
     if (provider && !providerSynced.current) {
       providerSynced.current = true;
-      setPBase(provider.base || DEFAULT_VOICE_BASE_URL);
-      setPKey(provider.apiKey);
+      setPProviderId(provider.providerId);
       setPModel(provider.model);
-      setPresetId(matchVoiceProvider(provider.base || DEFAULT_VOICE_BASE_URL)?.id ?? "");
     }
   }, [provider]);
 
-  const pickProvider = (id: string) => {
-    setPresetId(id);
-    const p = VOICE_PROVIDER_PRESETS.find((x) => x.id === id);
-    if (!p) return;
-    setPBase(p.baseUrl);
-    setPError(undefined);
-    if (p.asrModels.length > 0) setPModel((m) => m || p.asrModels[0]!);
-  };
   const saveProvider = useMutation({
     mutationFn: () =>
-      rpcClient.saveASRProviderConfig({ base: pBase.trim(), apiKey: pKey.trim(), model: pModel.trim() }),
+      rpcClient.saveASRProviderConfig({ providerId: pProviderId.trim(), model: pModel.trim() }),
     onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["asr-provider"] });
-      fetchModels.mutate();
-    },
-  });
-  const fetchModels = useMutation({
-    mutationFn: () =>
-      rpcClient.listProviderModels({
-        base: pBase.trim() || provider?.base || undefined,
-        apiKey: pKey.trim() || provider?.apiKey || undefined,
-        // 实时翻译的转写走 ASR：服务商清单里只列语音识别模型。
-        kind: "asr",
-      }),
-    onSuccess: (r) => {
-      if (r.error) {
-        setPError(r.error);
-        return;
-      }
       setPError(undefined);
-      if (r.models.length > 0) setPModel((m) => m || r.models[0]!);
+      queryClient.invalidateQueries({ queryKey: ["asr-provider"] });
+      queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
+    // 保存失败必须说出来：下面那段 `{pError && …}` 就是为它留的位置。
+    onError: (error) => setPError(error instanceof Error ? error.message : String(error)),
   });
-  useEffect(() => {
-    if (engineMode === "api" && apiReady) void fetchModels.mutate();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [engineMode, apiReady]);
 
   const ready =
     engineMode === "whisper" ? whisperReady : engineMode === "audiocpp" ? acpReady : apiReady;
@@ -657,70 +622,25 @@ export function LiveTranslateTab() {
                 )}
               </div>
               <div>
-                <Label className="mb-1 block text-xs">{t("voice.compat.provider")}</Label>
-                <Select value={presetId} onValueChange={pickProvider}>
-                  <SelectTrigger className="h-8 w-full text-xs">
-                    <SelectValue placeholder={t("voice.compat.providerPlaceholder")} />
-                  </SelectTrigger>
-                  <SelectContent position="popper" sideOffset={6}>
-                    {VOICE_PROVIDER_PRESETS.map((p) => (
-                      <SelectItem key={p.id} value={p.id}>
-                        <span className="truncate">{p.label}</span>
-                      </SelectItem>
-                    ))}
-                  </SelectContent>
-                </Select>
-              </div>
-              <div>
-                <Label htmlFor="live-asr-base" className="mb-1 block text-xs">
-                  {t("voice.compat.base")}
-                </Label>
-                <Input
-                  id="live-asr-base"
-                  placeholder="https://api.openai.com/v1"
-                  value={pBase}
-                  onChange={(e) => setPBase(e.target.value)}
-                  className="h-8 text-xs"
+                <Label className="mb-1 block text-xs">{t("voice.asr.cloudProvider")}</Label>
+                <CloudModelSelect
+                  kind="asr"
+                  providerId={pProviderId}
+                  model={pModel}
+                  size="sm"
+                  disabled={recorder.recording}
+                  onChange={(choice) => {
+                    setPProviderId(choice.providerId);
+                    if (choice.model) setPModel(choice.model);
+                  }}
                 />
-              </div>
-              <div>
-                <Label htmlFor="live-asr-key" className="mb-1 block text-xs">
-                  {t("voice.compat.apiKey")}
-                </Label>
-                <Input
-                  id="live-asr-key"
-                  type="password"
-                  placeholder="sk-…"
-                  value={pKey}
-                  onChange={(e) => setPKey(e.target.value)}
-                  className="h-8 text-xs"
-                />
-              </div>
-              <div>
-                <Label htmlFor="live-asr-model" className="mb-1 block text-xs">
-                  {t("voice.compat.model")}
-                </Label>
-                <Input
-                  id="live-asr-model"
-                  list="live-asr-models"
-                  placeholder={t("voice.compat.modelPlaceholder")}
-                  value={pModel}
-                  onChange={(e) => setPModel(e.target.value)}
-                  className="h-8 text-xs"
-                />
-                {fetchModels.data?.models?.length ? (
-                  <datalist id="live-asr-models">
-                    {fetchModels.data.models.map((m) => (
-                      <option key={m} value={m} />
-                    ))}
-                  </datalist>
-                ) : null}
+                <p className="mt-1.5 text-[10px] text-muted-foreground">{t("cloud.where")}</p>
               </div>
               <div className="flex flex-wrap items-center gap-2 pt-1">
                 <Button
                   size="sm"
                   onClick={() => saveProvider.mutate()}
-                  disabled={saveProvider.isPending || !pBase.trim()}
+                  disabled={saveProvider.isPending || !pProviderId.trim()}
                 >
                   {saveProvider.isPending ? (
                     <Loader2Icon data-icon="inline-start" className="animate-spin" />
@@ -728,19 +648,6 @@ export function LiveTranslateTab() {
                     <SaveIcon data-icon="inline-start" />
                   )}
                   {t("voice.compat.save")}
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => fetchModels.mutate()}
-                  disabled={fetchModels.isPending || !pBase.trim()}
-                >
-                  {fetchModels.isPending ? (
-                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                  ) : (
-                    <RefreshCwIcon data-icon="inline-start" />
-                  )}
-                  {t("voice.compat.fetchModels")}
                 </Button>
               </div>
               {pError && (

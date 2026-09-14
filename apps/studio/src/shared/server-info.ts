@@ -4,6 +4,23 @@ export const IMAGE_SERVER_PORT = 19782;
  * 绑到 0.0.0.0 会让同网段任何人直接下载这些文件。
  */
 export const IMAGE_SERVER_HOST = "127.0.0.1";
+/**
+ * 媒体服务实际监听的端口。
+ *
+ * 平时就是 `IMAGE_SERVER_PORT`；只有测试进程（`NODE_ENV=test`，见 test-preload.ts）可以用
+ * `OMNI_IMAGE_SERVER_PORT` 换一个：本地开着应用时 19782 被占，路由冒烟测试会整段跳过，
+ * 那正是最需要跑它们的时候（媒体 403 就是这类"没人跑到"的路由里漏掉的）。
+ *
+ * 注意 webview 读不到主进程的 env（CEF 渲染进程），所以这个覆盖**仅限测试**：
+ * 正式运行必须让所有进程用同一个常量，否则 URL 与真实端口会各说各话。
+ */
+export function imageServerPort(): number {
+  if (process.env.NODE_ENV === "test") {
+    const override = Number(process.env.OMNI_IMAGE_SERVER_PORT);
+    if (Number.isInteger(override) && override > 0 && override < 65536) return override;
+  }
+  return IMAGE_SERVER_PORT;
+}
 /** 本地推理服务器（llama.cpp / vLLM / SGLang）的默认端口。 */
 export const DEFAULT_INFERENCE_PORT = "18080";
 /**
@@ -41,5 +58,29 @@ export function isLocalOrigin(origin: string | null | undefined): boolean {
 }
 
 export function chatImageUrl(ref: string): string {
-  return `http://${IMAGE_SERVER_HOST}:${IMAGE_SERVER_PORT}/${ref}`;
+  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/${ref}`;
+}
+
+/**
+ * 产出物在右侧面板里的预览地址（本地回环文件服务，见 bun/image-server.ts）：
+ * HTML 直接当网页加载，同目录的相对 css/js/图片也会一起请求到。
+ */
+export function artifactPreviewUrl(artifactId: number, version?: number): string {
+  const suffix = version == null ? "" : `?v=${version}`;
+  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/artifact/${artifactId}${suffix}`;
+}
+
+/** 工作区文件预览地址；rootId 由主进程登记（见 registerWorkspaceRoot）。 */
+export function workspaceFilePreviewUrl(
+  rootId: string,
+  relativePath: string,
+  version?: number,
+): string {
+  const encoded = relativePath
+    .split("/")
+    .filter(Boolean)
+    .map(encodeURIComponent)
+    .join("/");
+  const suffix = version == null ? "" : `?v=${version}`;
+  return `http://${IMAGE_SERVER_HOST}:${imageServerPort()}/workspace/${rootId}/${encoded}${suffix}`;
 }

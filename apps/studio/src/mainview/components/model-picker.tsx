@@ -27,11 +27,14 @@ import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 
 /**
- * 模型选择器：**已启动**的本地模型 + 已配置云服务商的模型。
+ * 模型选择器：**已启动**的本地模型 + 已启用云服务商的**对话模型**。
  *
  * 本地列表里只有正在跑（或正在加载）的实例 —— 没启动的模型列在这里没有意义
  * （选中要么等一次冷启动，要么报错）。启动 / 卸载在控制台做，这里只切换
  * 「请求发给谁」，所以是瞬时的，没有启动进度要等。对话与 Agent 共用这一份列表。
+ *
+ * 云端列表来自「设置 → 模型云服务」里用户添加过的模型：没添加过的（哪怕服务商
+ * 的 /v1/models 能拉到）和标成生图 / 视频 / TTS / ASR 的都不在这里。
  */
 export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const t = useT();
@@ -67,6 +70,13 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   // 让用户看到「没有可用的本地模型」，而不是显示一个跑不起来的名字。
   const activeLocal = localOptions.find((o) => o.isActive);
   const current = mode === "remote" ? apiModel || chatModel || "" : (activeLocal?.value ?? "");
+  /**
+   * 云端当前值已不在清单里（换过厂商 / 模型被从「模型云服务」的列表里删掉）：
+   * 也占一行标出来，否则下拉框看起来像"没选模型"。它只是显示当前值 ——
+   * 能选的仍然只有厂商清单里的模型（点它不会再发一次切换请求）。
+   */
+  const currentListed = [...localOptions, ...apiOptions].some((o) => o.value === current);
+  const orphanCurrent = mode === "remote" && current !== "" && !currentListed ? current : "";
 
   const selectMutation = useMutation({
     mutationFn: (opt: { type: "local" | "api"; value: string; providerId?: string }) =>
@@ -108,6 +118,17 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
   const shownLocal = localOptions.filter(matches);
   const visibleOptions = [...localOptions, ...apiOptions];
   const shownApi = apiOptions.filter(matches);
+  // 云端模型按厂商分组：先看厂商名（云厂商可以同时启用多个），再选它下面的模型。
+  const apiGroups = (() => {
+    const groups = new Map<string, { name: string; items: typeof shownApi }>();
+    for (const o of shownApi) {
+      const key = o.providerId ?? o.providerName ?? "";
+      const group = groups.get(key);
+      if (group) group.items.push(o);
+      else groups.set(key, { name: o.providerName ?? t("chat.modelApi"), items: [o] });
+    }
+    return [...groups.entries()];
+  })();
   const firstMatch = shownLocal[0] ?? shownApi[0];
   const busy = selectMutation.isPending || modelsQuery.isLoading;
   const selectError =
@@ -167,6 +188,16 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               className="h-7 text-xs"
             />
           </div>
+          {orphanCurrent && (
+            <SelectGroup>
+              <SelectItem value={orphanCurrent}>
+                <span className="min-w-0 flex-1 truncate">{orphanCurrent}</span>
+                <span className="shrink-0 text-[10px] text-muted-foreground/70">
+                  {t("defaults.current")}
+                </span>
+              </SelectItem>
+            </SelectGroup>
+          )}
           {shownLocal.length > 0 && (
             <SelectGroup>
               <SelectLabel>{t("chat.modelLocalRunning")}</SelectLabel>
@@ -195,25 +226,20 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
               ))}
             </SelectGroup>
           )}
-          {shownApi.length > 0 && (
-            <SelectGroup>
-              <SelectLabel>{t("chat.modelApi")}</SelectLabel>
-              {shownApi.map((o) => (
+          {apiGroups.map(([key, group]) => (
+            <SelectGroup key={`api-group-${key}`}>
+              <SelectLabel>{group.name}</SelectLabel>
+              {group.items.map((o) => (
                 <SelectItem key={`api-${o.providerId ?? "x"}-${o.value}`} value={o.value}>
                   <span className="min-w-0 flex-1 truncate">{o.label}</span>
                   <span className="flex shrink-0 items-center gap-1.5">
                     <ModelCategoryIcon category={o.category} label={t(`models.cat.${o.category}`)} />
-                    {o.providerName && (
-                      <span className="max-w-40 truncate text-[10px] text-muted-foreground/70">
-                        {o.providerName}
-                      </span>
-                    )}
                   </span>
                 </SelectItem>
               ))}
             </SelectGroup>
-          )}
-          {visibleOptions.length === 0 && (
+          ))}
+          {visibleOptions.length === 0 && !orphanCurrent && (
             <div className="px-2 py-3 text-center text-xs text-muted-foreground">
               {t("chat.modelEmpty")}
             </div>

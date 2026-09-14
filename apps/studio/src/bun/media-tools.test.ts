@@ -15,6 +15,7 @@ const { db } = await import("./db");
 const { imageRecords, videoRecords, voiceRecords } = await import("./db/schema");
 const { getSetting, updateSettings } = await import("./db/settings");
 const { getImagesBaseDir } = await import("./image-server");
+const CloudProviders = await import("./cloud-providers");
 
 const originalFetch = globalThis.fetch;
 const imagesDir = getImagesBaseDir();
@@ -23,6 +24,7 @@ const workspace = fs.mkdtempSync(join(os.tmpdir(), "media-tools-ws-"));
 /** 测试会改写这些设置，afterAll 时原样还原。 */
 const TOUCHED_SETTINGS = [
   "IMG_BACKEND",
+  "IMG_PROVIDER_ID",
   "IMG_API_BASE",
   "IMG_API_KEY",
   "IMG_MODEL",
@@ -164,10 +166,16 @@ test("media_search 支持按来源 / 关键词 / 类型 / 时间过滤", async (
 const PNG_B64 = "iVBORw0KGgoAAAANSUhEUg=="; // 1x1 占位 PNG
 
 test("generate_image 用已配置的后端出图、标记 agent 来源，并把结果复制进工作区", async () => {
+  // 云端生图 = 厂商 + 模型：地址 / 密钥来自 cloud_providers 行（页面不再保存）。
+  const created = CloudProviders.createCloudProvider({
+    name: "测试厂商",
+    baseUrl: "http://127.0.0.1:9/v1",
+  });
+  const providerId = created.id!;
+  CloudProviders.updateCloudProvider(providerId, { models: [{ id: "test-model", type: "image" }] });
   updateSettings({
     IMG_BACKEND: "api",
-    IMG_API_BASE: "http://127.0.0.1:9/v1",
-    IMG_API_KEY: "",
+    IMG_PROVIDER_ID: providerId,
     IMG_MODEL: "test-model",
   });
   globalThis.fetch = mock(
@@ -195,13 +203,41 @@ test("generate_image 用已配置的后端出图、标记 agent 来源，并把�
   expect(row.model).toBe("test-model");
   expect(fs.existsSync(join(workspace, "gen-assets/image-1.png"))).toBe(true);
 
-  // 参考图必须落在 images 目录内：越界引用直接报错，不读取任意文件。
+  // 参考图必须落在素材库 / 工作区内：越界引用直接报错（走读取授权），不读取任意文件。
   const bad = textOf(
     await tool("generate_image").execute("t2", { prompt: "x", reference: "../../etc/passwd" }),
   );
-  expect(bad).toContain("找不到参考图");
+  expect(bad).toContain("需要授权才能访问工作区之外的路径");
 
   globalThis.fetch = originalFetch;
+  CloudProviders.deleteCloudProvider(providerId);
+});
+
+test("参考图：工作区外的路径先过读取授权，授权目录内才继续解析", async () => {
+  const outsideDir = fs.mkdtempSync(join(os.tmpdir(), "media-tools-out-"));
+  const outside = join(outsideDir, "photo.png");
+  fs.writeFileSync(outside, "binary");
+
+  // 没授权：直接拒绝，不把文件读出来（参考图会被送进生图接口，等于外泄）。
+  const refused = textOf(
+    await tool("generate_image").execute("t1", { prompt: "x", reference: outside }),
+  );
+  expect(refused).toContain("需要授权才能访问工作区之外的路径");
+
+  // 同一目录进了授权列表：不再被授权拦下——文件不存在时报的是"找不到参考图"，
+  // 说明确实过了授权那一关（这条路径不需要配后端）。
+  const authorizedTool = buildMediaGenTools({
+    workspace,
+    allowShell: false,
+    authorizedFolders: [outsideDir],
+  }).find((t) => t.name === "generate_image")!;
+  const passed = textOf(
+    await authorizedTool.execute("t2", {
+      prompt: "x",
+      reference: join(outsideDir, "missing.png"),
+    }),
+  );
+  expect(passed).toContain("找不到参考图");
 });
 
 // ---------------------------------------------------------------------------
@@ -273,17 +309,26 @@ test("generate_video 提交失败时，失败记录同样带 agent 来源标记"
 // ---------------------------------------------------------------------------
 
 test("generate_image 缺配置时弹窗，用户确认后继续生图（不改上下文、不重开一轮）", async () => {
-  updateSettings({ IMG_BACKEND: "api", IMG_API_BASE: "", IMG_API_KEY: "", IMG_MODEL: "" });
+  updateSettings({ IMG_BACKEND: "api", IMG_PROVIDER_ID: "", IMG_MODEL: "" });
+  // 厂商也删掉：没有可选厂商时弹窗原因才是 missing-config（有厂商会是 choose-model）。
+  for (const p of CloudProviders.listCloudProviders().providers) {
+    CloudProviders.deleteCloudProvider(p.id);
+  }
+  const created = CloudProviders.createCloudProvider({
+    name: "弹窗厂商",
+    baseUrl: "http://127.0.0.1:9/v1",
+  });
+  const providerId = created.id!;
   const MediaSetup = await import("./media-setup");
 
   const seen: string[] = [];
   const stop = MediaSetup.onMediaSetup((payload) => {
     seen.push(payload.reason);
-    // 模拟界面：用户填了地址并选定模型后点「确认并继续生图」。
+    // 模拟界面：用户选中了厂商与模型后点「确认并继续生图」（地址 / 密钥由厂商提供）。
     MediaSetup.resolveMediaSetup(payload.id, {
       action: "confirm",
       backend: "api",
-      apiBase: "http://127.0.0.1:9/v1",
+      providerId,
       model: "dialog-model",
     });
   });
@@ -316,6 +361,7 @@ test("generate_image 缺配置时弹窗，用户确认后继续生图（不改�
   } finally {
     stop();
     globalThis.fetch = originalFetch;
+    CloudProviders.deleteCloudProvider(providerId);
   }
 });
 

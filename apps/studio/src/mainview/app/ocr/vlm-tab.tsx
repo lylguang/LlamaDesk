@@ -7,7 +7,6 @@ import {
   GlobeIcon,
   Loader2Icon,
   PlayIcon,
-  RefreshCwIcon,
   ServerIcon,
   SettingsIcon,
   SparklesIcon,
@@ -17,7 +16,6 @@ import {
 import { rpcClient } from "@lib/rpc";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
-import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import {
   Select,
@@ -31,9 +29,9 @@ import {
 import { useRouter } from "@stores/router";
 import { useServerStore } from "@stores/server";
 import { useT } from "@stores/ui-lang";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { fileKind, engineSupports, type InferenceEngine } from "../../../shared/modelscope";
 import { MODEL_PROFILES } from "../../../shared/model-profiles";
-import { DEFAULT_INFERENCE_PORT } from "../../../shared/server-info";
 import {
   CopyButton,
   EmptyResult,
@@ -157,45 +155,34 @@ export function VlmTab({
     queryFn: () => rpcClient.getOcrProviderConfig(),
   });
   const provider = providerData?.config;
-  const configured = !!provider?.base;
+  const configured = !!provider?.providerId;
 
-  const [pBase, setPBase] = useState("");
-  const [pKey, setPKey] = useState("");
+  // 云端 VLM OCR 只选厂商 + 模型（地址 / 密钥在「设置 → 模型云服务」里）。
+  const [pProviderId, setPProviderId] = useState("");
   const [pModel, setPModel] = useState("");
   const lastProvider = useRef("");
   useEffect(() => {
     if (!provider) return;
-    const sig = `${provider.base}|${provider.apiKey}|${provider.model}`;
+    const sig = `${provider.providerId}|${provider.model}`;
     if (sig === lastProvider.current) return;
     lastProvider.current = sig;
-    setPBase(provider.base);
-    setPKey(provider.apiKey ?? "");
+    setPProviderId(provider.providerId);
     setPModel(provider.model ?? "");
   }, [provider]);
 
   const saveProvider = useMutation({
     mutationFn: () =>
       rpcClient.saveOcrProviderConfig({
-        base: pBase.trim(),
-        apiKey: pKey.trim(),
+        providerId: pProviderId.trim(),
         model: pModel.trim(),
       }),
     onSuccess: () => {
       setError(undefined);
       void queryClient.invalidateQueries({ queryKey: ["ocr-provider"] });
+      void queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
     },
     onError: (e) => setError(String(e)),
   });
-
-  const fetchModels = useMutation({
-    mutationFn: () =>
-      rpcClient.listOcrProviderModels({
-        base: pBase.trim() || provider?.base || undefined,
-        apiKey: pKey.trim() || provider?.apiKey || undefined,
-      }),
-  });
-  const providerModels = fetchModels.data?.models ?? [];
-  const fetchError = fetchModels.data?.error ?? (fetchModels.isError ? String(fetchModels.error) : undefined);
 
   const run = useMutation({
     mutationFn: () =>
@@ -263,54 +250,28 @@ export function VlmTab({
             />
           </PanelSection>
 
-          <PanelSection title={t("ocr.vlm.remote.settings")}>
+          <PanelSection title={t("ocr.vlm.remote.settings")} hint={t("cloud.where")}>
             <div className="flex flex-col gap-2.5">
               <div className="flex flex-col gap-1">
-                <Label htmlFor="ocr-provider-base" className="text-[11px] text-muted-foreground">
-                  {t("ocr.vlm.remote.base")}
+                <Label className="text-[11px] text-muted-foreground">
+                  {t("ocr.vlm.remote.cloudProvider")}
                 </Label>
-                <Input
-                  id="ocr-provider-base"
-                  placeholder={`http://localhost:${DEFAULT_INFERENCE_PORT}/v1`}
-                  value={pBase}
-                  onChange={(e) => setPBase(e.target.value)}
-                  className="h-7 text-xs"
+                <CloudModelSelect
+                  // VLM 属于对话类模型：OCR 只列已启动厂商里的对话 / 视觉模型。
+                  kind="chat"
+                  providerId={pProviderId}
+                  model={pModel}
+                  size="sm"
+                  onChange={(choice) => {
+                    setPProviderId(choice.providerId);
+                    if (choice.model) setPModel(choice.model);
+                  }}
                 />
-              </div>
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="ocr-provider-key" className="text-[11px] text-muted-foreground">
-                  {t("ocr.vlm.remote.apiKey")}
-                </Label>
-                <Input
-                  id="ocr-provider-key"
-                  type="password"
-                  value={pKey}
-                  onChange={(e) => setPKey(e.target.value)}
-                  className="h-7 text-xs"
-                />
-              </div>
-              <div className="flex flex-col gap-1">
-                <Label htmlFor="ocr-provider-model" className="text-[11px] text-muted-foreground">
-                  {t("ocr.vlm.remote.model")}
-                </Label>
-                <Input
-                  id="ocr-provider-model"
-                  list="ocr-provider-models"
-                  placeholder="e.g. Qwen2.5-VL"
-                  value={pModel}
-                  onChange={(e) => setPModel(e.target.value)}
-                  className="h-7 text-xs"
-                />
-                <datalist id="ocr-provider-models">
-                  {providerModels.map((m) => (
-                    <option key={m} value={m} />
-                  ))}
-                </datalist>
               </div>
               <div className="flex items-center gap-1.5">
                 <Button
                   size="xs"
-                  disabled={saveProvider.isPending || !pBase.trim()}
+                  disabled={saveProvider.isPending || !pProviderId.trim()}
                   onClick={() => saveProvider.mutate()}
                 >
                   {saveProvider.isPending ? (
@@ -320,21 +281,7 @@ export function VlmTab({
                   )}
                   {t("ocr.vlm.remote.save")}
                 </Button>
-                <Button
-                  size="xs"
-                  variant="outline"
-                  disabled={fetchModels.isPending || !pBase.trim()}
-                  onClick={() => fetchModels.mutate()}
-                >
-                  {fetchModels.isPending ? (
-                    <Loader2Icon data-icon="inline-start" className="animate-spin" />
-                  ) : (
-                    <RefreshCwIcon data-icon="inline-start" />
-                  )}
-                  {t("ocr.vlm.remote.fetchModels")}
-                </Button>
               </div>
-              <ErrorNote error={fetchError} />
             </div>
           </PanelSection>
         </>

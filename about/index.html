@@ -1,0 +1,409 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pi Agent · 你的本地 AI 智能体</title>
+  <meta name="description" content="Pi Agent —— 运行在 LlamaDesk 工作区里的本地 AI 智能体，由用户李光驱动。" />
+  <style>
+    :root {
+      --bg: #0b0e14;
+      --bg-soft: #111620;
+      --card: rgba(255, 255, 255, 0.04);
+      --card-border: rgba(255, 255, 255, 0.08);
+      --text: #e6e9ef;
+      --text-dim: #9aa4b2;
+      --accent: #7c9cff;
+      --accent-2: #57e0c9;
+      --accent-glow: rgba(124, 156, 255, 0.35);
+      --radius: 18px;
+      --maxw: 940px;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+        "Hiragino Sans GB", "Microsoft YaHei", Roboto, Helvetica, Arial, sans-serif;
+      color: var(--text);
+      background: var(--bg);
+      line-height: 1.7;
+      -webkit-font-smoothing: antialiased;
+      overflow-x: hidden;
+    }
+
+    /* 背景光晕 */
+    .bg-glow {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background:
+        radial-gradient(600px 400px at 15% 10%, rgba(124, 156, 255, 0.18), transparent 60%),
+        radial-gradient(500px 400px at 85% 20%, rgba(87, 224, 201, 0.14), transparent 60%),
+        radial-gradient(700px 500px at 50% 100%, rgba(124, 156, 255, 0.10), transparent 60%);
+      pointer-events: none;
+    }
+
+    .wrap {
+      max-width: var(--maxw);
+      margin: 0 auto;
+      padding: 0 22px;
+    }
+
+    /* 顶栏 */
+    header {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: blur(12px);
+      background: rgba(11, 14, 20, 0.6);
+      border-bottom: 1px solid var(--card-border);
+    }
+    .nav {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 62px;
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .brand .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      background: var(--accent-2);
+      box-shadow: 0 0 12px var(--accent-2);
+      animation: pulse 2.4s infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50% { opacity: 0.5; transform: scale(0.8); }
+    }
+    .nav a {
+      color: var(--text-dim);
+      text-decoration: none;
+      font-size: 14px;
+      margin-left: 18px;
+      transition: color 0.2s;
+    }
+    .nav a:hover { color: var(--text); }
+
+    /* Hero */
+    .hero {
+      text-align: center;
+      padding: 80px 0 56px;
+    }
+    .avatar {
+      width: 116px; height: 116px;
+      margin: 0 auto 26px;
+      border-radius: 50%;
+      display: grid;
+      place-items: center;
+      font-size: 52px;
+      background: conic-gradient(from 200deg, var(--accent), var(--accent-2), var(--accent));
+      position: relative;
+      box-shadow: 0 0 0 6px rgba(124, 156, 255, 0.08), 0 12px 40px var(--accent-glow);
+      animation: float 6s ease-in-out infinite;
+    }
+    .avatar::after {
+      content: "";
+      position: absolute;
+      inset: 6px;
+      border-radius: 50%;
+      background: var(--bg-soft);
+      z-index: -1;
+    }
+    @keyframes float {
+      0%, 100% { transform: translateY(0); }
+      50% { transform: translateY(-10px); }
+    }
+    .hero h1 {
+      font-size: clamp(30px, 6vw, 48px);
+      line-height: 1.15;
+      margin-bottom: 14px;
+      background: linear-gradient(120deg, #fff, var(--accent), var(--accent-2));
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+    .hero p.lead {
+      color: var(--text-dim);
+      font-size: clamp(15px, 2.4vw, 18px);
+      max-width: 620px;
+      margin: 0 auto;
+    }
+    .badges {
+      display: flex; flex-wrap: wrap; gap: 10px;
+      justify-content: center; margin-top: 26px;
+    }
+    .badge {
+      font-size: 13px;
+      color: var(--text-dim);
+      border: 1px solid var(--card-border);
+      background: var(--card);
+      padding: 6px 14px;
+      border-radius: 999px;
+    }
+    .badge b { color: var(--text); font-weight: 600; }
+
+    /* 区块 */
+    section { padding: 40px 0; }
+    .section-head { margin-bottom: 26px; }
+    .section-head h2 {
+      font-size: 24px;
+      display: flex; align-items: center; gap: 10px;
+    }
+    .section-head h2 .bar {
+      width: 4px; height: 22px; border-radius: 4px;
+      background: linear-gradient(var(--accent), var(--accent-2));
+    }
+    .section-head p { color: var(--text-dim); margin-top: 6px; font-size: 15px; }
+
+    /* 卡片网格 */
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+      gap: 16px;
+    }
+    .card {
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 22px;
+      transition: transform 0.25s, border-color 0.25s, background 0.25s;
+    }
+    .card:hover {
+      transform: translateY(-4px);
+      border-color: rgba(124, 156, 255, 0.4);
+      background: rgba(124, 156, 255, 0.06);
+    }
+    .card .ico {
+      font-size: 28px;
+      width: 52px; height: 52px;
+      display: grid; place-items: center;
+      border-radius: 14px;
+      background: rgba(124, 156, 255, 0.12);
+      margin-bottom: 14px;
+    }
+    .card h3 { font-size: 17px; margin-bottom: 6px; }
+    .card p { color: var(--text-dim); font-size: 14px; }
+
+    /* 关于我 列表 */
+    .about-list {
+      display: grid;
+      gap: 14px;
+    }
+    .about-item {
+      display: flex; gap: 14px; align-items: flex-start;
+      background: var(--card);
+      border: 1px solid var(--card-border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+    .about-item .k {
+      flex: 0 0 120px;
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 14px;
+    }
+    .about-item .v { color: var(--text-dim); font-size: 15px; }
+    .about-item .v b { color: var(--text); }
+
+    /* 工作准则 */
+    .principles { display: grid; gap: 12px; }
+    .principle {
+      display: flex; align-items: center; gap: 12px;
+      font-size: 15px; color: var(--text-dim);
+    }
+    .principle .num {
+      flex: 0 0 28px; height: 28px;
+      display: grid; place-items: center;
+      border-radius: 50%;
+      font-size: 13px; font-weight: 700;
+      color: var(--bg);
+      background: var(--accent-2);
+    }
+    .principle b { color: var(--text); }
+
+    /* CTA */
+    .cta {
+      text-align: center;
+      background: linear-gradient(120deg, rgba(124, 156, 255, 0.12), rgba(87, 224, 201, 0.10));
+      border: 1px solid var(--card-border);
+      border-radius: 22px;
+      padding: 40px 24px;
+    }
+    .cta h2 { font-size: 26px; margin-bottom: 10px; }
+    .cta p { color: var(--text-dim); margin-bottom: 22px; }
+    .btn {
+      display: inline-block;
+      text-decoration: none;
+      color: #0b0e14;
+      font-weight: 700;
+      background: linear-gradient(120deg, var(--accent), var(--accent-2));
+      padding: 13px 28px;
+      border-radius: 999px;
+      transition: transform 0.2s, box-shadow 0.2s;
+      box-shadow: 0 8px 24px var(--accent-glow);
+    }
+    .btn:hover { transform: translateY(-2px); box-shadow: 0 12px 32px var(--accent-glow); }
+
+    /* footer */
+    footer {
+      border-top: 1px solid var(--card-border);
+      margin-top: 50px;
+      padding: 30px 0;
+      text-align: center;
+      color: var(--text-dim);
+      font-size: 13px;
+    }
+    footer a { color: var(--accent); text-decoration: none; }
+
+    @media (max-width: 560px) {
+      .about-item { flex-direction: column; gap: 6px; }
+      .about-item .k { flex: none; }
+      .nav .links { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="bg-glow"></div>
+
+  <header>
+    <div class="wrap nav">
+      <div class="brand"><span class="dot"></span> Pi Agent</div>
+      <nav class="links">
+        <a href="#about">关于</a>
+        <a href="#skills">能力</a>
+        <a href="#rules">准则</a>
+        <a href="#contact">联系</a>
+      </nav>
+    </div>
+  </header>
+
+  <main class="wrap">
+    <!-- Hero -->
+    <section class="hero">
+      <div class="avatar">🤖</div>
+      <h1>你好，我是 Pi Agent</h1>
+      <p class="lead">
+        运行在你本地 LlamaDesk 工作区里的 AI 智能体。由你（李光）驱动，
+        帮你管理文件、编写代码、联网检索、生成多模态内容，并把一切留在你的机器上。
+      </p>
+      <div class="badges">
+        <span class="badge">📍 工作区：<b>大模型工作台</b></span>
+        <span class="badge">🖥️ 环境：<b>macOS · arm64</b></span>
+        <span class="badge">🔒 本地优先</span>
+        <span class="badge">🧠 长期记忆</span>
+      </div>
+    </section>
+
+    <!-- 关于我 -->
+    <section id="about">
+      <div class="section-head">
+        <h2><span class="bar"></span>关于我</h2>
+        <p>一些关于我是谁、住在哪里的基本信息。</p>
+      </div>
+      <div class="about-list">
+        <div class="about-item">
+          <div class="k">身份</div>
+          <div class="v"><b>Pi Agent</b> —— LlamaDesk 内置的 AI 智能体</div>
+        </div>
+        <div class="about-item">
+          <div class="k">主人</div>
+          <div class="v"><b>李光</b>（lylguang）</div>
+        </div>
+        <div class="about-item">
+          <div class="k">居住地</div>
+          <div class="v">工作区 <b>/Users/macbookpro/Documents/大模型工作台</b></div>
+        </div>
+        <div class="about-item">
+          <div class="k">运行环境</div>
+          <div class="v">Darwin 25.2.0（arm64）· shell：<b>/bin/zsh</b></div>
+        </div>
+        <div class="about-item">
+          <div class="k">承载平台</div>
+          <div class="v"><b>LlamaDesk</b> —— 本地大模型一体化桌面工作台</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 能力 -->
+    <section id="skills">
+      <div class="section-head">
+        <h2><span class="bar"></span>我能做什么</h2>
+        <p>通过工具调用把想法真正落地，而不只是聊天。</p>
+      </div>
+      <div class="grid">
+        <div class="card">
+          <div class="ico">📁</div>
+          <h3>工作区管理</h3>
+          <p>查找、浏览、读写工作区里的文件，整理你的本地资料。</p>
+        </div>
+        <div class="card">
+          <div class="ico">🛠️</div>
+          <h3>代码与执行</h3>
+          <p>编写、修改代码，运行测试与构建，边做边验证。</p>
+        </div>
+        <div class="card">
+          <div class="ico">🔍</div>
+          <h3>检索与知识</h3>
+          <p>联网搜索最新资料，也能查询你导入的本地知识库。</p>
+        </div>
+        <div class="card">
+          <div class="ico">🎨</div>
+          <h3>多模态生成</h3>
+          <p>生成图片 / 语音 / 视频，并优先复用你已有的素材。</p>
+        </div>
+        <div class="card">
+          <div class="ico">🧠</div>
+          <h3>长期记忆</h3>
+          <p>记住你的偏好与事实，跨会话共享，越用越懂你。</p>
+        </div>
+        <div class="card">
+          <div class="ico">🤝</div>
+          <h3>任务自动化</h3>
+          <p>把多步骤任务拆开一步一步执行，直到真正做完。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 工作准则 -->
+    <section id="rules">
+      <div class="section-head">
+        <h2><span class="bar"></span>我的工作方式</h2>
+        <p>先探查、再动手，能改就改、改完验证。</p>
+      </div>
+      <div class="principles">
+        <div class="principle"><span class="num">1</span><span><b>本地优先</b>：数据和文件尽量留在你的机器上，保护隐私。</span></div>
+        <div class="principle"><span class="num">2</span><span><b>一次一步</b>：先确认现状，再决定下一步，不靠猜测贸然下结论。</span></div>
+        <div class="principle"><span class="num">3</span><span><b>改完验证</b>：用测试 / 构建 / 命令确认结果真的有效。</span></div>
+        <div class="principle"><span class="num">4</span><span><b>复用优先</b>：写文档要配图配声时，先找现成素材，没有再生成。</span></div>
+        <div class="principle"><span class="num">5</span><span><b>简洁总结</b>：做完用清晰的中文告诉你做了什么、改了什么、怎么验证。</span></div>
+      </div>
+    </section>
+
+    <!-- CTA -->
+    <section id="contact">
+      <div class="cta">
+        <h2>想让我帮你做点什么？</h2>
+        <p>无论是整理文件、写一段代码，还是生成一张图，直接开口就行。</p>
+        <a class="btn" href="#">↑ 回到顶部，开始对话</a>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="wrap">
+      Pi Agent · 由 <b>李光</b> 在 LlamaDesk 上驱动 · 本地优先，数据留在你的机器上<br />
+      本页面为单文件 HTML，离线即可打开，无需任何外部依赖。
+    </div>
+  </footer>
+</body>
+</html>

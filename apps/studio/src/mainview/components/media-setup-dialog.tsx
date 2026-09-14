@@ -26,6 +26,7 @@ import {
   DialogTitle,
 } from "@ui/dialog";
 import { ScrollArea } from "@ui/scroll-area";
+import { CloudModelSelect } from "@components/cloud-model-select";
 import { cn } from "@/mainview/lib/utils";
 import type { ImageGenBackend } from "../../bun/image-gen";
 import type { MediaSetupCandidate } from "../../bun/media-setup";
@@ -44,8 +45,8 @@ export function MediaSetupDialog() {
   const queryClient = useQueryClient();
 
   const [backend, setBackend] = useState<ImageGenBackend>("api");
-  const [apiBase, setApiBase] = useState("");
-  const [apiKey, setApiKey] = useState("");
+  // 云端只记服务商 id：地址 / 密钥在「设置 → 模型云服务」里（弹窗不再让用户填）。
+  const [providerId, setProviderId] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [model, setModel] = useState("");
   const [candidates, setCandidates] = useState<MediaSetupCandidate[]>([]);
@@ -54,12 +55,12 @@ export function MediaSetupDialog() {
   const [submitting, setSubmitting] = useState(false);
 
   const scan = useMutation({
-    mutationFn: (input: { backend: ImageGenBackend; base: string; apiKey: string }) =>
+    mutationFn: (input: { backend: ImageGenBackend; base: string; providerId?: string }) =>
       rpcClient.scanMediaSetupCandidates({
         kind: "image",
         backend: input.backend,
         base: input.base.trim(),
-        apiKey: input.apiKey.trim(),
+        providerId: input.providerId,
       }),
     onSuccess: (res) => {
       setScanned(true);
@@ -77,12 +78,13 @@ export function MediaSetupDialog() {
     },
   });
 
-  const scanFor = (next: { backend?: ImageGenBackend; base?: string; key?: string }) => {
+  const scanFor = (next: { backend?: ImageGenBackend; base?: string; providerId?: string }) => {
     const b = next.backend ?? backend;
+    // 云端不传地址：主进程按选中的服务商（或当前配置的厂商）去扫。
     scan.mutate({
       backend: b,
-      base: next.base ?? (b === "comfyui" ? comfyBase : apiBase),
-      apiKey: next.key ?? apiKey,
+      base: b === "comfyui" ? (next.base ?? comfyBase) : "",
+      providerId: b === "comfyui" ? undefined : (next.providerId ?? providerId),
     });
   };
 
@@ -91,8 +93,7 @@ export function MediaSetupDialog() {
     if (!request) return;
     const cfg = request.config;
     setBackend(request.backend);
-    setApiBase(cfg.apiBase);
-    setApiKey(cfg.apiKey);
+    setProviderId(cfg.providerId);
     setComfyBase(cfg.comfyBase);
     setModel(cfg.model);
     setCandidates(request.candidates);
@@ -102,8 +103,7 @@ export function MediaSetupDialog() {
     if (request.candidates.length === 0) {
       scan.mutate({
         backend: request.backend,
-        base: request.backend === "comfyui" ? cfg.comfyBase : cfg.apiBase,
-        apiKey: cfg.apiKey,
+        base: request.backend === "comfyui" ? cfg.comfyBase : "",
       });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -159,8 +159,7 @@ export function MediaSetupDialog() {
       action: "confirm",
       backend,
       model: model.trim() || undefined,
-      apiBase: apiBase.trim(),
-      apiKey: apiKey.trim(),
+      providerId: providerId.trim() || undefined,
       comfyBase: comfyBase.trim(),
     });
     setRequest(null);
@@ -208,7 +207,7 @@ export function MediaSetupDialog() {
                   if (option.id !== "mlx") {
                     scanFor({
                       backend: option.id,
-                      base: option.id === "comfyui" ? comfyBase : apiBase,
+                      base: option.id === "comfyui" ? comfyBase : "",
                     });
                   }
                 }}
@@ -232,33 +231,35 @@ export function MediaSetupDialog() {
 
           {backend !== "mlx" ? (
             <>
-              <div>
-                <Label htmlFor="setup-base" className="mb-1 block text-xs">
-                  {backend === "comfyui" ? t("image.config.comfyBase") : t("image.config.base")}
-                </Label>
-                <Input
-                  id="setup-base"
-                  value={backend === "comfyui" ? comfyBase : apiBase}
-                  placeholder={backend === "comfyui" ? "http://127.0.0.1:8188" : "https://api.siliconflow.cn/v1"}
-                  onChange={(e) =>
-                    backend === "comfyui" ? setComfyBase(e.target.value) : setApiBase(e.target.value)
-                  }
-                  className="h-8 text-xs"
-                />
-              </div>
-              {backend === "api" && (
+              {backend === "comfyui" ? (
                 <div>
-                  <Label htmlFor="setup-key" className="mb-1 block text-xs">
-                    {t("image.config.apiKey")}
+                  <Label htmlFor="setup-base" className="mb-1 block text-xs">
+                    {t("image.config.comfyBase")}
                   </Label>
                   <Input
-                    id="setup-key"
-                    type="password"
-                    value={apiKey}
-                    placeholder="sk-…"
-                    onChange={(e) => setApiKey(e.target.value)}
+                    id="setup-base"
+                    value={comfyBase}
+                    placeholder="http://127.0.0.1:8188"
+                    onChange={(e) => setComfyBase(e.target.value)}
                     className="h-8 text-xs"
                   />
+                </div>
+              ) : (
+                <div>
+                  <Label className="mb-1 block text-xs">{t("media.setup.cloudProvider")}</Label>
+                  <CloudModelSelect
+                    kind="image"
+                    providerId={providerId}
+                    model={model}
+                    size="sm"
+                    onChange={(choice) => {
+                      setProviderId(choice.providerId);
+                      if (choice.model) setModel(choice.model);
+                      // 换了厂商就按新厂商扫一遍它的模型清单（厂商行刚选，还没落盘）。
+                      if (choice.providerId) scanFor({ providerId: choice.providerId });
+                    }}
+                  />
+                  <p className="mt-1 text-[10px] text-muted-foreground">{t("cloud.where")}</p>
                 </div>
               )}
               <div className="flex items-center gap-2">
@@ -354,7 +355,15 @@ export function MediaSetupDialog() {
                           <button
                             type="button"
                             aria-pressed={model === candidate.id}
-                            onClick={() => setModel(candidate.id)}
+                            onClick={() => {
+                              // 来自「云端模型」的候选带服务商 id：选中就切到云端生图
+                              // 并按这个厂商确认（地址 / 密钥由厂商行提供）。
+                              if (candidate.providerId) {
+                                setBackend("api");
+                                setProviderId(candidate.providerId);
+                              }
+                              setModel(candidate.id);
+                            }}
                             className="flex min-w-0 flex-1 flex-col items-start gap-0.5 text-left"
                           >
                             <span className="truncate text-xs font-medium">{candidate.label}</span>

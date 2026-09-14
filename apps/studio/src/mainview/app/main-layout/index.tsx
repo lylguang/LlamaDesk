@@ -9,8 +9,6 @@ import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
 import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
-import { ConsoleScreen } from "./console-screen";
-import { DashboardScreen } from "../dashboard-screen";
 import { ChatWindow } from "../chat-screen";
 import { AgentWindow } from "../agent-screen";
 import { VoiceCallWindow } from "../voice-call-screen";
@@ -26,6 +24,8 @@ import { KbScreen } from "../kb";
 import { BenchmarkScreen } from "../benchmark-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { DownloadsButton } from "@components/download-panel";
+import { NotificationBell } from "../agent/notification-bell";
+import { useViewStateReport } from "../../hooks/use-view-state-report";
 import { MediaSetupDialog } from "@components/media-setup-dialog";
 import { StatusPill } from "@components/status-pill";
 import { ErrorBoundary } from "@components/error-boundary";
@@ -73,10 +73,6 @@ const Outlet = () => {
     content = <ModelDetailScreen />;
   } else if (route.path === "settings") {
     content = <SettingsScreen />;
-  } else if (route.path === "server") {
-    content = <ConsoleScreen />;
-  } else if (route.path === "stats") {
-    content = <DashboardScreen />;
   } else if (route.path === "document") {
     content = <DocumentView id={route.id} />;
   } else if (route.path === "chat" || route.path === "index") {
@@ -95,9 +91,14 @@ export function MainLayout() {
   const setLang = useUILang((s) => s.setLang);
   const route = useRouter((s) => s.route);
   const setRoute = useRouter((s) => s.setRoute);
+  const activeApp = useAppStore((s) => s.activeApp);
 
-  // 设置页是全新的一级页面，不显示左侧对话菜单。
-  const showSidebar = route.path !== "settings";
+  // 设置页是全新的一级页面，不显示左侧对话菜单；
+  // Agent 页自带会话侧栏（置顶 / 归档 / 工作区分组），全局侧栏会重复列出同一批会话。
+  const showSidebar = route.path !== "settings" && activeApp !== "agent";
+
+  // 回报「用户在看什么」：主进程据此决定后台跑完的回合要不要发通知。
+  useViewStateReport();
 
   const { data } = useQuery({
     queryKey: ["settings"],
@@ -137,6 +138,7 @@ export function MainLayout() {
           )}
           <div className="ml-auto flex items-center gap-2">
             <StatusPill />
+            <NotificationBell />
             <DownloadsButton />
           </div>
         </header>

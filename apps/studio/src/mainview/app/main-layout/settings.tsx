@@ -3,13 +3,10 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   ServerIcon,
   CpuIcon,
-  GaugeIcon,
   BlocksIcon,
   GlobeIcon,
   CheckIcon,
-  XCircleIcon,
   CopyIcon,
-  HardDriveIcon,
   TerminalSquareIcon,
   TerminalIcon,
   LayoutDashboardIcon,
@@ -19,32 +16,35 @@ import {
   WaypointsIcon,
   GithubIcon,
   PlugIcon,
-  SlidersHorizontalIcon,
+  ShieldIcon,
   PaletteIcon,
-  BrainIcon,
   ArchiveIcon,
+  SparklesIcon,
+  SlidersHorizontalIcon,
+  ChartColumnIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
-import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { IntegrationModelSelect } from "@/mainview/components/integration-model-select";
 import { ScrollArea } from "@ui/scroll-area";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { Spinner } from "@ui/spinner";
 import { CloudProviderPanel } from "./cloud-provider-panel";
 import { DefaultModelsPanel } from "./default-models-panel";
 import { AboutTab } from "./about-tab";
 import { WebSearchTab } from "./web-search-tab";
 import { McpTab } from "./mcp-tab";
-import { MemoryTab } from "./memory-tab";
-import { GeneralPrefsTab, AppearanceTab } from "./prefs-tabs";
+import { AppearanceTab } from "./prefs-tabs";
+import { GeneralTab } from "./general-tab";
 import { CliTab } from "./cli-tab";
 import { BackupTab } from "./backup-tab";
+import { PermissionsTab } from "./permissions-tab";
+import { AgentCapsTab } from "./agent-caps-tab";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import { DashboardScreen } from "../dashboard-screen";
+import { UsageScreen } from "../usage-screen";
 import { ConsoleScreen } from "./console-screen";
 import { ModelDetailScreen } from "../model-detail";
 import { ModelsScreen } from "../models-screen";
@@ -55,55 +55,6 @@ import { useModelDetailStore, type ModelDetailSource } from "@stores/model-detai
 import { useRouter } from "@stores/router";
 
 type SettingsFormState = Record<string, string>;
-
-interface FieldDef {
-  key: string;
-  label: string;
-  placeholder: string;
-  description?: string;
-  type?: "text" | "number" | "password";
-}
-
-
-const PERFORMANCE_FIELDS: FieldDef[] = [
-  { key: "SERVER_CTX_SIZE", label: "Context Size", placeholder: "8192", type: "number" },
-  {
-    key: "SERVER_GPU_LAYERS",
-    label: "GPU Layers",
-    placeholder: "-1 (all)",
-    description: "-1 = offload all layers to GPU",
-    type: "number",
-  },
-  { key: "SERVER_PARALLEL", label: "Parallel Requests", placeholder: "1", type: "number" },
-  { key: "SERVER_BATCH_SIZE", label: "Batch Size", placeholder: "256", type: "number" },
-  { key: "SERVER_UBATCH_SIZE", label: "Micro Batch Size", placeholder: "64", type: "number" },
-];
-
-const GENERATION_FIELDS: FieldDef[] = [
-  {
-    key: "MAX_VLLM_RETRIES",
-    label: "Max Retries",
-    placeholder: "6",
-    description: "Retry count for recoverable errors",
-    type: "number",
-  },
-  {
-    key: "MAX_VLLM_FAILURE_RETRIES",
-    label: "Max Failure Retries",
-    placeholder: "0",
-    description: "Retry count for hard failures (0 = no retry)",
-    type: "number",
-  },
-  {
-    key: "PAGE_CONCURRENCY",
-    label: "Page Concurrency",
-    placeholder: "3",
-    description: "Number of pages processed in parallel",
-    type: "number",
-  },
-];
-
-const CACHE_TYPES = ["q8_0", "q4_0", "q4_1", "f16"];
 
 const LAUNCHER_TOOLS: { key: string; labelKey: string; tool: string }[] = [
   { key: "LAUNCHER_CODEX_MODEL", labelKey: "settings.integrations.codex", tool: "codex" },
@@ -128,13 +79,14 @@ type SettingsTab =
   | "store"
   | "market"
   | "gateway"
-  | "performance"
   | "integrations"
   | "logs"
+  | "usage"
   | "stats"
   | "websearch"
-  | "memory"
   | "mcp"
+  | "permissions"
+  | "agentcaps"
   | "cli"
   | "backup"
   | "general"
@@ -148,16 +100,17 @@ const TAB_DEFS: Record<SettingsTab, { icon: ReactNode; labelKey: string }> = {
   store: { icon: <BoxIcon className="size-4" />, labelKey: "settings.store" },
   market: { icon: <Link2Icon className="size-4" />, labelKey: "settings.market" },
   gateway: { icon: <WaypointsIcon className="size-4" />, labelKey: "settings.gateway" },
-  performance: { icon: <GaugeIcon className="size-4" />, labelKey: "settings.performance" },
   integrations: { icon: <BlocksIcon className="size-4" />, labelKey: "settings.integrations" },
   logs: { icon: <TerminalSquareIcon className="size-4" />, labelKey: "console.title" },
+  usage: { icon: <ChartColumnIcon className="size-4" />, labelKey: "settings.usage.title" },
   stats: { icon: <LayoutDashboardIcon className="size-4" />, labelKey: "settings.dashboard" },
   websearch: { icon: <GlobeIcon className="size-4" />, labelKey: "settings.webSearch.title" },
-  memory: { icon: <BrainIcon className="size-4" />, labelKey: "settings.memory.title" },
   mcp: { icon: <PlugIcon className="size-4" />, labelKey: "settings.mcp.title" },
+  permissions: { icon: <ShieldIcon className="size-4" />, labelKey: "settings.permissions.title" },
+  agentcaps: { icon: <SparklesIcon className="size-4" />, labelKey: "settings.agentCaps.title" },
   cli: { icon: <TerminalIcon className="size-4" />, labelKey: "settings.cli.title" },
   backup: { icon: <ArchiveIcon className="size-4" />, labelKey: "settings.backup.title" },
-  general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.prefs.general" },
+  general: { icon: <SlidersHorizontalIcon className="size-4" />, labelKey: "settings.general.title" },
   appearance: { icon: <PaletteIcon className="size-4" />, labelKey: "settings.appearance" },
   about: { icon: <GithubIcon className="size-4" />, labelKey: "settings.aboutTab.title" },
 };
@@ -171,11 +124,11 @@ const TAB_GROUPS: { labelKey?: string; tabs: SettingsTab[] }[] = [
   },
   {
     labelKey: "settings.group.services",
-    tabs: ["gateway", "integrations", "performance"],
+    tabs: ["gateway", "integrations"],
   },
-  { labelKey: "settings.group.tools", tabs: ["websearch", "memory", "mcp", "cli"] },
+  { labelKey: "settings.group.tools", tabs: ["websearch", "mcp", "permissions", "agentcaps", "cli"] },
   { labelKey: "settings.group.prefs", tabs: ["general", "appearance", "about"] },
-  { labelKey: "settings.group.data", tabs: ["logs", "backup"] },
+  { labelKey: "settings.group.data", tabs: ["usage", "logs", "backup"] },
 ];
 
 /** 自带头部（PageHeader / 宽版面板）的页面不再重复显示通用标题。 */
@@ -184,8 +137,9 @@ const SELF_HEADED_TABS: SettingsTab[] = [
   "defaults",
   "about",
   "websearch",
-  "memory",
   "mcp",
+  "permissions",
+  "agentcaps",
   "cli",
   "backup",
   "general",
@@ -194,40 +148,6 @@ const SELF_HEADED_TABS: SettingsTab[] = [
 
 /** 命令 / 代码片段较宽，命令行页与云服务、默认模型一样放宽内容宽度。 */
 const WIDE_TABS: SettingsTab[] = ["network", "defaults", "cli"];
-
-function FieldGrid({
-  fields,
-  form,
-  onUpdate,
-}: {
-  fields: FieldDef[];
-  form: SettingsFormState;
-  onUpdate: (key: string, value: string) => void;
-}) {
-  return (
-    <div className="grid gap-3 sm:grid-cols-2">
-      {fields.map((field) => (
-        <div key={field.key}>
-          <Label htmlFor={field.key} className="mb-1 text-xs">
-            {field.label}
-          </Label>
-          <Input
-            id={field.key}
-            type={field.type === "password" ? "password" : "text"}
-            inputMode={field.type === "number" ? "numeric" : undefined}
-            placeholder={field.placeholder}
-            value={form[field.key] ?? ""}
-            onChange={(e) => onUpdate(field.key, e.target.value)}
-            className="h-8 text-xs"
-          />
-          {field.description && (
-            <p className="mt-1 text-[11px] text-muted-foreground">{field.description}</p>
-          )}
-        </div>
-      ))}
-    </div>
-  );
-}
 
 function SaveRow({ mutation, hint }: { mutation: { mutate: () => void; isPending: boolean; isSuccess: boolean }; hint?: string }) {
   const t = useT();
@@ -252,63 +172,6 @@ interface SaveMutationLike {
   isPending: boolean;
   isSuccess: boolean;
   reset: () => void;
-}
-
-function PerformanceSettings({
-  form,
-  updateField,
-  saveMutation,
-}: {
-  form: SettingsFormState;
-  updateField: (key: string, value: string) => void;
-  saveMutation: SaveMutationLike;
-}) {
-  const t = useT();
-  return (
-    <div className="flex flex-col gap-5">
-      <div>
-        <h3 className="flex items-center gap-2 text-sm font-medium">
-          <GaugeIcon className="size-4" />
-          {t("settings.scheduler.title")}
-        </h3>
-        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.scheduler.desc")}</p>
-        <FieldGrid fields={PERFORMANCE_FIELDS} form={form} onUpdate={updateField} />
-      </div>
-
-      <div>
-        <h3 className="flex items-center gap-2 text-sm font-medium">
-          <HardDriveIcon className="size-4" />
-          {t("settings.cache.title")}
-        </h3>
-        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.cache.desc")}</p>
-        <div className="grid gap-3 sm:grid-cols-2">
-          {(["SERVER_CACHE_TYPE_K", "SERVER_CACHE_TYPE_V"] as const).map((key) => (
-            <div key={key}>
-              <Label htmlFor={key} className="mb-1 text-xs">{key === "SERVER_CACHE_TYPE_K" ? "Cache Type K" : "Cache Type V"}</Label>
-              <Select value={form[key] ?? "q8_0"} onValueChange={(v) => updateField(key, v)}>
-                <SelectTrigger id={key} className="h-8 w-full text-xs">
-                  <SelectValue />
-                </SelectTrigger>
-                <SelectContent>
-                  {CACHE_TYPES.map((c) => (
-                    <SelectItem key={c} value={c}>{c}</SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
-            </div>
-          ))}
-        </div>
-      </div>
-
-      <div>
-        <h3 className="mb-2 text-sm font-medium">{t("settings.generation")}</h3>
-        <p className="mb-2 text-[11px] text-muted-foreground">{t("settings.generation.desc")}</p>
-        <FieldGrid fields={GENERATION_FIELDS} form={form} onUpdate={updateField} />
-      </div>
-
-      <SaveRow mutation={saveMutation} hint={t("settings.restartHint")} />
-    </div>
-  );
 }
 
 /**
@@ -511,12 +374,6 @@ export function SettingsScreen() {
     }
   }, [data]);
 
-  const PERFORMANCE_KEYS = [
-    ...PERFORMANCE_FIELDS.map((f) => f.key),
-    "SERVER_CACHE_TYPE_K",
-    "SERVER_CACHE_TYPE_V",
-    ...GENERATION_FIELDS.map((f) => f.key),
-  ];
   const INTEGRATION_KEYS = [
     "LAUNCHER_CLAUDE_MODE",
     ...CLAUDE_TIERS.map((c) => c.key),
@@ -544,7 +401,6 @@ export function SettingsScreen() {
       },
     });
 
-  const savePerformance = useTabSave(PERFORMANCE_KEYS, { invalidateConnection: true });
   const saveIntegrations = useTabSave(INTEGRATION_KEYS);
 
   const updateField = (key: string, value: string) => {
@@ -554,7 +410,10 @@ export function SettingsScreen() {
   return (
     <div className="flex min-h-0 flex-1">
       {/* Left category nav：分组标题 + 条目 */}
-      <div className="flex w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3">
+      <nav
+        aria-label={t("settings.title")}
+        className="flex w-44 shrink-0 flex-col gap-1 overflow-y-auto border-r p-3"
+      >
         {TAB_GROUPS.map((group) => (
           <div key={group.labelKey ?? group.tabs[0]} className="mb-1 flex flex-col gap-0.5">
             {group.labelKey && (
@@ -583,7 +442,7 @@ export function SettingsScreen() {
             })}
           </div>
         ))}
-      </div>
+      </nav>
 
       {/* Right content: detail (opened in place) takes precedence over tab content */}
       {detail ? (
@@ -610,6 +469,11 @@ export function SettingsScreen() {
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <DashboardScreen />
         </div>
+      ) : activeTab === "usage" ? (
+        // 使用统计是宽版仪表盘（热力图 + 三张图），与「概览」一样绕开通用窄栏。
+        <ScrollArea className="min-h-0 min-w-0 flex-1">
+          <UsageScreen />
+        </ScrollArea>
       ) : activeTab === "logs" ? (
         <div className="flex min-h-0 min-w-0 flex-1 flex-col">
           <ConsoleScreen />
@@ -635,10 +499,6 @@ export function SettingsScreen() {
 
             {activeTab === "defaults" && <DefaultModelsPanel />}
 
-            {activeTab === "performance" && (
-              <PerformanceSettings form={form} updateField={updateField} saveMutation={savePerformance} />
-            )}
-
             {activeTab === "integrations" && (
               <IntegrationsSettings form={form} updateField={updateField} saveMutation={saveIntegrations} />
             )}
@@ -647,16 +507,16 @@ export function SettingsScreen() {
               <WebSearchTab form={form} updateField={updateField} />
             )}
 
-            {activeTab === "memory" && <MemoryTab />}
-
             {activeTab === "mcp" && <McpTab />}
+            {activeTab === "permissions" && <PermissionsTab />}
+            {activeTab === "agentcaps" && <AgentCapsTab />}
 
             {activeTab === "cli" && <CliTab />}
 
             {activeTab === "backup" && <BackupTab />}
 
             {activeTab === "general" && (
-              <GeneralPrefsTab form={form} updateField={updateField} />
+              <GeneralTab form={form} updateField={updateField} />
             )}
 
             {activeTab === "appearance" && (

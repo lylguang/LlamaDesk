@@ -67,12 +67,19 @@ describe("classifyModelName", () => {
     // 生视频
     ["doubao-seedance-1-0-pro", "video"],
     ["MiniMax-Hailuo-02", "video"],
+    // MiniMax 的生视频型号（口径见 MINIMAX_VIDEO_MODELS）
+    ["MiniMax-H3", "video"],
+    ["MiniMax-H3-Max", "video"],
     ["Wan-AI/Wan2.2-T2V-A14B", "video"],
     ["kling-v1", "video"],
     ["veo-3", "video"],
-    // 认不出来 —— 保持 other（对话选择器仍然保留，不能藏掉）
+    // 认不出来 —— 保持 other（对话选择器仍然保留，不能藏掉）。
+    // MiniMax 的对话模型（M1 / Text-01）就在这一类里：名字里没有可识别的对话特征，
+    // 判成 other 才不会把它从对话选择器里误伤掉。
     ["o3-mini", "other"],
     ["step-audio-2", "other"],
+    ["MiniMax-M1", "other"],
+    ["MiniMax-Text-01", "other"],
   ];
 
   for (const [id, expected] of cases) {

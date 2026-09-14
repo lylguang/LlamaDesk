@@ -45,7 +45,7 @@ import {
   type MemoryEventEntry,
   type MemoryStatus,
 } from "@/shared/memory";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { SettingsSection, SettingRow } from "./setting-ui";
 
 const CATEGORY_KEY = (c: MemoryCategory) => `settings.memory.category.${c}`;
 const STATUS_KEY = (s: MemoryStatus) => `settings.memory.status.${s}`;
@@ -769,17 +769,3 @@ export function MemoryListCard() {
   );
 }
 
-/** 设置 → 工具 → 记忆：开关 + 待确认队列 + 记忆库 + 维护 + 外部 Agent 同步。 */
-export function MemoryTab() {
-  const t = useT();
-  return (
-    <div className="flex flex-col gap-4">
-      <PageHeader title={t("settings.memory.title")} description={t("settings.memory.desc")} />
-      <MemoryEnableCard />
-      <MemoryPendingCard />
-      <MemoryListCard />
-      <MemoryMaintenanceCard />
-      <MemorySyncCard />
-    </div>
-  );
-}

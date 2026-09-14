@@ -1,4 +1,6 @@
 import { getSetting, updateSettings } from "./db/settings";
+import * as CloudProviders from "./cloud-providers";
+import { proxyWebSocketOptions } from "./proxy";
 
 /**
  * Qwen Audio Realtime（DashScope「实时语音通话」云端模式）。
@@ -20,19 +22,26 @@ import { getSetting, updateSettings } from "./db/settings";
 export type VoiceCallProvider = "local" | "cloud";
 
 /** 可选的云端实时模型（qwen-audio-agent 默认即 plus 档）。 */
-export const REALTIME_MODELS = [
-  "qwen-audio-3.0-realtime-plus",
-  "qwen-audio-3.0-realtime-flash",
-  "qwen3.5-omni-flash-realtime",
-  "qwen3.5-omni-plus-realtime",
-] as const;
+// 常量定义在 shared（通话页也要用；webview 不能值导入本模块，见那边的说明），
+// 这里转出去保持既有导入方不变。
+import {
+  DEFAULT_REALTIME_BASE_URL,
+  DEFAULT_REALTIME_MODEL,
+  DEFAULT_REALTIME_VOICE,
+  REALTIME_MODELS,
+} from "../shared/realtime-voice";
 
-export const DEFAULT_REALTIME_BASE_URL = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
-export const DEFAULT_REALTIME_MODEL = "qwen-audio-3.0-realtime-plus";
-export const DEFAULT_REALTIME_VOICE = "longanqian";
+export {
+  DEFAULT_REALTIME_BASE_URL,
+  DEFAULT_REALTIME_MODEL,
+  DEFAULT_REALTIME_VOICE,
+  REALTIME_MODELS,
+};
 
 export type RealtimeProviderConfig = {
   provider: VoiceCallProvider;
+  /** 选中的云厂商（密钥从它取）；空 = 用旧版手填的 Key。 */
+  providerId: string;
   apiKey: string;
   baseUrl: string;
   model: string;
@@ -45,10 +54,17 @@ export function getVoiceCallProvider(): VoiceCallProvider {
   return getSetting("VOICE_CALL_PROVIDER") === "cloud" ? "cloud" : "local";
 }
 
+/**
+ * 实时通话的云端配置。API Key 优先取选中厂商的（与其它功能页同一套配置），
+ * 没选厂商时回退到旧版手填的 `VOICE_CALL_REALTIME_API_KEY`。
+ */
 export function getRealtimeProviderConfig(): RealtimeProviderConfig {
-  const apiKey = (getSetting("VOICE_CALL_REALTIME_API_KEY") || "").trim();
+  const providerId = (getSetting("VOICE_CALL_REALTIME_PROVIDER_ID") || "").trim();
+  const provider = CloudProviders.resolveCloudProvider(providerId);
+  const apiKey = provider?.apiKey.trim() || (getSetting("VOICE_CALL_REALTIME_API_KEY") || "").trim();
   return {
     provider: getVoiceCallProvider(),
+    providerId,
     apiKey,
     baseUrl: (getSetting("VOICE_CALL_REALTIME_BASE_URL") || DEFAULT_REALTIME_BASE_URL).trim(),
     model: (getSetting("VOICE_CALL_REALTIME_MODEL") || DEFAULT_REALTIME_MODEL).trim(),
@@ -59,6 +75,7 @@ export function getRealtimeProviderConfig(): RealtimeProviderConfig {
 
 export function saveRealtimeProviderConfig(cfg: {
   provider?: VoiceCallProvider;
+  providerId?: string;
   apiKey?: string;
   baseUrl?: string;
   model?: string;
@@ -66,6 +83,7 @@ export function saveRealtimeProviderConfig(cfg: {
 }): void {
   const settings: Record<string, string> = {};
   if (cfg.provider !== undefined) settings.VOICE_CALL_PROVIDER = cfg.provider;
+  if (cfg.providerId !== undefined) settings.VOICE_CALL_REALTIME_PROVIDER_ID = cfg.providerId.trim();
   if (cfg.apiKey !== undefined) settings.VOICE_CALL_REALTIME_API_KEY = cfg.apiKey.trim();
   if (cfg.baseUrl !== undefined) settings.VOICE_CALL_REALTIME_BASE_URL = cfg.baseUrl.trim();
   if (cfg.model !== undefined) settings.VOICE_CALL_REALTIME_MODEL = cfg.model.trim();
@@ -191,9 +209,10 @@ export class RealtimeVoiceClient {
     this.log(`realtime connect: ${url}`);
     let ws: WebSocket;
     try {
-      // Bun 的 WebSocket 支持自定义 headers，但 DOM 类型签名没有，故断言。
+      // Bun 的 WebSocket 支持自定义 headers 与 proxy，但 DOM 类型签名没有，故此处断言。
       ws = new WebSocket(url, {
         headers: { Authorization: `Bearer ${this.cfg.apiKey}` },
+        ...proxyWebSocketOptions(url),
       } as unknown as string);
     } catch (e) {
       this.fail(`无法连接云端实时语音：${e instanceof Error ? e.message : String(e)}`);
@@ -464,6 +483,7 @@ export function testRealtimeConnection(
     try {
       ws = new WebSocket(url, {
         headers: { Authorization: `Bearer ${apiKey}` },
+        ...proxyWebSocketOptions(url),
       } as unknown as string);
     } catch (e) {
       resolve({ ok: false, error: `无法创建 WebSocket 连接：${e instanceof Error ? e.message : String(e)}` });

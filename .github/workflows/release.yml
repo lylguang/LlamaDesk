@@ -267,7 +267,10 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
 
     steps:
-      # 发布说明要从 CHANGELOG.md 里 awk 出对应小节,没有 checkout 就读不到文件。
+      # 必须检出仓库：下面要从 CHANGELOG.md 里取这一版的小节。此前这个 job 只有
+      # download-artifact，工作区里根本没有 CHANGELOG.md —— awk 报 "cannot open file"
+      # 之后被 `|| true` 吞掉，于是每次都走"没有这一版小节"的回退。固定 ref 以支持
+      # workflow_dispatch 手动指定 tag（tag push 时两者等价）。
       - name: Checkout tag
         uses: actions/checkout@v4
         with:
@@ -310,13 +313,22 @@ jobs:
             echo ""
           } > "$NOTES"
           VERSION="${RELEASE_TAG#v}"
+          # 读不到文件与"没有这一版小节"是两件事，分开报：合在一起会把人引向
+          # "CHANGELOG 里没写"（其实文件压根不在工作区）。两种都不阻断发布，
+          # 但都留一条 warning —— 静默回退正是这个功能一直没生效却没被发现的原因。
           SECTION="$RUNNER_TEMP/section.md"
-          awk -v v="$VERSION" '
+          if [ ! -f CHANGELOG.md ]; then
+            echo "::warning::工作区里没有 CHANGELOG.md（发布说明将自动生成）"
+            echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" >> "$NOTES"
+          elif ! awk -v v="$VERSION" '
             $0 ~ "^## \\[" v "\\]" { inside = 1; next }
             inside && /^## \[/ { exit }
             inside { print }
-          ' CHANGELOG.md > "$SECTION" || true
-          if [ ! -s "$SECTION" ]; then
+          ' CHANGELOG.md > "$SECTION"; then
+            echo "::warning::解析 CHANGELOG.md 失败（发布说明将自动生成）"
+            echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" >> "$NOTES"
+          elif [ ! -s "$SECTION" ]; then
+            echo "::warning::CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。"
             echo "CHANGELOG.md 里没有 ${VERSION} 小节，本版发布说明为自动生成。" >> "$NOTES"
           fi
           cat "$SECTION" >> "$NOTES"

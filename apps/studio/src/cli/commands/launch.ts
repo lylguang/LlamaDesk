@@ -801,7 +801,7 @@ function configureChatgpt(baseURL: string, apiKey: string, model: string): void 
   };
   const providerBlock = [
     `[model_providers.${CHATGPT_PROVIDER}]`,
-    `name = "OmniStudio"`,
+    `name = "LlamaDesk"`,
     `base_url = "${esc(baseURL)}"`,
     `wire_api = "responses"`,
     `experimental_bearer_token = "${esc(apiKey)}"`,

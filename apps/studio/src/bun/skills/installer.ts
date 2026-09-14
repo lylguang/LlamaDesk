@@ -12,8 +12,8 @@ import {
 } from "fs";
 import { randomUUID } from "crypto";
 import type { SkillSource, SkillsInstallProgress } from "../../shared/skills";
-import { getCentralRepoDir, getTmpDir, ensureCentralRepo, muteSelfWrites } from "./central-repo";
-import { isInsideDir, safeJoin, safeName } from "../path-safety";
+import { centralSkillDir, getCentralRepoDir, getTmpDir, ensureCentralRepo, muteSelfWrites } from "./central-repo";
+import { isInsideDir, safeJoin } from "../path-safety";
 import {
   upsertSkill,
   getSkillRow,
@@ -532,6 +532,9 @@ export async function checkAllSkillUpdates(): Promise<SkillUpdateStatus[]> {
 export async function updateSkill(skillId: string): Promise<{ ok: boolean; error?: string; unchanged?: boolean }> {
   const row = getSkillRow(skillId);
   if (!row || !row.sourceRef) return { ok: false, error: "no source" };
+  // 路径校验放在克隆之前：id 非法就没什么可更新的，也没必要先花一次 clone。
+  const centralDir = centralSkillDir(skillId);
+  if (!centralDir) return { ok: false, error: "非法的技能 id" };
   const url = row.sourceType === "skillssh" ? `https://github.com/${row.sourceRef.split("/").slice(0, 2).join("/")}.git` : row.sourceRef;
   const norm = normalizeGitUrl(url);
   if (!norm.ok) return { ok: false, error: norm.error };
@@ -561,7 +564,6 @@ export async function updateSkill(skillId: string): Promise<{ ok: boolean; error
     emitProgress({ ref, phase: "error", message: "skill dir not found" });
     return { ok: false, error: "skill dir not found in remote" };
   }
-  const centralDir = join(getCentralRepoDir(), skillId);
   const oldHash = existsSync(centralDir) ? hashSkillDir(centralDir) : null;
   const newHash = hashSkillDir(skillDir);
   const revSync = Bun.spawnSync(["git", "-C", tmp, "rev-parse", "HEAD"], { stdout: "pipe", stderr: "pipe" });

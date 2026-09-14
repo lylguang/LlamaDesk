@@ -341,11 +341,11 @@ export function AboutTab() {
         <div className="mt-3 flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={() => openUrlMutation.mutate(UPSTREAM_GITHUB_URL)}>
             <ExternalLinkIcon data-icon="inline-start" />
-            OmniStudio · GitHub
+            LlamaDesk · GitHub
           </Button>
           <Button variant="outline" size="sm" onClick={() => openUrlMutation.mutate(UPSTREAM_GITEE_URL)}>
             <ExternalLinkIcon data-icon="inline-start" />
-            OmniStudio · Gitee
+            LlamaDesk · Gitee
           </Button>
         </div>
       </div>

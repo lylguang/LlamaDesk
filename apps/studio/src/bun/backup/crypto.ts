@@ -175,7 +175,7 @@ export async function readHeader(path: string): Promise<EncryptedHeader> {
   const parsed = parseHeader(head);
   if (!parsed) throw new BackupPasswordError("不是本应用的加密备份文件");
   if (parsed.version > CONTAINER_VERSION) {
-    throw new BackupPasswordError(`加密备份由更新版本的应用创建（容器 v${parsed.version}），请先升级 OmniStudio`);
+    throw new BackupPasswordError(`加密备份由更新版本的应用创建（容器 v${parsed.version}），请先升级 LlamaDesk`);
   }
   if (parsed.kdf !== KDF_SCRYPT) throw new BackupPasswordError(`不支持的密钥派生算法：${parsed.kdf}`);
   // 打开时就挡住离谱的 KDF 参数：调用方（预览 / 列表）拿到 header 后才会 unlock，

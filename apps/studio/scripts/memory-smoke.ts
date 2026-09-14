@@ -318,7 +318,7 @@ if (started.ok) {
   // 浏览器 GET（Accept: text/html）返回调试工作台；MCP 客户端 GET 仍 405。
   const pg = await fetch(`${base}/mcp`, { headers: { accept: "text/html,application/xhtml+xml" } });
   const pgText = await pg.text();
-  check("GET /mcp 浏览器返回工作台", pg.status === 200 && pgText.includes("OmniStudio MCP Playground"), `HTTP ${pg.status}`);
+  check("GET /mcp 浏览器返回工作台", pg.status === 200 && pgText.includes("LlamaDesk MCP Playground"), `HTTP ${pg.status}`);
   const mcpGet = await fetch(`${base}/mcp`, { headers: { accept: "text/event-stream" } });
   check("GET /mcp 非浏览器仍 405", mcpGet.status === 405);
 

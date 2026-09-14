@@ -3,10 +3,34 @@
  *
  * 预设只提供元信息（名称 / 厂商 / Base URL / 常见模型 / 品牌色）；
  * 用户添加的服务商落在 `cloud_providers` 表里，预设 id 即表主键。
+ *
+ * 每个模型条目带「用途分类」（生图 / TTS / ASR / 视频 / 对话…）：各功能页
+ * （生图 / 语音 / OCR…）只列自己那一类的模型，用户不必再在页面里重填地址与密钥。
  */
 
-/** 云服务商的模型条目：id 必填，name/group/remark 可选（兼容旧版纯 id 列表）。 */
-export type CloudModelEntry = { id: string; name?: string; group?: string; remark?: string };
+import { classifyModelName, type ModelCategory } from "./modelscope";
+
+/** 云模型的用途分类（与本地模型的 ModelCategory 同一套）。 */
+export type CloudModelType = ModelCategory;
+
+/**
+ * 云服务商的模型条目：id 必填，name/group/remark 可选（兼容旧版纯 id 列表）。
+ * `type` 是用户确认过的用途分类；没写就按 id 自动识别（`modelTypeOf`）。
+ */
+export type CloudModelEntry = {
+  id: string;
+  name?: string;
+  group?: string;
+  remark?: string;
+  type?: CloudModelType;
+};
+
+/**
+ * 生视频接口协议：视频 API 没有统一标准，各家路径与请求体都不一样，
+ * 由服务商这一层记下「这家的视频接口长什么样」。
+ * `""` = 只配了对话 / 生图等能力，生视频不可用。
+ */
+export type CloudVideoApi = "" | "minimax" | "seedance";
 
 /** 服务商预设元信息。 */
 export type CloudPreset = {
@@ -23,7 +47,20 @@ export type CloudPreset = {
   note?: string;
   /** 品牌主色（#rrggbb），列表徽章底色。 */
   color: string;
+  /** 生视频接口协议（只有提供生视频能力的厂商才有）。 */
+  videoApi?: CloudVideoApi;
 };
+
+/** MiniMax 生视频模型（video-gen 与预设共用，避免两处写死两份）。 */
+export const MINIMAX_VIDEO_MODELS = ["MiniMax-H3", "MiniMax-H3-Max"];
+
+/** 火山方舟 Seedance 生视频模型。 */
+export const SEEDANCE_VIDEO_MODELS = [
+  "doubao-seedance-1-0-lite-t2v-250428",
+  "doubao-seedance-1-0-lite-i2v-250428",
+  "doubao-seedance-1-0-pro-t2v-250528",
+  "doubao-seedance-1-0-pro-i2v-250528",
+];
 
 /**
  * 云服务商预设：国内主流原厂 + 国外三大原厂（OpenAI / Anthropic / Google）
@@ -70,9 +107,15 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "豆包 (Doubao)",
     vendor: "字节跳动火山引擎",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    models: ["doubao-seed-1-6-250618", "doubao-1-5-pro-32k-250115", "doubao-1-5-lite-32k-250115"],
-    note: "需在火山方舟开通并创建接入点，填 Endpoint ID 后缀",
+    models: [
+      "doubao-seed-1-6-250618",
+      "doubao-1-5-pro-32k-250115",
+      "doubao-1-5-lite-32k-250115",
+      ...SEEDANCE_VIDEO_MODELS,
+    ],
+    note: "火山方舟：对话需创建接入点填 Endpoint ID 后缀；生视频（Seedance）直接用模型 ID",
     color: "#14b8a6",
+    videoApi: "seedance",
   },
   {
     id: "baidu",
@@ -95,8 +138,10 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     name: "MiniMax",
     vendor: "MiniMax 稀宇科技",
     baseUrl: "https://api.minimax.chat/v1",
-    models: ["MiniMax-M1", "MiniMax-Text-01"],
+    models: ["MiniMax-M1", "MiniMax-Text-01", ...MINIMAX_VIDEO_MODELS],
+    note: "对话走 OpenAI 兼容接口；生视频用 MiniMax 自己的 /v2/video_generation",
     color: "#e11d48",
+    videoApi: "minimax",
   },
   {
     id: "spark",
@@ -209,9 +254,42 @@ export type CloudProviderInfo = {
   baseUrl: string;
   apiKey: string;
   models: CloudModelEntry[];
+  /**
+   * 已启用（设置页里「启动」过，密钥校验通过）。可以同时启用多个厂商；
+   * 各功能页（生图 / 语音 / OCR…）只列已启用厂商的模型。
+   */
+  enabled: boolean;
+  /** 生视频接口协议（""=不具备生视频能力）。 */
+  videoApi: CloudVideoApi;
   createdAt: number;
   updatedAt: number;
 };
+
+/** 是不是合法的模型用途分类（解析旧 JSON / RPC 入参时用）。 */
+export function isCloudModelType(value: unknown): value is CloudModelType {
+  return (
+    value === "chat" ||
+    value === "embedding" ||
+    value === "rerank" ||
+    value === "tts" ||
+    value === "asr" ||
+    value === "image" ||
+    value === "video" ||
+    value === "other"
+  );
+}
+
+export function isCloudVideoApi(value: unknown): value is CloudVideoApi {
+  return value === "" || value === "minimax" || value === "seedance";
+}
+
+/**
+ * 模型条目的用途分类：用户显式指定的优先，否则按 id 自动识别。
+ * `other` = 没认出来 —— 各功能页把它当"不确定"，是否列出由调用方决定。
+ */
+export function modelTypeOf(entry: CloudModelEntry): CloudModelType {
+  return entry.type ?? classifyModelName(entry.id);
+}
 
 /** 解析 CLOUD_MODELS 等旧 JSON 列表（兼容纯 id 字符串数组与对象数组）。 */
 export function parseCloudModels(raw: string | undefined | null): CloudModelEntry[] {
@@ -228,6 +306,7 @@ export function parseCloudModels(raw: string | undefined | null): CloudModelEntr
             name: typeof o.name === "string" ? o.name : undefined,
             group: typeof o.group === "string" ? o.group : undefined,
             remark: typeof o.remark === "string" ? o.remark : undefined,
+            type: isCloudModelType(o.type) ? o.type : undefined,
           };
         }
         return null;
@@ -236,6 +315,63 @@ export function parseCloudModels(raw: string | undefined | null): CloudModelEntr
   } catch {
     return [];
   }
+}
+
+// ---------------------------------------------------------------------------
+// 按用途挑选服务商 / 模型（各功能页共用同一套判定）
+// ---------------------------------------------------------------------------
+
+/** 该服务商里属于指定用途的模型（条目显式分类优先，否则按 id 自动识别）。 */
+export function providerModelsOfType(
+  provider: CloudProviderInfo,
+  type: CloudModelType,
+): CloudModelEntry[] {
+  return provider.models.filter((m) => modelTypeOf(m) === type);
+}
+
+/**
+ * 本机地址（localhost / 127.0.0.1 / 局域网 IP）：这类 OpenAI 兼容端点
+ * （Ollama、LM Studio、自建网关）通常不需要密钥，校验时不做「必须有 Key」的要求。
+ */
+export function isLocalBaseUrl(baseUrl: string): boolean {
+  try {
+    const host = new URL(baseUrl.trim()).hostname.toLowerCase();
+    return (
+      host === "localhost" ||
+      host === "127.0.0.1" ||
+      host === "::1" ||
+      host === "0.0.0.0" ||
+      /^10\./.test(host) ||
+      /^192\.168\./.test(host) ||
+      /^172\.(1[6-9]|2\d|3[01])\./.test(host)
+    );
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 某个用途下可用的服务商：已启用（设置页里"启动"过）+ 至少有一个该用途的模型。
+ * 功能页（生图 / TTS / ASR / 生视频 / OCR）用它决定下拉框里出现哪些厂商。
+ */
+export function providersForType(
+  providers: readonly CloudProviderInfo[],
+  type: CloudModelType,
+  opts: { requireVideoApi?: boolean } = {},
+): CloudProviderInfo[] {
+  return providers.filter((p) => {
+    if (!p.enabled) return false;
+    if (opts.requireVideoApi && !p.videoApi) return false;
+    return providerModelsOfType(p, type).length > 0;
+  });
+}
+
+/** 服务商地址 + 密钥是否齐备（本机端点允许空 Key）。 */
+export function providerConfigured(provider: Pick<CloudProviderInfo, "baseUrl" | "apiKey">): boolean {
+  const base = provider.baseUrl.trim();
+  if (!base) return false;
+  const key = provider.apiKey.trim();
+  return key !== "" || isLocalBaseUrl(base);
 }
 
 /** 自定义服务商的徽章底色：按名称散列到一组低调的品牌色。 */

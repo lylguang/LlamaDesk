@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { rpcClient } from "@lib/rpc";
+import { modelTypeOf } from "@/shared/cloud-providers";
 import { classifyModelName, type ModelCategory } from "@/shared/modelscope";
 import { ModelCategoryIcon } from "@components/model-category-badge";
 import { Input } from "@ui/input";
@@ -49,9 +50,9 @@ export function IntegrationModelSelect({
     queryKey: ["chat-models"],
     queryFn: () => rpcClient.listChatModels(undefined),
   });
-  const settingsQuery = useQuery({
-    queryKey: ["settings"],
-    queryFn: () => rpcClient.getSettings(undefined),
+  const providersQuery = useQuery({
+    queryKey: ["cloud-providers"],
+    queryFn: () => rpcClient.cloudProviderList(undefined),
   });
 
   // 本地：label 即服务名 slug；API：label 即模型 ID —— 都是工具要发的模型名。
@@ -62,28 +63,21 @@ export function IntegrationModelSelect({
     category: m.category,
   }));
 
-  // 设置里显式配置的云端模型（CLOUD_MODELS）也纳入可选项。
-  try {
-    const raw = settingsQuery.data?.settings?.CLOUD_MODELS ?? "";
-    const parsed: { id?: unknown }[] = raw ? JSON.parse(raw) : [];
-    if (Array.isArray(parsed)) {
-      for (const m of parsed) {
-        if (typeof m?.id === "string" && m.id && !options.some((o) => o.label === m.id)) {
-          const category = classifyModelName(m.id);
-          // 外部 agent / 编程助手只能用对话模型：设置里配置的云端模型若是
-          // 嵌入 / 语音 / 生图类，不列进来（认不出的仍保留）。
-          if (category !== "chat" && category !== "other") continue;
-          options.push({
-            type: "api",
-            label: m.id,
-            detail: t("settings.integrations.cloudModel"),
-            category,
-          });
-        }
-      }
+  // 「设置 → 模型云服务」里已启用厂商的对话模型也纳入可选项（外部 agent 只能用对话模型，
+  // 嵌入 / 语音 / 生图类不列进来；认不出分类的仍保留）。展示时带上厂商名，便于区分来源。
+  for (const provider of providersQuery.data?.providers ?? []) {
+    if (!provider.enabled) continue;
+    for (const m of provider.models) {
+      if (!m.id || options.some((o) => o.label === m.id)) continue;
+      const category = modelTypeOf(m);
+      if (category !== "chat" && category !== "other") continue;
+      options.push({
+        type: "api",
+        label: m.id,
+        detail: provider.name,
+        category: classifyModelName(m.id),
+      });
     }
-  } catch {
-    // 忽略解析失败，仅用 listChatModels 的选项
   }
 
   const keyword = query.trim().toLowerCase();

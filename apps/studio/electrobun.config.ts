@@ -55,7 +55,10 @@ for (const name of nativePackages) {
 // 「下得下来、装不上去」的包。
 const MAX_TAR_PATH = 100;
 // bundle 目录名是 <app.name>-<channel>，取最长的渠道后缀（canary）保守计算。
-const BUNDLE_ROOT = `${"OmniStudio"}-canary`;
+// 名字必须与下面 app.name 一致：写死别的名字会让这条校验按错误的前缀长度计算
+// （LlamaDesk 比上游的 OmniStudio 短，按长的算偏保守；反过来就会漏放超限路径）。
+const APP_NAME = "LlamaDesk";
+const BUNDLE_ROOT = `${APP_NAME}-canary`;
 const bundlePrefix =
   process.platform === "darwin"
     ? `${BUNDLE_ROOT}.app/Contents/Resources/app/`

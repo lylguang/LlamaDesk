@@ -279,15 +279,10 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v4
 
-      - name: Extract Windows setup exe
-        run: |
-          cd llamadesk-win-x64
-          ZIP="$(ls *Setup*.zip | head -n1)"
-          PREFIX="${ZIP%%-*}"
-          unzip -j "$ZIP" "*.exe" -d .
-          EXE="$(ls *.exe | head -n1)"
-          mv "$EXE" "${PREFIX}-win-x64-LlamaDesk-Setup.exe"
-
+      # 注意：不要把 Setup.zip 里的 LlamaDesk-Setup.exe 单独抽出来当独立安装器发布。
+      # 它只是 electrobun 的自解压引导器（424KB），真正载荷是同 zip 内
+      # `.installer/<name>.tar.zst`（60+MB），且它没有任何下载逻辑 —— 只下载 exe 会
+      # 直接报 "Not a valid self-extracting installer"。zip 本身才是完整安装包。
       - name: Determine release environment
         id: release-env
         run: |
@@ -308,7 +303,7 @@ jobs:
             echo "## 下载安装"
             # 必须单引号:双引号里的反引号会被 bash 当命令替换吃掉,文件名整个消失。
             echo '- 🍎 **macOS (Apple Silicon)**：`*-macos-arm64-LlamaDesk.dmg`'
-            echo '- 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.exe`（免解压直装，zip 内含同一安装器）'
+            echo '- 🪟 **Windows (x64)**：`*-win-x64-LlamaDesk-Setup.zip`（解压后运行其中的 `LlamaDesk-Setup.exe`，同目录的 `.installer/` 是安装载荷，需一起保留）'
             echo '- 🐧 **Linux (x64)**：`*-linux-x64-LlamaDesk-Setup.tar.gz`'
             echo ""
           } > "$NOTES"

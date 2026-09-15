@@ -25,6 +25,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **构建期 tar 路径长度校验写死了上游名字**：改用 `app.name`，避免名字变短时漏放超限路径（这类校验放行的后果是发一个「下得下来、装不上去」的包）。
 - **上游回退到 Radix 的 UI 组件**：本仓库继续保持 Appica 适配器（ScrollArea / Dialog），并把上游新增的「确定高度」「藏原生滚动条」说明并入注释。
 - **上游删掉 `local-engines/` 目录**：本仓库的 **llama.cpp 引擎一键安装**（设置 → 本地模型 → 引擎状态）被单独保留为 `local-engines/engine-install.tsx`，未随上游一起删除。
+- **Windows 安装器发布方式（重要）**：此前 Release 页面把 `LlamaDesk-Setup.exe` 单独抽出来当「免解压直装」发布，但那个 424KB 的 exe 只是 electrobun 的**自解压引导器**，真正载荷是同目录的 `.installer/<name>.tar.zst`（60+MB），且引导器不含任何下载逻辑 —— 用户只下 exe 会直接报 `Not a valid self-extracting installer`。现在不再单独发布引导器，下载指引明确指向 **`*-win-x64-LlamaDesk-Setup.zip`**（解压后运行其中的 exe，`.installer/` 需一并保留）。上游仓库本就是只发 zip，这一步是我们自己加出来的。
 
 ## [0.0.9] - 2026-09-13
 

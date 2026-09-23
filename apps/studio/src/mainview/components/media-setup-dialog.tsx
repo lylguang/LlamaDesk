@@ -45,7 +45,7 @@ export function MediaSetupDialog() {
   const queryClient = useQueryClient();
 
   const [backend, setBackend] = useState<ImageGenBackend>("api");
-  // 云端只记服务商 id：地址 / 密钥在「设置 → 模型云服务」里（弹窗不再让用户填）。
+  // 云端只记服务商 id：地址 / 密钥在「设置 → 云端模型」里（弹窗不再让用户填）。
   const [providerId, setProviderId] = useState("");
   const [comfyBase, setComfyBase] = useState("");
   const [model, setModel] = useState("");

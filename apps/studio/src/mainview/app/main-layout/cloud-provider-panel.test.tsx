@@ -12,6 +12,8 @@ import { Window } from "happy-dom";
  *   3. 拉不到清单时打开空弹框、把上游报错原文（`获取失败：密钥无效或没有权限（HTTP 401）`）
  *      挂在清单区 —— 密钥过期是配置状态，不是页面错误：现在不弹框，只在模型卡片里
  *      留一行中性结论，原文交给 logs/app.log。
+ *   4. 模型列用「max-w-0 + 省略号」压宽度，一列 `stepaudio-3-asr-max` / `stepaudio-2.5-asr`
+ *      全成了 `stepaudi…` —— 模型 id 是唯一标识，现在任何情况下都完整显示（换行不截断）。
  */
 
 // happy-dom 提供真实 DOM（Radix 的 Dialog 需要），afterAll 还原全局。
@@ -58,8 +60,9 @@ for (const key of DOM_GLOBALS) {
 }
 (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
-// 已配置的两个模型：一个对话、一个嵌入。
+// 已配置的两个模型：一个对话（带别名，用来盯住「别名不许把 id 挤掉」）、一个嵌入。
 const HAVE = ["Qwen/Qwen3-8B", "BAAI/bge-m3"];
+const HAVE_ROWS = [{ id: HAVE[0]!, name: "Qwen3 8B · 别名" }, { id: HAVE[1]! }];
 // 服务商 /v1/models 返回的清单（含上面两个 + 三个还没加的）。
 const REMOTE = [
   "Qwen/Qwen3-8B",
@@ -70,27 +73,42 @@ const REMOTE = [
 ];
 
 const updates: { id: string; models?: { id: string }[] }[] = [];
+/** 「设为默认模型」下发的参数：必须带 providerId，见对应用例。 */
+const selectCalls: { type: string; value: string; providerId?: string }[] = [];
 
 /** 让单个用例能改「拉取模型列表」的返回（成功 / 失败两种路径都要能跑到）。 */
 let remoteResult: { ok: boolean; models: string[]; error?: string } = { ok: true, models: REMOTE };
 
+// 服务商列表：默认一家内置厂商（国内主流厂商装完就列在这儿，地址由应用维护）。
+// 个别用例换成"内置 + 自定义"两行，用来盯住「自定义才可改地址、可删除」。
+const BUILTIN_PROVIDER = {
+  id: "siliconflow",
+  name: "SiliconFlow",
+  vendor: "硅基流动",
+  baseUrl: "https://api.siliconflow.cn/v1",
+  apiKey: "sk-test",
+  models: HAVE_ROWS,
+  createdAt: 0,
+  updatedAt: 0,
+};
+const CUSTOM_PROVIDER = {
+  id: "custom-1700000000000",
+  name: "我的中转",
+  vendor: "自定义",
+  baseUrl: "https://relay.example/v1",
+  apiKey: "sk-relay",
+  models: [{ id: "gpt-5" }],
+  createdAt: 1,
+  updatedAt: 1,
+};
+let providerList: { providers: unknown[]; activeId: string | null } = {
+  providers: [BUILTIN_PROVIDER],
+  activeId: null,
+};
+
 mock.module("@lib/rpc", () => ({
   rpcClient: {
-    cloudProviderList: async () => ({
-      providers: [
-        {
-          id: "siliconflow",
-          name: "SiliconFlow",
-          vendor: "硅基流动",
-          baseUrl: "https://api.siliconflow.cn/v1",
-          apiKey: "sk-test",
-          models: HAVE.map((id) => ({ id })),
-          createdAt: 0,
-          updatedAt: 0,
-        },
-      ],
-      activeId: null,
-    }),
+    cloudProviderList: async () => providerList,
     getSettings: async () => ({ settings: { SERVER_MODE: "remote", VLLM_MODEL_NAME: "" } }),
     listRemoteModels: async () => remoteResult,
     cloudProviderUpdate: async (params: { id: string; models?: { id: string }[] }) => {
@@ -98,7 +116,10 @@ mock.module("@lib/rpc", () => ({
       return { ok: true };
     },
     checkConnection: async () => ({ connected: true }),
-    selectChatModel: async () => ({ ok: true }),
+    selectChatModel: async (params: { type: string; value: string; providerId?: string }) => {
+      selectCalls.push(params);
+      return { ok: true };
+    },
     openGatewayDocs: async () => ({ ok: true }),
   },
 }));
@@ -320,6 +341,77 @@ test("改完密钥重新拉取：上一行结论消失，弹框正常打开", as
   }
 });
 
+test("设为默认模型：把所属厂商一起带上", async () => {
+  // 网关只往**默认厂商**发云端请求。星标按钮不带 providerId 时，面板只是把模型名记下来，
+  // 地址与密钥还停在另一家 —— 用户看到的就是「应用里能选的模型，用起来说模型不存在」。
+  selectCalls.length = 0;
+  const view = await renderPanel();
+
+  const star = view.container.querySelector<HTMLButtonElement>('[data-set-default="Qwen/Qwen3-8B"]');
+  expect(star).not.toBeNull();
+  await act(async () => {
+    star!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  expect(selectCalls).toEqual([
+    { type: "api", value: "Qwen/Qwen3-8B", providerId: "siliconflow" },
+  ]);
+
+  await view.unmount();
+});
+
+test("模型列里的 id 一定完整：换行不省略，也不靠悬浮提示兜底", async () => {
+  const view = await renderPanel();
+
+  // 带别名的条目：别名一行、id 一行，id 一个字都不少
+  const named = view.container.querySelector<HTMLElement>('[data-model-id="Qwen/Qwen3-8B"]');
+  expect(named).not.toBeNull();
+  expect(named!.textContent).toContain("Qwen/Qwen3-8B");
+  // 「max-w-0 + truncate」就是上一版把 id 压成 stepaudi… 的那套写法，别回来
+  expect(named!.className).not.toContain("max-w-0");
+  // 这一列里不许再出现省略号 —— 别名长了也是换行
+  for (const el of named!.querySelectorAll<HTMLElement>("span")) {
+    expect(el.className).not.toContain("truncate");
+  }
+  const idLine = [...named!.querySelectorAll<HTMLElement>("span")].find(
+    (s) => s.textContent === "Qwen/Qwen3-8B",
+  );
+  expect(idLine).toBeDefined();
+  // 换行靠 overflow-wrap:anywhere：列被压窄时在 id 内部断开，而不是切掉后半截
+  expect(idLine!.className).toContain("wrap-anywhere");
+  expect(idLine!.className).toContain("font-mono");
+
+  // 没有别名的条目：id 就是正文，同样完整
+  const plain = view.container.querySelector<HTMLElement>('[data-model-id="BAAI/bge-m3"]');
+  expect(plain!.textContent).toBe("BAAI/bge-m3");
+  const plainLine = plain!.querySelector<HTMLElement>("span");
+  expect(plainLine!.className).toContain("wrap-anywhere");
+  expect(plainLine!.className).not.toContain("truncate");
+
+  await view.unmount();
+});
+
+test("挑选清单里的 id 也不省略：分组前缀与行内后缀各自完整", async () => {
+  const view = await renderPanel();
+  await openPicker(view.container);
+
+  // 行里只留后缀，前缀由分组行给出 —— 两截都不许截断，合起来才是完整 id
+  const row = rowOf("FunAudioLLM/CosyVoice2-0.5B")!;
+  const suffix = row.querySelector<HTMLElement>("span.font-mono")!;
+  expect(suffix.textContent).toBe("CosyVoice2-0.5B");
+  expect(suffix.className).toContain("wrap-anywhere");
+  expect(suffix.className).not.toContain("truncate");
+
+  const prefix = [...document.body.querySelectorAll<HTMLElement>("span")].find(
+    (s) => s.textContent === "FunAudioLLM",
+  );
+  expect(prefix).toBeDefined();
+  expect(prefix!.className).not.toContain("truncate");
+
+  await view.unmount();
+});
+
 test("逐个添加：点「+」只把那个模型加进去，已有条目不丢", async () => {
   updates.length = 0;
   const view = await renderPanel();
@@ -337,4 +429,54 @@ test("逐个添加：点「+」只把那个模型加进去，已有条目不丢"
   expect(updates[0]!.models?.map((m) => m.id)).toEqual([...HAVE, "FunAudioLLM/CosyVoice2-0.5B"]);
 
   await view.unmount();
+});
+
+test("内置厂商：地址只读、不给删除按钮 —— 用户要做的只有填 Key", async () => {
+  const view = await renderPanel();
+
+  // 国内主流厂商装完就列在这儿（不用先去「添加服务商」），地址直接显示出来
+  expect(view.text).toContain("SiliconFlow");
+  expect(view.text).toContain("https://api.siliconflow.cn/v1");
+  // 地址是只读文本，不是输入框：一个可编辑的地址栏会让人以为"这里该填点什么"
+  expect(view.container.querySelector('[data-provider-base="locked"]')).not.toBeNull();
+  expect(view.container.querySelector('[data-provider-base="editable"]')).toBeNull();
+  // 详情里唯一的输入框是 API 密钥 —— 这就是"只需要配置 Key"
+  const passwordInputs = [...view.container.querySelectorAll("input")].filter(
+    (i) => i.type === "password",
+  );
+  expect(passwordInputs).toHaveLength(1);
+  // 「获取密钥」直达控制台；内置厂商不给删除（删了下次读取还会原样入驻）
+  expect(view.text).toContain(zh("cloud.getKey"));
+  expect(view.container.querySelector("[data-provider-delete]")).toBeNull();
+
+  await view.unmount();
+});
+
+test("自定义服务商：单开一栏、地址可改、可删除", async () => {
+  providerList = { providers: [BUILTIN_PROVIDER, CUSTOM_PROVIDER], activeId: null };
+  try {
+    const view = await renderPanel();
+
+    // 左栏分栏：内置厂商按目录分栏，自定义单独一栏
+    expect(view.text).toContain(zh("cloud.section.aggregator"));
+    expect(view.text).toContain(zh("cloud.section.custom"));
+
+    // 切到自定义那一行
+    const row = [...view.container.querySelectorAll<HTMLElement>('[role="button"]')].find((el) =>
+      el.textContent?.includes("我的中转"),
+    );
+    expect(row).toBeDefined();
+    await act(async () => {
+      row!.click();
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+
+    // 自定义地址可改、可删（内置那两条规矩不该顺手锁死自建网关 / 中转）
+    expect(view.container.querySelector('[data-provider-base="editable"]')).not.toBeNull();
+    expect(view.container.querySelector('[data-provider-delete="custom-1700000000000"]')).not.toBeNull();
+
+    await view.unmount();
+  } finally {
+    providerList = { providers: [BUILTIN_PROVIDER], activeId: null };
+  }
 });

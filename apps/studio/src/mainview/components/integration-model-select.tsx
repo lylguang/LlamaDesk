@@ -63,7 +63,7 @@ export function IntegrationModelSelect({
     category: m.category,
   }));
 
-  // 「设置 → 模型云服务」里已启用厂商的对话模型也纳入可选项（外部 agent 只能用对话模型，
+  // 「设置 → 云端模型」里已启用厂商的对话模型也纳入可选项（外部 agent 只能用对话模型，
   // 嵌入 / 语音 / 生图类不列进来；认不出分类的仍保留）。展示时带上厂商名，便于区分来源。
   for (const provider of providersQuery.data?.providers ?? []) {
     if (!provider.enabled) continue;

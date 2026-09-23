@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>A desktop workstation for local LLMs</b><br/>
-  Manage models, run inference servers, and build with Chat / Voice / Image / Video / OCR / Translate apps,<br/>
-  plus a local knowledge base, shared memory, and a Skills manager — all local-first.
+  Manage models, run inference servers, and build with Chat / Voice / Image / Video / Music / OCR / Translate apps,<br/>
+  plus a prompt plaza, mini apps, a local knowledge base, shared memory, and a Skills manager — all local-first.
 </p>
 
 <p align="center">
@@ -28,6 +28,67 @@
 ---
 
 ## 📸 Screenshots
+
+One workbench covers the whole local-AI loop: the icon rail switches apps, the left panel picks a backend and its parameters, and the right side shows the result — every page shares the same layout.
+
+### 🎨 Image generation · 🎬 Video generation
+
+<table>
+  <tr>
+    <th align="center">Image · cloud API / local MLX / ComfyUI</th>
+    <th align="center">Video · MiniMax H3 / Seedance / ComfyUI</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-image-gen.png" alt="Image generation" width="100%"/></td>
+    <td><img src="docs/images/screenshot-video.png" alt="Video generation" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>Switch between a cloud endpoint, the local MLX (mflux) engine on Apple Silicon, and ComfyUI on the same page; ratio / width / height / count are right there, every render lands in the history strip you can replay or download.</td>
+    <td>Three backends behind one submit-then-poll flow: MiniMax H3 supports image-to-video from a first frame, while duration / aspect ratio / resolution / first frame all live in the left panel and finished clips go to a playable, downloadable history.</td>
+  </tr>
+</table>
+
+### 🧰 Prompt Plaza · 🧩 Mini apps
+
+<table>
+  <tr>
+    <th align="center">Prompt Plaza · 2,733 built-in prompts</th>
+    <th align="center">Mini apps · one-task sandboxed tools</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-prompt-plaza.png" alt="Prompt Plaza" width="100%"/></td>
+    <td><img src="docs/images/screenshot-mini-apps.png" alt="Mini apps" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>638 image / 2,060 video / 35 LLM prompts, browsable by category (apps, marketing, posters, illustration, IP, art …) and by source, with full-text search; <b>Copy</b> takes the text, <b>Try it</b> routes to the Image / Video / Chat app with the prompt attached, and <b>Add to my prompts</b> keeps it in your own list.</td>
+    <td>Seven self-contained pages — cutout, ID photo, mosaic, portrait, meeting notes, copywriter, notes; each card names the capabilities it needs (local cutout / chat model / ASR / image generation), and <b>Configure</b> fills in whatever is missing while the rest keeps working.</td>
+  </tr>
+</table>
+
+### 📚 Knowledge base · 🧠 Memory
+
+<table>
+  <tr>
+    <th align="center">Knowledge base · local RAG with citations</th>
+    <th align="center">Memory · long-term store shared by every agent</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-knowledge-base.png" alt="Knowledge base" width="100%"/></td>
+    <td><img src="docs/images/screenshot-memory.png" alt="Memory" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>Four ingest paths — add files, import a directory, add a note, add a web page — with per-document chunk and embedding state; attach a knowledge base in chat and answers come back with <code>[n]</code> citations, while the gateway's <code>/mcp</code> exposes the same store to any MCP client.</td>
+    <td>An overview (total, pinned, agent-written, retrieval hit rate, merged writes, blocked sensitive content) above the full list, with pinned entries injected into the system prompt; the <b>Enable memory</b> and <b>Confirm before writing</b> switches decide whether agents may write and whether you approve first.</td>
+  </tr>
+</table>
+
+### 📊 Benchmarks
+
+<img src="docs/images/screenshot-benchmark.png" alt="Benchmarks" width="100%"/>
+
+One run sweeps the whole matrix — context length (1K–1M) × concurrency × cache scenario (cold / partial / full hit) — and reports TTFT, TPOT, TPS, aggregate throughput and prefill per rung, with a **cache hit comparison** that turns the cold-versus-hit gap into a multiplier (a ×1 result means the server never hit its cache). Results are stored and can be exported to HTML.
+
+### More screenshots
 
 <table>
   <tr>
@@ -78,12 +139,15 @@ Every app shares one workstation layout: a global icon rail on the far left, a c
 
 - **Chat** — streaming responses with reasoning display, image attachments (multimodal), web search (Bing / DuckDuckGo / Tavily with results injected as cited context), and text-file attachments; attach local knowledge bases to a message and answers come back with `[n]` citation traceability; auto-titled conversations, per-app session isolation, usage tracking.
 - **Voice** — TTS from multiple sources (audio.cpp local engine, Edge-TTS, OpenAI-compatible TTS) plus a voice clone library, and multi-engine ASR (whisper.cpp / audio.cpp / OpenAI-compatible transcription); live listening conversations (cloud / local) with an embedded record player.
-- **Image** — Generation via cloud OpenAI-compatible APIs, ComfyUI, or the local MLX (mflux) engine on Apple Silicon. MLX weights are pre-downloaded with live progress before generation.
+- **Image** — Generation via cloud OpenAI-compatible APIs, ComfyUI, or the local MLX (mflux) engine on Apple Silicon. MLX weights are pre-downloaded with live progress before generation, and the Prompt Plaza's **Try it** drops a prompt straight onto this page.
 - **Video** — Three backends behind one submit-then-poll flow: MiniMax (H3, cloud, image-to-video from a first frame), Seedance (Volcano Ark content-generation tasks), and ComfyUI (local workflows); prompt / negative prompt / resolution / duration / seed / aspect ratio / watermark toggle plus first-frame upload, with finished clips kept in a history library you can play, download, or delete.
 - **OCR** — Three engines: local Tesseract (one-click install, multilingual LSTM language packs, word/line bounding boxes), PaddleOCR (PP-OCRv6 resident worker, ~140 MB for the medium model), and VLM (Chandra / GLM-OCR / LightOnOCR). Upload PDF / images and get structured Markdown — GFM tables, KaTeX math, code blocks, captions, and bounding-box-cropped image regions — with a document queue and search.
 - **Translate** — Switch between the current chat model (local / OpenAI-compatible) and the free Google endpoint across 22 languages, with source auto-detection, language swap, and one-click copy; **Live Translate** opens the microphone for real-time transcription (reusing all three ASR engines) and renders several target languages side by side.
+- **Music** — Song, cover and vocal generation over two protocols, StepFun and MiniMax (the local-engine slot is reserved): the asynchronous one submits and polls, the synchronous one runs as a background job and backfills the record, and both land in the same table. The left column is a playlist library, the right side is the selected playlist's tracks, and a persistent player bar sits at the bottom; new songs join the default playlist automatically, album art is derived deterministically per track, and a playlist cover is a 2×2 mosaic of its first four tracks.
+- **Prompt Plaza** — Two tabs, **Prompt Plaza** and **My prompts**, over 2,733 bundled prompts (638 image prompts across apps / marketing / posters / illustration / IP / other / art, 2,060 video prompts, 35 LLM prompts), with source filters (Image2Hub / GPT-Image-2 / H3 Cases / MiniMax …) and full-text search; **Copy** takes the text, **Try it** routes to the Image / Video / Chat app with the prompt attached, and **Add to my prompts** imports a plaza entry into your own list (deduplicated by source key) where you can define categories and create / edit / delete entries. The prompt library ships inside the installer and seeds idempotently, and example images download on demand through the system proxy.
+- **Mini apps** — Eight one-task sandboxed tools; each card on the home wall names the capability it needs and offers **Configure** when something is missing: **Background remover** (local ONNX engine, nothing uploaded, ~1s, recolor plus erase/restore brushing), **ID photo** (local portrait cutout resized to 20 specs — 1-inch, 2-inch, visa and more — with background swap and A4 print sheets), **Mosaic** (paint-to-redact with batch export, entirely on-device), **Portrait** (style presets for professional headshots and character avatars), **Meeting notes** (import or record audio → transcribe → agenda / conclusions / action items), **Copywriter** (multiple titles, selling points or scripts by purpose and tone), **Notes** (calendar and tag views, image attachments, bodies stored in the local database, optionally exposed to the agent read-only), and **Animated stickers** (one photo becomes a 16-piece still pack in a single art style, then a tap turns any piece into a looping GIF; the image model is picked inside the page — cloud models use the photo as reference, local engines draw from a description). Each mini app is one self-contained HTML page running in a sandboxed iframe **without** `allow-same-origin`, and the host grants capabilities one by one.
 - **Knowledge Base (local RAG)** — Ingest local files (text read directly; PDF / images go through VLM OCR), handwritten notes, and web pages; Markdown-aware chunking (heading sections + greedy paragraph packing + overlapping hard splits) with optional embeddings (OpenAI-compatible `/v1/embeddings`), hybrid recall that fuses BM25 and cosine-vector rankings with RRF, and optional reranking (Jina / SiliconFlow / Cohere-compatible `/v1/rerank`); four tabs for recall testing, documents, access, and settings; no external vector store or FTS extension required.
-- **Memory** — Long-term memory shared by every agent: built-in `memory_search` / `memory_save` / `memory_list` tools let agents store facts, preferences, and experience, and pinned or frequently used entries are injected into the system prompt; the same SQLite store is readable and writable through the gateway REST `/v1/memories`, MCP tools, and the `omi memory` CLI.
+- **Memory** — Long-term memory shared by every agent: built-in `memory_search` / `memory_save` / `memory_list` tools let agents store facts, preferences, and experience, and pinned or frequently used entries are injected into the system prompt; the same SQLite store is readable and writable through the gateway REST `/v1/memories`, MCP tools, and the `omi memory` CLI. The page shows totals, pinned / agent-written / updated-in-7-days / retrieval hit rate / merged writes / archived / blocked-sensitive counts, and carries two switches — **Enable memory** and **Confirm before writing** (the latter sends agent / CLI / MCP writes to a pending queue first).
 - **Skills Manager** — One central skills repository (default `~/.agents/skills`) managed and synced into every coding tool, with 53 built-in tool adapters and symlink / copy sync modes; six sections: market (skillssh leaderboard), my skills, presets, projects, tools, and backup (Git remote, snapshots, auto-backup).
 
 ### Agents & Protocols
@@ -96,10 +160,10 @@ Every app shares one workstation layout: a global icon rail on the far left, a c
 ### Ops & Telemetry
 
 - **Live dashboard** — Prefill / generation tokens and speed (tok/s), request counts, active models, memory and CPU load, uptime, and model disk usage (free / total of the volume holding the data directory) — polled every 2s.
-- **Benchmarks** — Context-length sweeps (1K–200K) with TTFT / TPOT / TPS, in tables and charts, for local or remote servers.
+- **Benchmarks** — Context-length (1K–1M) × concurrency × cache-scenario (cold / partial / full hit) sweeps reporting TTFT, TPOT, TPS, aggregate throughput and prefill per rung, plus a **cache hit comparison** that turns the cold-versus-hit gap into a multiplier (llama.cpp additionally reports how much of the prompt the server reused, so a ×1 result points straight at a server that never hit its cache). Runs against local or remote servers, stores every result, exports to HTML, and `omi benchmark --contexts 32k --cache cold,warm` drives the same matrix from the CLI.
 - **Server logs** — Live tail with ANSI colors, auto-scroll, truncation guard, copy / clear.
 - **CLI integrations** — One-click launch commands for Claude Code (local / cloud, Opus–Sonnet–Haiku mapping), Codex, OpenCode, OpenClaw, Hermes, Pi, and Copilot CLI, each bound to a default model and wired into shared memory.
-- **Updates & i18n** — Stable / beta channels with in-app updates, automatic or manual update checks (the About page reports the latest release and links to the download), light / dark / follow-system themes, a setup wizard, zh / en UI language, SQLite-backed session stores.
+- **Updates & i18n** — Stable / beta channels with in-app updates, automatic or manual update checks (the About page reports the latest release and links to the download), light / dark / follow-system themes, **a customizable left primary menu** (Settings → Appearance: drag to reorder, show or hide each entry — the order there is the order of the menu), a setup wizard, zh / en UI language, SQLite-backed session stores.
 
 ## 🚀 Getting Started
 
@@ -177,7 +241,7 @@ apps/
 │       │   ├── db/         #   Drizzle schema, migrations, settings
 │       │   ├── skills/     #   skills manager: central repo, sync, presets, backup
 │       │   ├── control-server.ts  #   `omi` CLI ↔ app control channel (Unix socket)
-│       │   └── ...         #   chat / voice / image / video / OCR / translation / knowledge (RAG) /
+│       │   └── ...         #   chat / voice / image / video / music / OCR / translation / knowledge (RAG) /
 │       │                   #   memory / MCP (client + server) / model hub / downloads / stats / updates
 │       ├── cli/            # `omi` command line (bin/omi.ts, reusing the bun data layer)
 │       ├── mainview/       # React UI (components, stores, lib)
@@ -195,9 +259,12 @@ See [docs/architecture.md](./docs/architecture.md) for the full architecture (pr
 - [x] Image generation loop for the Image app
 - [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs
 - [x] AI video generation (MiniMax / Seedance / ComfyUI) with task polling and history
+- [x] AI music generation (StepFun / MiniMax, local engine reserved) — song / cover / vocal scoring
 - [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations
 - [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`)
 - [x] Skills manager: central repo, 53 tool adapters, presets, Git backup
+- [x] Prompt library: 2,733 bundled prompts (image / video / LLM) with try-it routing + personal list
+- [x] Mini apps: 8 sandboxed single-page tools with per-capability gating
 - [x] MCP both ways: client for external MCP servers + gateway `/mcp` server with playground
 - [ ] Linux and Windows support
 - [ ] More document formats (PowerPoint, Word, Excel, etc.)

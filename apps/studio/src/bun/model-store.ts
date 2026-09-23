@@ -9,9 +9,12 @@ import {
   modelNameForPath,
   resolveRuntimeTarget,
   scanModelSources,
+  type ScannedModel,
 } from "./model-scan";
 import type { InstalledModel } from "../shared/modelscope";
 import { getSetting, updateSettings } from "./db/settings";
+import { hasUnfinishedDownloadAt } from "./downloader";
+import { logEvent } from "./app-log";
 import { isInsideDir } from "./path-safety";
 import {
   classifyModelName,
@@ -142,6 +145,24 @@ export function toggleFavorite(pathToModel: string): void {
 }
 
 /**
+ * 这一条里还留着**没下完**的文件吗（判据见 downloader.hasUnfinishedDownloadAt）？
+ *
+ * 模型是按文件下载的，小文件先下（config.json / tokenizer），大权重最后；分片路径又
+ * 一上来就把最终文件预分配到完整长度，所以「下到一半」的模型在列表里看尺寸完全正确、
+ * 却根本加载不了。它一旦出现在「已下载」里，用户只会点「运行」，然后拿到一句笼统的
+ * 加载失败；市场页也因为文件名在列表里而显示「已下载」，连重新下载的路都被堵住
+ * （issue #16）。所以半成品要从「已安装」里摘掉 —— 继续下载的入口在市场页的文件行
+ * 与下载卡片上，那里本来就知道真实进度。
+ *
+ * 仓库目录条目看整棵树：市场里的文件名可以是 `BF16/xxx.gguf` 这种**带子路径**的，
+ * 侧车跟着落在子目录里，而扫描给我们的 `files` 只有基名 —— 按基名拼路径是拼不到的，
+ * 子目录里的半成品会从这条判定里漏过去（`hasUnfinishedDownloadAt` 覆盖目录树）。
+ */
+function hasUnfinishedEntry(m: ScannedModel): boolean {
+  return hasUnfinishedDownloadAt(m.path);
+}
+
+/**
  * 本地模型列表：应用下载目录 + 用户添加的目录 + Hugging Face 缓存。
  * 目录结构任意深度都能识别（见 model-scan.ts），不再要求 `<dir>/<repo>/<file>` 布局。
  */
@@ -151,13 +172,35 @@ export function listInstalledModels(): InstalledModel[] {
   const favorites = getFavorites();
   const roots = new Map(getScanDirs().map((d) => [d.origin, d.dir]));
 
-  return scanModelSources().map((m) => {
+  // 半成品先摘掉（见 hasUnfinishedEntry）：尺寸对得上、内容不全的文件不能算「已安装」。
+  const scanned = scanModelSources().filter((m) => !hasUnfinishedEntry(m));
+
+  return scanned.map((m) => {
     // 激活目标既可能是文件，也可能是目录（vLLM/SGLang/MLX 加载整个仓库目录）。
     const isActive = m.path === activePath || m.runtimeTarget === activePath;
     const meta =
       m.origin === "hf-cache"
         ? {}
         : readRepoMetaFor(m.path, roots.get(m.origin) ?? getModelsBaseDir(), m.isDir);
+    
+    // 从 config.json 读取上下文窗口长度
+    let contextLength: number | undefined;
+    try {
+      const configPath = path.join(m.runtimeTarget, "config.json");
+      if (existsSync(configPath)) {
+        const config = JSON.parse(readFileSync(configPath, "utf8"));
+        if (typeof config?.max_position_embeddings === "number") {
+          contextLength = config.max_position_embeddings;
+        } else if (typeof config?.context_length === "number") {
+          contextLength = config.context_length;
+        } else if (typeof config?.llama_context_window_size === "number") {
+          contextLength = config.llama_context_window_size;
+        }
+      }
+    } catch {
+      // config.json 解析失败时不报错，contextLength 保持 undefined
+    }
+    
     return {
       repo: m.repo,
       fileName: m.fileName,
@@ -176,6 +219,8 @@ export function listInstalledModels(): InstalledModel[] {
       kind: m.kind,
       runtimeTarget: m.runtimeTarget,
       files: m.files,
+      supportFiles: m.supportFiles,
+      contextLength,
     };
   });
 }
@@ -237,11 +282,27 @@ export function servedNameForModelPath(modelPath: string): string {
 }
 
 /**
- * 设为当前模型。
+ * 解析目标路径的模型类别：优先查安装列表（`.vllm-meta.json` 的持久化分类），列表里
+ * 找不到（外部路径 / 文件已删）就退回按文件名分类 —— 与列表徽标同一套判定。
+ */
+function categoryOfModelPath(pathToModel: string): ModelCategory {
+  const target = resolveRuntimeTarget(pathToModel);
+  const installed = listInstalledModels().find(
+    (m) => m.path === pathToModel || m.runtimeTarget === target,
+  );
+  if (installed) return installed.category;
+  return classifyModelName(path.basename(pathToModel));
+}
+
+/**
+ * 设为当前聊天模型。
  *
  * 存放的是**运行时加载目标**而不是列表里那个文件：仓库目录（含 config.json）交给
  * vLLM / SGLang / MLX 整目录加载，GGUF 这类单文件模型仍然指向文件本身。
  * 这也是"非标准目录结构也能启动"的关键 —— 分片 safetensors 单拿一个文件是加载不了的。
+ *
+ * 嵌入 / 重排模型不是对话模型：写进 LOCAL_MODEL_PATH / CHAT_MODEL 会顶掉真正的
+ * 聊天模型（CLI 的 ● 活动 标记、冷启动 auto-start 都按这三把键找目标），所以直接拒。
  */
 export function setActiveModel(pathToModel: string): { ok: boolean; error?: string } {
   if (!existsSync(pathToModel)) return { ok: false, error: "模型路径不存在" };
@@ -251,6 +312,11 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
     isDir = statSync(target).isDirectory();
   } catch {
     return { ok: false, error: "模型路径不可读" };
+  }
+  const category = categoryOfModelPath(pathToModel);
+  if (category === "embedding" || category === "rerank") {
+    const label = category === "embedding" ? "嵌入" : "重排";
+    return { ok: false, error: `${label}模型不能设为当前聊天模型` };
   }
   // 目录条目按目录内容判定格式（HF 缓存里的模型目录），单文件按扩展名。
   const kind: ModelFileKind = isDir ? dirModelKind(target) : fileKind(path.basename(pathToModel));
@@ -267,6 +333,20 @@ export function setActiveModel(pathToModel: string): { ok: boolean; error?: stri
       : {}),
   });
   return { ok: true };
+}
+
+/**
+ * 自愈被老版本写脏的聊天活动状态：老版本启动嵌入模型时也走 setActiveModel，会把
+ * LOCAL_MODEL_PATH / LOCAL_MODEL_NAME / CHAT_MODEL 三把键写成嵌入模型；冷启动
+ * auto-start 只认这三把键 —— 不清理的话会只拉起嵌入实例、聊天没有模型可用。
+ * 保守起见只自愈嵌入（重排类别历史上没有入口会写成活动聊天模型）。
+ */
+export function healDriftedChatConfig(): { healed: boolean; path?: string } {
+  const drifted = getSetting("LOCAL_MODEL_PATH");
+  if (!drifted) return { healed: false };
+  if (categoryOfModelPath(drifted) !== "embedding") return { healed: false };
+  updateSettings({ LOCAL_MODEL_PATH: "", LOCAL_MODEL_NAME: "", CHAT_MODEL: "" });
+  return { healed: true, path: drifted };
 }
 
 /** 目录占用（删除 HF 缓存条目时用来告诉用户释放了多少空间）。 */
@@ -309,6 +389,15 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
   const hub = getHfHubCacheDir();
   const cacheEntry = isInsideDir(hub, abs) ? findHfCacheEntry(abs, hub) : null;
 
+  // 删除是**不可逆**的，而且可能落在用户自己添加的目录里（不是应用下载的东西）。
+  // 以前这里什么都不记：issue #18 报告「昨晚还好好的模型今早没了」时，日志里查不出
+  // 应用到底动没动过它，只能靠猜。所以成功与拒绝都留一条可回溯的记录。
+  const locationOf = (): "managed" | "extra-dir" | "hf-cache" => {
+    if (cacheEntry) return "hf-cache";
+    if (isInsideDir(getModelsBaseDir(), abs)) return "managed";
+    return "extra-dir";
+  };
+
   let freed = 0;
   try {
     if (cacheEntry) {
@@ -317,6 +406,13 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
     } else {
       const allowed = [getModelsBaseDir(), ...getExtraModelDirs()];
       if (!allowed.some((root) => isInsideDir(root, abs))) {
+        logEvent({
+          level: "warn",
+          source: "app",
+          event: "model.delete.refused",
+          message: `拒绝删除白名单之外的路径：${abs}`,
+          detail: { path: abs },
+        });
         return {
           ok: false,
           error: "只允许删除应用下载目录、已添加的本地目录或 Hugging Face 缓存里的模型",
@@ -335,8 +431,24 @@ export function deleteLocalModel(pathToModel: string): { ok: boolean; error?: st
       }
     }
   } catch (e) {
+    logEvent({
+      level: "error",
+      source: "app",
+      event: "model.delete.failed",
+      message: `删除模型失败：${abs}`,
+      detail: { path: abs, error: e instanceof Error ? e.message : String(e) },
+    });
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+
+  logEvent({
+    source: "app",
+    event: "model.delete",
+    message: `已删除模型：${path.basename(abs)}`,
+    // location 是这次删除落在哪一类目录：managed = 应用自己下的，extra-dir / hf-cache =
+    // 用户自己的东西。事后追查「谁删的、删的是谁的文件」全看这一条。
+    detail: { path: abs, freed, location: locationOf(), dir: path.dirname(abs) },
+  });
 
   // 删掉的正是当前模型（或当前模型所在目录）时清空调用配置。
   const activePath = getSetting("LOCAL_MODEL_PATH");

@@ -94,7 +94,7 @@ omi serve [--port 8080] [--host 127.0.0.1] [--engine llama.cpp] [--model <路径
 omi models
 ```
 
-一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。
+一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。云端段按厂商分组，列出**所有已启用**厂商的模型（不限默认那家），默认厂商带 `● 默认` 标记 —— 这些 id 都能直接喂给 `omi launch --model`。
 
 `omi models` — 脚本里取模型名：与 omi model --list 等价。
 
@@ -127,17 +127,32 @@ omi serve --model <路径>  ·  omi launch <工具> --model <名称|路径|云�
 
 在启动服务器 / 启动编码工具时直接指定模型：已装模型名、文件名、绝对路径或云端模型 id 都可以。省略时会自动选（只有一个模型）或弹出选择。
 
+```bash
+POST /v1/embeddings
+```
+
+嵌入服务（网关端点，应用在运行时可用）：OpenAI Embeddings 兼容，代理「运行中的嵌入实例」。先在模型页把嵌入类模型的类别设为「嵌入 Embedding」并启动，llama-server 会自动附加 --embeddings --pooling 以嵌入模式服务，监听嵌入端口段（EMBEDDING_PORT，默认 18190，段内顺延）。
+- 网关无运行实例时返回 503 与启动引导；经网关沿用网关 Key 与 Origin/Host 防线，直连实例无鉴权。
+- llama-server 忽略请求里的 model 字段（只服务启动时加载的模型）；本地实例会忽略收到的 Authorization 头，无害。
+- 知识库「接口地址」留空时，嵌入 base 按 显式地址 > 运行中嵌入实例 > 云端 remote（VLLM_API_BASE）> 聊天活动端口 回退解析。
+
+`curl http://127.0.0.1:10000/v1/embeddings -H "Content-Type: application/json" -d '{"input": ["第一条", "第二条"]}'` — 经网关向量化：无运行实例时返回 503；设了网关 Key 时加 -H "Authorization: Bearer <key>"。
+`curl http://127.0.0.1:18190/v1/embeddings -H "Content-Type: application/json" -d '{"input": "要向量化的文本"}'` — 直连嵌入实例：实际端口以应用「服务器」页为准（段内被占会顺延）。
+
 ## 基准测速
 
 给当前模型（或云端服务商的模型）跑吞吐测速，结果写进应用里的「基准测试」记录。
 
 ```bash
-omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1]
+omi benchmark [model] [--contexts 1024,4096] [--batches 1,2,4] [--gen 128] [--cache cold,partial,warm]
 ```
 
-跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位，--gen / --batch 调生成长度与并发。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。
+跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--batches 一次扫多个并发档（--batch N 是单个的简写），--gen 调生成长度，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。扫描按 档位 × 并发 × 缓存 全组合展开，末尾按并发分开给出数字（不同并发的吞吐不可比）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。
 
 `omi benchmark --contexts 1024,4096,8192 --gen 128` — 只测 1K / 4K / 8K 三档，每次生成 128 token。
+`omi benchmark --contexts 32k --batches 1,2,4,8 --cache cold` — 并发扫描：同一档位下扫 ×1 / ×2 / ×4 / ×8，得到「单流变慢多少、聚合快多少」的曲线。
+`omi benchmark --contexts 8k,32k,128k,1m --gen 64` — 长上下文扫描：一路测到 1M（档位越大单档越久，本地机器上 1M 档要几十分钟）；超出服务端窗口的档位会被拒绝，之后更大的档位自动跳过。
+`omi benchmark --contexts 32k --cache cold,warm` — 只比缓存：同一档位冷启与完全命中各测一遍，末尾给出倍数与服务端自报的复用比例（×1 附近 = 服务端根本没吃到前缀缓存）。
 
 ```bash
 omi benchmark --cloud [provider]
@@ -250,19 +265,21 @@ omi launch <工具> [--model <名称|路径|云端 id>] [-- 工具参数...]
 启动编码工具并接入当前模型。执行顺序：确认应用在运行 → 选模型 → 需要时启动 / 重启本地推理服务器 → 确保 API 网关在线 → 写各工具自己的配置（保留用户原有配置）→ 注入共享记忆 → 前台拉起工具。
 - 工具参数用 `--` 透传，例如 omi launch claude -- --resume。
 - 本地模型走本地推理服务器，云端 id 走云端 API；网关负责 Anthropic ↔ OpenAI 协议翻译。
+- `--model` 的云端 id 按「设置 → 云端模型」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。模型不属于当前默认厂商时，会自动把默认厂商切过去并打印一行提示 —— 网关只往默认厂商发云端请求；厂商没启用时直接指出是哪一家，而不是报一句「未找到模型」。
 
 `omi launch --list` — 列出支持的工具与各自的协议。
 `omi launch claude` — 唯一模型时自动选中并启动 Claude Code。
 `omi launch claude --opus <模型> --haiku <模型>` — Claude Code 三个档位分别指定模型。
 `omi launch codex --model qwen3-4b-q4_k_m` — 按服务名指定模型。
 `omi launch opencode` — opencode 走内联 provider 配置，不改用户的全局配置。
+`omi launch chatgpt  ·  omi launch chatgpt --restore` — 把当前模型接进 ChatGPT 桌面端（Codex）并打开客户端；--restore 还原 ~/.codex。
 
 ```bash
 omi launch claude  ·  codex  ·  opencode  ·  openclaw  ·  hermes  ·  pi  ·  copilot  ·  chatgpt
 ```
 
 接入方式各自不同：claude 走环境变量（ANTHROPIC_*）并附带 --mcp-config；codex / chatgpt 写 ~/.codex 的 profile 与模型目录；opencode 用 OPENCODE_CONFIG_CONTENT；openclaw 写 ~/.openclaw/openclaw.json；hermes 写 ~/.hermes/config.yaml；pi 写 ~/.pi/agent/*.json；copilot 走环境变量。
-- chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml），然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。
+- chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml）并写 models.json，然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。`omi launch chatgpt --restore` 还原到改写前。
 - 每次启动的模型 / 端点记录在 ~/.omni/launcher/<工具>.json，方便排查。
 
 ## 备份与恢复

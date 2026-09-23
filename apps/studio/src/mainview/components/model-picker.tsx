@@ -33,7 +33,7 @@ import { cn } from "@/mainview/lib/utils";
  * （选中要么等一次冷启动，要么报错）。启动 / 卸载在控制台做，这里只切换
  * 「请求发给谁」，所以是瞬时的，没有启动进度要等。对话与 Agent 共用这一份列表。
  *
- * 云端列表来自「设置 → 模型云服务」里用户添加过的模型：没添加过的（哪怕服务商
+ * 云端列表来自「设置 → 云端模型」里用户添加过的模型：没添加过的（哪怕服务商
  * 的 /v1/models 能拉到）和标成生图 / 视频 / TTS / ASR 的都不在这里。
  */
 export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
@@ -297,7 +297,7 @@ export function ModelPicker({ disabled = false }: { disabled?: boolean }) {
           variant="ghost"
           size="icon-sm"
           tooltip={t("chat.modelCloudSettings")}
-          onClick={() => setRoute({ path: "settings", tab: "network" })}
+          onClick={() => setRoute({ path: "settings", tab: "cloud" })}
         >
           <ArrowUpRightIcon className="size-3.5" />
         </Button>

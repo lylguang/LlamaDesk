@@ -41,7 +41,7 @@ function ErrorFallback({ error, onRetry }: { error: Error; onRetry: () => void }
 
   const goBack = () => {
     onRetry();
-    setRoute({ path: "settings", tab: "store" });
+    setRoute({ path: "settings", tab: "library" });
   };
 
   return (

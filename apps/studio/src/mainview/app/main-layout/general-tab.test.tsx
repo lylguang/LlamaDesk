@@ -2,7 +2,7 @@ import { afterAll, expect, mock, test } from "bun:test";
 import { Window } from "happy-dom";
 
 /**
- * 设置 → 偏好 → 通用 → 代理：这张卡决定「谁走代理、谁直连」。
+ * 设置 → 通用 → 代理：这张卡决定「谁走代理、谁直连」。
  *
  * 这里锁三件事：
  *   1. 四个采样（模型市场 / 云端接口 / 本地推理 / 局域网）按当前选择给出走代理还是直连，

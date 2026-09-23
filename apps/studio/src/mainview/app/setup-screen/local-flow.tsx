@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import {
   CheckCircle2Icon,
@@ -16,20 +16,28 @@ import {
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
+import { formatBytes as formatBytesSi } from "@lib/format";
 import { Button } from "@ui/button";
 import { Input } from "@ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { useServerStore } from "@stores/server";
 import { useModelDownloadStore } from "@stores/model-download";
-import { MODEL_PRESETS, matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
+import { matchQuant, safeRepoId, type InferenceEngine } from "@/shared/modelscope";
+import {
+  DEFAULT_CONTEXT_TOKENS,
+  fitModelsForMachine,
+  recommendEngine,
+  recommendModel,
+  type FitLevel,
+} from "@/shared/hardware";
 import type { SetupEnvironment } from "../../../bun/setup-env";
 
-import { SETUP_MODELS, formatBytes } from "./constants";
+import { SETUP_MODELS, formatBytes, setupModelCandidates } from "./constants";
+import { EngineInstaller, InstalledBadge } from "./engine-install";
+import { MachineCard, MachineHint, engineReasonText } from "./machine-card";
 import { SetupHeader, ModeCard, LocalStartStep } from "./shared";
 
 type LocalStep = "mode" | "engine" | "model" | "start";
-
-const DEFAULT_MLX_REPO = "pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit";
 
 const ENGINE_LABEL: Record<InferenceEngine, string> = {
   "llama.cpp": "llama-server",
@@ -38,13 +46,43 @@ const ENGINE_LABEL: Record<InferenceEngine, string> = {
   mlx: "MLX",
 };
 
+/** 内存适配分级的展示：文案 + 配色（估算的判定在 shared/hardware.ts）。 */
+const FIT_LABEL: Record<FitLevel, string> = {
+  comfortable: "本机流畅",
+  good: "本机可用",
+  tight: "内存偏紧",
+  "too-large": "超出内存",
+};
+
+const FIT_CLASS: Record<FitLevel, string> = {
+  comfortable: "bg-emerald-500/15 text-emerald-500",
+  good: "bg-primary/10 text-primary",
+  tight: "bg-amber-500/15 text-amber-500",
+  "too-large": "bg-destructive/10 text-destructive",
+};
+
+/** 一行推荐语：引擎 +（模型 · 档位 · 估算占用）。MLX 没有体积信息，只给到模型名。 */
+function recommendationLine(args: {
+  engine: InferenceEngine;
+  modelLabel?: string;
+  variant?: string;
+  totalBytes?: number;
+}): string {
+  const head = [`推荐 ${ENGINE_LABEL[args.engine]}`];
+  if (args.modelLabel) head.push(args.modelLabel);
+  const detail: string[] = [];
+  if (args.variant) detail.push(args.variant);
+  if (args.totalBytes)
+    detail.push(`约占 ${formatBytesSi(args.totalBytes, { gbDecimals: 1 })} 内存`);
+  return detail.length > 0 ? `${head.join(" + ")}（${detail.join(" · ")}）` : head.join(" + ");
+}
+
 type EngineChoice = {
   id: InferenceEngine;
   label: string;
   sub: string;
   desc: (env: SetupEnvironment) => string;
   installHint: (env: SetupEnvironment) => string;
-  recommended?: boolean;
 };
 
 /** 引擎介绍根据当前环境动态生成：Apple 芯片侧重 Metal，NVIDIA GPU 才推荐 vLLM/SGLang。 */
@@ -61,7 +99,6 @@ const ENGINE_CHOICES: EngineChoice[] = [
       env.platform === "darwin"
         ? "brew install llama.cpp（或从 GitHub 下载 llama-server）"
         : "下载 llama.cpp 的 llama-server 可执行文件并加入 PATH",
-    recommended: true,
   },
   {
     id: "vllm",
@@ -89,7 +126,7 @@ const ENGINE_CHOICES: EngineChoice[] = [
     sub: "Apple Silicon",
     desc: (env) =>
       env.platform === "darwin"
-        ? "Apple 官方 MLX 引擎（mlx-lm），在 Apple Silicon 上直接运行 MLX 模型（如 DeepSeek V4.1 Flash MLX）"
+        ? "Apple 官方 MLX 引擎（mlx-lm），在 Apple Silicon 上直接跑千问等 HF 仓库"
         : "MLX 引擎仅支持 macOS（Apple Silicon）",
     installHint: () => "pip install -U mlx-lm",
   },
@@ -135,10 +172,13 @@ export function LocalFlow({
   const [engine, setEngine] = useState<InferenceEngine>("llama.cpp");
   const [modelId, setModelId] = useState<string>(SETUP_MODELS[0]!.id);
   const [customHfModel, setCustomHfModel] = useState("");
-  const [mlxPresetRepo, setMlxPresetRepo] = useState<string>(DEFAULT_MLX_REPO);
   const [quants, setQuants] = useState<Record<string, string>>(
     Object.fromEntries(SETUP_MODELS.map((m) => [m.id, m.defaultQuant])),
   );
+  // 用户动过手就不再覆盖：推荐值是"没人选过时的默认"，不是"永远跟着机器走"。
+  const [modelTouched, setModelTouched] = useState(false);
+  const [engineTouched, setEngineTouched] = useState(false);
+  const [touchedQuants, setTouchedQuants] = useState<ReadonlySet<string>>(() => new Set());
   const isCustom = modelId === "custom";
   const activeQuant = quants[modelId] ?? "";
 
@@ -150,6 +190,83 @@ export function LocalFlow({
     queryFn: () => rpcClient.getSetupEnvironment(),
   });
   const env = envQuery.data;
+  const hardware = env?.hardware;
+
+  // 当前选中引擎下的适配表（切引擎 = 换权重格式 = 换一套档位）。
+  const fits = useMemo(() => {
+    if (!hardware) return [];
+    return fitModelsForMachine(hardware, setupModelCandidates(engine));
+  }, [hardware, engine]);
+  const fitById = useMemo(() => new Map(fits.map((fit) => [fit.id, fit])), [fits]);
+  const bestFit = useMemo(() => recommendModel(fits), [fits]);
+
+  // 首屏推荐的是"引擎 + 模型"这一对，所以模型要按**推荐引擎**的那套档位再算一遍
+  // （用户选 mlx 时上面那张表是空的，但首屏那句话仍要说得出来）。
+  const engineRec = useMemo(() => {
+    if (!env || !hardware) return null;
+    return recommendEngine(hardware, {
+      llama: env.llama.found,
+      vllm: env.vllm.found,
+      sglang: env.sglang.found,
+      mlx: env.mlx.found,
+    });
+  }, [env, hardware]);
+  const recommendedModel = useMemo(() => {
+    if (!hardware || !engineRec) return null;
+    return recommendModel(fitModelsForMachine(hardware, setupModelCandidates(engineRec.engine)));
+  }, [hardware, engineRec]);
+
+  // 首屏那一句「推荐什么」：引擎 + 模型档位 + 估算占用。
+  // 三个引擎的口径都齐了（MLX 与 vLLM 一样按 bf16 safetensors 估算），不再有"MLX 只能
+  // 报一个写死的模型名"那条特例 —— 那句写死的话正是"32GB 机器上也被推 DeepSeek"的来源。
+  const firstRunRecommendation = useMemo(() => {
+    if (!engineRec) return undefined;
+    const model = SETUP_MODELS.find((m) => m.id === recommendedModel?.id);
+    return recommendationLine({
+      engine: engineRec.engine,
+      modelLabel: model?.label,
+      variant: recommendedModel?.recommended.variant.name,
+      totalBytes: recommendedModel?.recommended.estimate.totalBytes,
+    });
+  }, [engineRec, recommendedModel]);
+
+  // 探测结果到位后预选本机最合适的模型；用户点过任何一个模型之后就交给他。
+  useEffect(() => {
+    if (modelTouched || !bestFit) return;
+    setModelId(bestFit.id);
+  }, [bestFit, modelTouched]);
+
+  // 引擎同理：推荐的引擎直接选中（推荐只会指向装好的 mlx / vLLM，或人人可装的 llama.cpp），
+  // 用户点过别的之后就听他的。
+  useEffect(() => {
+    if (engineTouched || !engineRec) return;
+    setEngine(engineRec.engine);
+  }, [engineRec, engineTouched]);
+
+  // 换引擎 = 换一套权重格式与档位：上一个引擎上"用户手选过哪一档"的记录随之作废，
+  // 否则会在新档位表里留下一个不存在的档位名（llama.cpp 的 Q5_K_M 到 vLLM 那边无效）。
+  useEffect(() => {
+    setTouchedQuants(new Set());
+  }, [engine]);
+
+  // 每个模型的默认档位也按机器挑（原来固定 Q4_K_M）：装得下更大的量化就没必要退档，
+  // 装不下就往下走一档。用户手选过的档位不覆盖。
+  useEffect(() => {
+    if (fits.length === 0) return;
+    setQuants((prev) => {
+      const next = { ...prev };
+      let changed = false;
+      for (const fit of fits) {
+        if (touchedQuants.has(fit.id)) continue;
+        const picked = fit.recommended.variant.name;
+        if (next[fit.id] !== picked) {
+          next[fit.id] = picked;
+          changed = true;
+        }
+      }
+      return changed ? next : prev;
+    });
+  }, [fits, touchedQuants]);
 
   const downloadTasks = useModelDownloadStore((s) => s.tasks);
   const installedQuery = useQuery({
@@ -188,7 +305,9 @@ export function LocalFlow({
         if (cancelled) return;
         const picked =
           engine === "llama.cpp"
-            ? files.filter((f) => f.kind === "gguf" && f.isWeight && matchQuant(f.name, activeQuant))
+            ? files.filter(
+                (f) => f.kind === "gguf" && f.isWeight && matchQuant(f.name, activeQuant),
+              )
             : files.filter((f) => !/\.(md|png|jpe?g|webp|gitignore|txt)$/i.test(f.name));
         setPlan({
           repo,
@@ -244,9 +363,11 @@ export function LocalFlow({
   };
 
   const handleStartLocal = async () => {
-    // MLX：无需文件下载，写入部署模型 repo 后由 mlx-lm 自动拉取。
+    // MLX：无需文件下载，写入部署模型 repo 后由 mlx-lm 自动拉取（走 HF 缓存 / 镜像）。
+    // 仓库就是模型表里那条 HF safetensors —— 与 vLLM / SGLang 同一份数据。
     if (engine === "mlx") {
-      const repo = isCustom ? customHfModel.trim() : mlxPresetRepo;
+      const mlxModel = SETUP_MODELS.find((m) => m.id === modelId);
+      const repo = isCustom ? customHfModel.trim() : (mlxModel?.hfRepo ?? SETUP_MODELS[0]!.hfRepo);
       await rpcClient.updateSettings({
         settings: {
           SERVER_MODE: "local",
@@ -298,9 +419,7 @@ export function LocalFlow({
   const planTotals = planTasks.reduce((s, t) => s + (t.total ?? 0), 0);
   const planReceived = planTasks.reduce((s, t) => s + (t.received ?? 0), 0);
   const planPercent = planTotals > 0 ? Math.floor((planReceived / planTotals) * 100) : null;
-  const planBusy = planTasks.some((t) =>
-    ["queued", "downloading", "paused"].includes(t.status),
-  );
+  const planBusy = planTasks.some((t) => ["queued", "downloading", "paused"].includes(t.status));
   const planFailed = planTasks.some((t) => t.status === "failed");
   const planSize = plan ? plan.files.reduce((s, f) => s + f.size, 0) : 0;
 
@@ -326,15 +445,19 @@ export function LocalFlow({
           "根据你的机器环境推荐，默认 llama.cpp；以后随时可在设置中切换。",
         )}
       {step === "model" &&
-        header(
-          "Choose a model",
-          "安装一个 Qwen 对话模型即可开始使用；选择后会自动下载部署。",
-        )}
-      {step === "start" &&
-        header("Start server", `正在准备启动 ${ENGINE_LABEL[engine]}。`)}
+        header("Choose a model", "安装一个 Qwen 对话模型即可开始使用；选择后会自动下载部署。")}
+      {step === "start" && header("Start server", `正在准备启动 ${ENGINE_LABEL[engine]}。`)}
 
       {step === "mode" && (
         <div className="flex flex-col gap-4">
+          {hardware ? (
+            <MachineCard hardware={hardware} recommendation={firstRunRecommendation} />
+          ) : envQuery.isLoading ? (
+            <div className="flex items-center justify-center gap-2 rounded-lg border border-dashed px-4 py-3 text-[11px] text-muted-foreground">
+              <Loader2Icon className="size-3.5 animate-spin" />
+              正在检测芯片与内存…
+            </div>
+          ) : null}
           <div className="grid grid-cols-2 gap-2">
             <ModeCard
               icon={<MonitorIcon className="size-4" />}
@@ -379,64 +502,93 @@ export function LocalFlow({
           ) : (
             <>
               <div className="flex flex-col gap-3">
-                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map((choice) => {
-                  const selected = engine === choice.id;
-                  const isReady = engineReady(choice.id, env);
-                  return (
-                    <div
-                      key={choice.id}
-                      role="button"
-                      tabIndex={0}
-                      className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
-                        selected
-                          ? "border-primary bg-primary/5"
-                          : "border-border hover:border-muted-foreground/40"
-                      }`}
-                      onClick={() => setEngine(choice.id)}
-                      onKeyDown={(e) => {
-                        if (e.key === "Enter" || e.key === " ") setEngine(choice.id);
-                      }}
-                    >
+                {ENGINE_CHOICES.filter((c) => c.id !== "mlx" || env.platform === "darwin").map(
+                  (choice) => {
+                    const selected = engine === choice.id;
+                    const isReady = engineReady(choice.id, env);
+                    // 「推荐」跟着本机硬件走（Apple 芯片 / 大显存 NVIDIA / 装了 mlx-lm），不再是写死的 llama.cpp。
+                    // 探测不到硬件（旧主进程 / 探测失败）时退回老口径：llama.cpp 仍然是兼容性最好的默认。
+                    const isRecommended = engineRec
+                      ? engineRec.engine === choice.id
+                      : choice.id === "llama.cpp";
+                    const pickEngine = () => {
+                      setEngine(choice.id);
+                      setEngineTouched(true);
+                    };
+                    return (
                       <div
-                        className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md ${
-                          selected ? "bg-primary/10 text-primary" : "bg-muted text-muted-foreground"
+                        key={choice.id}
+                        // 测试与排障用：一行引擎卡片对应一个引擎 id（断言"这一行有没有按钮"）
+                        data-engine={choice.id}
+                        data-engine-ready={isReady ? "1" : "0"}
+                        role="button"
+                        tabIndex={0}
+                        className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
+                          selected
+                            ? "border-primary bg-primary/5"
+                            : "border-border hover:border-muted-foreground/40"
                         }`}
+                        onClick={pickEngine}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") pickEngine();
+                        }}
                       >
-                        {choice.id === "llama.cpp" ? (
-                          <TerminalSquareIcon className="size-4" />
-                        ) : (
-                          <CpuIcon className="size-4" />
-                        )}
-                      </div>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex items-center gap-2">
-                          <span className="text-sm font-medium">{choice.label}</span>
-                          <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                            {choice.sub}
-                          </span>
-                          {choice.recommended && (
-                            <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
-                              推荐
-                            </span>
+                        <div
+                          className={`mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-md ${
+                            selected
+                              ? "bg-primary/10 text-primary"
+                              : "bg-muted text-muted-foreground"
+                          }`}
+                        >
+                          {choice.id === "llama.cpp" ? (
+                            <TerminalSquareIcon className="size-4" />
+                          ) : (
+                            <CpuIcon className="size-4" />
                           )}
                         </div>
-                        <p className="mt-0.5 text-xs text-muted-foreground">
-                          {choice.desc(env)}
-                        </p>
-                        {!isReady && (
-                          <p className="mt-1 text-[11px] text-muted-foreground/70">
-                            未就绪 · 安装：<code className="rounded bg-muted px-1">{choice.installHint(env)}</code>
-                          </p>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex items-center gap-2">
+                            <span className="text-sm font-medium">{choice.label}</span>
+                            <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
+                              {choice.sub}
+                            </span>
+                            {isRecommended && (
+                              <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                                推荐
+                              </span>
+                            )}
+                          </div>
+                          <p className="mt-0.5 text-xs text-muted-foreground">{choice.desc(env)}</p>
+                          {isRecommended && engineRec && (
+                            <p className="mt-1 text-[11px] text-primary/80">
+                              {engineReasonText(engineRec, env.hardware)}
+                            </p>
+                          )}
+                          {!isReady && (
+                            <p className="mt-1 text-[11px] text-muted-foreground/70">未就绪</p>
+                          )}
+                          {/* 没装好就地装：不用让用户去终端里复制命令（探测到的引擎状态由
+                            setup-env 查询刷新，装完这一行自己会变成 ✓）。手动命令留在按钮旁边。 */}
+                          {!isReady && (
+                            <EngineInstaller
+                              engine={choice.id}
+                              support={env.installSupport[choice.id]}
+                              manualHint={choice.installHint(env)}
+                              managedInstalling={env.installing === choice.id}
+                              onInstalled={() => envQuery.refetch()}
+                            />
+                          )}
+                          {isReady && <InstalledBadge version={env.installedVersions[choice.id]} />}
+                        </div>
+                        {isReady ? (
+                          <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />
+                        ) : (
+                          <XCircleIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
                         )}
                       </div>
-                      {isReady ? (
-                        <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />
-                      ) : (
-                        <XCircleIcon className="mt-1 size-4 shrink-0 text-muted-foreground" />
-                      )}
-                    </div>
-                  );
-                })}
+                    );
+                  },
+                )}
               </div>
               <div className="flex gap-2">
                 <Button variant="outline" size="sm" onClick={() => setStep("mode")}>
@@ -456,48 +608,23 @@ export function LocalFlow({
 
       {step === "model" && (
         <div className="flex flex-col gap-3">
-          {engine === "mlx"
-            ? MODEL_PRESETS.filter((p) => p.engine === "mlx" && p.app === "chat").map((p) => {
-                const mlxSelected = mlxPresetRepo === p.repo;
-                return (
-                  <div
-                    key={p.repo}
-                    role="button"
-                    tabIndex={0}
-                    className={`flex cursor-pointer items-start gap-3 rounded-lg border px-4 py-3 text-left transition-colors ${
-                      mlxSelected
-                        ? "border-primary bg-primary/5"
-                        : "border-border hover:border-muted-foreground/40"
-                    }`}
-                    onClick={() => setMlxPresetRepo(p.repo)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" || e.key === " ") setMlxPresetRepo(p.repo);
-                    }}
-                  >
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center gap-2">
-                        <span className="text-sm font-medium">{p.label}</span>
-                        <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
-                          MLX
-                        </span>
-                      </div>
-                      <p className="mt-0.5 text-xs text-muted-foreground">{p.description}</p>
-                      <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">{p.repo}</p>
-                    </div>
-                    {mlxSelected && <CheckCircle2Icon className="mt-1 size-4 shrink-0 text-primary" />}
-                  </div>
-                );
-              })
-            : SETUP_MODELS.map((model) => {
+          {hardware && <MachineHint hardware={hardware} />}
+          {SETUP_MODELS.map((model) => {
             const selected = modelId === model.id;
             const repo =
-              engine === "llama.cpp"
-                ? `${model.ggufRepo}:${quants[model.id]}`
-                : model.hfRepo;
+              engine === "llama.cpp" ? `${model.ggufRepo}:${quants[model.id]}` : model.hfRepo;
             const sizeBytes =
               engine === "llama.cpp"
                 ? model.quants.find((q) => q.name === quants[model.id])?.size
                 : model.hfSizeBytes;
+            // 适配表跟着当前引擎；用户选中的档位在表里对应的就是这一行要展示的占用。
+            const fit = fitById.get(model.id);
+            const variantFit =
+              fit?.variants.find((v) => v.variant.name === quants[model.id]) ?? fit?.recommended;
+            const pickModel = () => {
+              setModelId(model.id);
+              setModelTouched(true);
+            };
             return (
               <div
                 key={model.id}
@@ -507,30 +634,51 @@ export function LocalFlow({
                   selected
                     ? "border-primary bg-primary/5"
                     : "border-border hover:border-muted-foreground/40"
-                }`}
-                onClick={() => setModelId(model.id)}
+                } ${variantFit?.level === "too-large" ? "opacity-70" : ""}`}
+                onClick={pickModel}
                 onKeyDown={(e) => {
-                  if (e.key === "Enter" || e.key === " ") setModelId(model.id);
+                  if (e.key === "Enter" || e.key === " ") pickModel();
                 }}
               >
                 <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2">
+                  <div className="flex flex-wrap items-center gap-2">
                     <span className="text-sm font-medium">{model.label}</span>
                     <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] font-medium text-muted-foreground">
                       {model.params}
                     </span>
+                    {model.id === bestFit?.id && (
+                      <span className="rounded-full bg-primary/10 px-2 py-0.5 text-[10px] font-medium text-primary">
+                        推荐
+                      </span>
+                    )}
+                    {variantFit && (
+                      <span
+                        className={`rounded-full px-2 py-0.5 text-[10px] font-medium ${FIT_CLASS[variantFit.level]}`}
+                      >
+                        {FIT_LABEL[variantFit.level]}
+                      </span>
+                    )}
                   </div>
                   <p className="mt-0.5 text-xs text-muted-foreground">{model.description}</p>
                   <p className="mt-0.5 truncate font-mono text-[11px] text-muted-foreground/70">
                     {repo} · {formatBytes(sizeBytes ?? model.hfSizeBytes)}
                   </p>
+                  {variantFit && (
+                    <p className="mt-0.5 text-[11px] text-muted-foreground/70">
+                      估算占用 {formatBytesSi(variantFit.estimate.totalBytes, { gbDecimals: 1 })}
+                      （权重 {formatBytesSi(variantFit.estimate.weightsBytes, { gbDecimals: 1 })} +
+                      KV 缓存 {formatBytesSi(variantFit.estimate.kvCacheBytes, { gbDecimals: 1 })}
+                      ，按 {DEFAULT_CONTEXT_TOKENS / 1024}K 上下文）
+                    </p>
+                  )}
                 </div>
                 {engine === "llama.cpp" && model.quants.length > 1 && (
                   <Select
                     value={quants[model.id]}
                     onValueChange={(v) => {
-                      setModelId(model.id);
+                      pickModel();
                       setQuants((prev) => ({ ...prev, [model.id]: v }));
+                      setTouchedQuants((prev) => new Set(prev).add(model.id));
                     }}
                   >
                     <SelectTrigger
@@ -540,14 +688,22 @@ export function LocalFlow({
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
-                      {model.quants.map((q) => (
-                        <SelectItem key={q.name} value={q.name}>
-                          <p>{q.name}</p>
-                          <span className="text-muted-foreground tabular-nums">
-                            {formatBytes(q.size)}
-                          </span>
-                        </SelectItem>
-                      ))}
+                      {model.quants.map((q) => {
+                        const level = fit?.variants.find((v) => v.variant.name === q.name)?.level;
+                        return (
+                          <SelectItem key={q.name} value={q.name}>
+                            <p>{q.name}</p>
+                            <span
+                              className={`tabular-nums ${
+                                level === "too-large" ? "text-destructive" : "text-muted-foreground"
+                              }`}
+                            >
+                              {formatBytes(q.size)}
+                              {level === "too-large" ? " · 超出内存" : ""}
+                            </span>
+                          </SelectItem>
+                        );
+                      })}
                     </SelectContent>
                   </Select>
                 )}
@@ -562,22 +718,23 @@ export function LocalFlow({
                 ? "border-primary bg-primary/5"
                 : "border-border hover:border-muted-foreground/40"
             }`}
-            onClick={() => setModelId("custom")}
+            onClick={() => {
+              setModelId("custom");
+              setModelTouched(true);
+            }}
           >
             <span className="text-sm font-medium">Custom model</span>
             <span className="text-xs text-muted-foreground">
               {engine === "llama.cpp"
                 ? "Enter a HuggingFace GGUF model, e.g. user/Model-GGUF:Q4_K_M"
                 : engine === "mlx"
-                  ? "Enter a HuggingFace MLX model repo, e.g. pipenetwork/DeepSeek-V4.1-Flash-MLX-mixed-4_8bit"
+                  ? "Enter a HuggingFace repo loadable by mlx-lm, e.g. Qwen/Qwen3.5-9B"
                   : "Enter a HuggingFace safetensors model, e.g. Qwen/Qwen3.5-4B"}
             </span>
           </button>
           {isCustom && (
             <Input
-              placeholder={
-                engine === "llama.cpp" ? "user/Model-GGUF:Q4_K_M" : "Qwen/Qwen3.5-4B"
-              }
+              placeholder={engine === "llama.cpp" ? "user/Model-GGUF:Q4_K_M" : "Qwen/Qwen3.5-4B"}
               value={customHfModel}
               onChange={(e) => setCustomHfModel(e.target.value)}
               className="h-8 text-sm"
@@ -620,16 +777,16 @@ export function LocalFlow({
               <div className="flex flex-col gap-3">
                 <div className="flex items-start gap-3 rounded-lg border px-4 py-3">
                   <AlertTriangleIcon className="mt-0.5 size-5 shrink-0 text-amber-500" />
-                  <div className="flex-1">
-                    <p className="text-sm font-medium">
-                      {ENGINE_LABEL[engine]} 未就绪
-                    </p>
-                    <p className="mt-0.5 text-xs text-muted-foreground">
-                      安装：{" "}
-                      <code className="rounded bg-muted px-1 text-[11px]">
-                        {ENGINE_CHOICES.find((c) => c.id === engine)!.installHint(env)}
-                      </code>
-                    </p>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-sm font-medium">{ENGINE_LABEL[engine]} 未就绪</p>
+                    {/* 引导的最后一跳也不该把人推回终端：这里同样给一键安装（手动命令在按钮旁边）。 */}
+                    <EngineInstaller
+                      engine={engine}
+                      support={env.installSupport[engine]}
+                      manualHint={ENGINE_CHOICES.find((c) => c.id === engine)!.installHint(env)}
+                      managedInstalling={env.installing === engine}
+                      onInstalled={() => envQuery.refetch()}
+                    />
                     <p className="mt-1 text-[11px] text-muted-foreground/70">
                       安装完成后点击「重新检测」；也可以返回上一步选择其他引擎。
                     </p>
@@ -677,11 +834,7 @@ export function LocalFlow({
                   <ArrowLeftIcon data-icon="inline-start" />
                   Back
                 </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => setPlanNonce((n) => n + 1)}
-                >
+                <Button variant="outline" size="sm" onClick={() => setPlanNonce((n) => n + 1)}>
                   <RefreshCwIcon data-icon="inline-start" />
                   重试
                 </Button>
@@ -719,14 +872,10 @@ export function LocalFlow({
               ) : planBusy || planPercent != null ? (
                 <div className="flex flex-col gap-1.5">
                   <div className="flex items-center justify-between text-[11px] text-muted-foreground">
-                    <span>
-                      {planFailed
-                        ? "下载失败"
-                        : planBusy
-                          ? "下载中…"
-                          : "等待下载…"}
+                    <span>{planFailed ? "下载失败" : planBusy ? "下载中…" : "等待下载…"}</span>
+                    <span className="tabular-nums">
+                      {planPercent != null ? `${planPercent}%` : ""}
                     </span>
-                    <span className="tabular-nums">{planPercent != null ? `${planPercent}%` : ""}</span>
                   </div>
                   <div className="h-1 w-full overflow-hidden rounded-full bg-muted">
                     <div

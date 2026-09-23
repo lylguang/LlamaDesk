@@ -7,7 +7,7 @@ import {
   XIcon,
   Trash2Icon,
   Loader2Icon,
-  ClockIcon,
+  RotateCcwIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -15,7 +15,13 @@ import { Button } from "@ui/button";
 import { ScrollArea } from "@ui/scroll-area";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
-import { formatBytes, formatEta, queuePositionOf, summarizeDownloads, taskEta } from "@lib/download-view";
+import {
+  formatBytes,
+  formatEta,
+  groupDownloadsByRepo,
+  summarizeDownloads,
+  type ModelDownloadGroup,
+} from "@lib/download-view";
 import { SourceBadge } from "./source-badge";
 import type { DownloadTask } from "../../bun/download-manager";
 import { cn } from "@/mainview/lib/utils";
@@ -29,69 +35,99 @@ const STATUS_STYLES: Record<DownloadTask["status"], string> = {
   canceled: "bg-muted-foreground/15 text-muted-foreground",
 };
 
-function TaskRow({ task, tasks }: { task: DownloadTask; tasks: readonly DownloadTask[] }) {
+/**
+ * 一个模型一行。
+ *
+ * 下载的单元是「模型」而不是「文件」：safetensors 仓库的十几个分片 + config +
+ * tokenizer 本来就只能一起下完才有用，逐文件列进度既看不出整体下了多少，也让
+ * 这个 320px 宽的面板被十几个进度条淹没。任务仍然是文件级的（断点续传、重试都
+ * 在那儿），这里只把同一 repo 的任务聚合成一条展示。
+ */
+function ModelRow({ group }: { group: ModelDownloadGroup }) {
   const t = useT();
   const queryClient = useQueryClient();
+  const invalidate = () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] });
 
+  // 组级按钮 = 对组内每个文件各调一次既有 RPC（单文件级接口不变）。
   const pause = useMutation({
-    mutationFn: () => rpcClient.pauseModelDownload({ id: task.id }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
+    mutationFn: async () => {
+      for (const task of group.tasks) {
+        if (task.status === "downloading") await rpcClient.pauseModelDownload({ id: task.id });
+      }
+    },
+    onSuccess: invalidate,
   });
   const resume = useMutation({
-    mutationFn: () => rpcClient.resumeModelDownload({ id: task.id }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
+    mutationFn: async () => {
+      for (const task of group.tasks) {
+        if (task.status === "paused" || task.status === "failed") {
+          await rpcClient.resumeModelDownload({ id: task.id });
+        }
+      }
+    },
+    onSuccess: invalidate,
   });
   const cancel = useMutation({
-    mutationFn: () => rpcClient.cancelModelDownload({ id: task.id }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
+    mutationFn: async () => {
+      for (const task of group.tasks) {
+        if (task.status === "downloading" || task.status === "queued" || task.status === "paused") {
+          await rpcClient.cancelModelDownload({ id: task.id });
+        }
+      }
+    },
+    onSuccess: invalidate,
   });
   const remove = useMutation({
-    mutationFn: () => rpcClient.removeDownload({ id: task.id }),
-    onSuccess: () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] }),
+    mutationFn: async () => {
+      for (const task of group.tasks) await rpcClient.removeDownload({ id: task.id });
+    },
+    onSuccess: invalidate,
   });
 
   const busy = pause.isPending || resume.isPending || cancel.isPending || remove.isPending;
-  const showProgress =
-    task.status === "downloading" ||
-    task.status === "paused" ||
-    task.status === "queued" ||
-    task.status === "failed";
-  const done = task.status === "completed";
-  const eta = taskEta(task, t);
-  const position = queuePositionOf(task, tasks);
+  const { summary, status } = group;
+  // GGUF 单文件组用文件名做标题（每个量化是独立模型），多文件模型用仓库名。
+  const bare = group.repo.split("/").pop() || group.repo;
+  const title = group.fileName ?? bare;
+  const eta = status === "downloading" ? formatEta(summary.remainingBytes, summary.speed, t) : null;
+  const showProgress = status !== "completed" && status !== "canceled";
+  const canResume = status === "paused" || status === "failed";
+  const canCancel = status === "downloading" || status === "queued" || status === "paused";
 
   return (
     <div className="rounded-lg border px-3 py-2.5">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-xs font-medium">{task.fileName}</p>
+          <p className="truncate text-xs font-medium" title={group.label}>
+            {title}
+          </p>
           <div className="mt-0.5 flex items-center gap-1.5">
-            {/* 每个任务都能看出字节是从哪个站拉下来的 */}
-            <SourceBadge source={task.source} />
+            <SourceBadge source={group.source} />
             <span className="truncate font-mono text-[10px] text-muted-foreground/70">
-              {task.repo}
+              {group.repo}
             </span>
           </div>
           <p className="mt-0.5 text-[10px] text-muted-foreground tabular-nums">
-            {formatBytes(task.received)}
-            {task.total ? ` / ${formatBytes(task.total)}` : ""}
-            {task.speed ? ` · ${formatBytes(task.speed)}/s` : ""}
-            {/* 单个任务的剩余时间；排队中的显示「前面还有几个」。 */}
+            {t("downloads.groupFiles", {
+              done: String(group.doneCount),
+              total: String(group.fileCount),
+            })}
+            {summary.percent != null
+              ? ` · ${formatBytes(summary.received)} / ${formatBytes(summary.total)}`
+              : summary.received > 0
+                ? ` · ${formatBytes(summary.received)}`
+                : ""}
+            {summary.speed > 0 ? ` · ${formatBytes(summary.speed)}/s` : ""}
             {eta ? ` · ${eta}` : ""}
           </p>
-          {position != null && (
-            <p className="mt-0.5 text-[10px] text-muted-foreground/80">
-              {t("downloads.queuedAhead", { n: String(Math.max(0, position - 1)) })}
-            </p>
-          )}
         </div>
         <span
           className={cn(
             "shrink-0 rounded-full px-1.5 py-0.5 text-[10px] font-medium",
-            STATUS_STYLES[task.status],
+            STATUS_STYLES[status],
           )}
         >
-          {t(`downloads.status.${task.status}`)}
+          {t(`downloads.status.${status}`)}
         </span>
       </div>
 
@@ -100,34 +136,64 @@ function TaskRow({ task, tasks }: { task: DownloadTask; tasks: readonly Download
           <div
             className={cn(
               "h-full rounded-full transition-[width] duration-200",
-              task.status === "failed" ? "bg-destructive" : "bg-primary",
+              status === "failed" ? "bg-destructive" : "bg-primary",
             )}
-            style={{ width: `${task.percent ?? 0}%` }}
+            style={{ width: `${summary.percent ?? 0}%` }}
           />
         </div>
       )}
-      {task.status === "failed" && task.error && (
-        <p className="mt-1 truncate text-[10px] text-destructive">{task.error}</p>
+      {group.failedCount > 0 && (
+        <p className="mt-1 truncate text-[10px] text-destructive">
+          {t("downloads.groupFailed", { n: String(group.failedCount) })}
+        </p>
       )}
 
       <div className="mt-2 flex items-center justify-end gap-1">
-        {task.status === "downloading" && (
-          <Button variant="outline" size="icon-sm" tooltip={t("downloads.pause")} disabled={busy} onClick={() => pause.mutate()}>
+        {canResume && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            tooltip={t("downloads.resume")}
+            disabled={busy}
+            onClick={() => resume.mutate()}
+          >
+            {status === "failed" ? (
+              <RotateCcwIcon className="size-3.5" />
+            ) : (
+              <PlayIcon className="size-3.5" />
+            )}
+          </Button>
+        )}
+        {status === "downloading" && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            tooltip={t("downloads.pause")}
+            disabled={busy}
+            onClick={() => pause.mutate()}
+          >
             <PauseIcon className="size-3.5" />
           </Button>
         )}
-        {(task.status === "paused" || task.status === "failed") && (
-          <Button variant="outline" size="icon-sm" tooltip={t("downloads.resume")} disabled={busy} onClick={() => resume.mutate()}>
-            {task.status === "failed" ? <ClockIcon className="size-3.5" /> : <PlayIcon className="size-3.5" />}
-          </Button>
-        )}
-        {!done && (task.status === "downloading" || task.status === "paused" || task.status === "queued") && (
-          <Button variant="outline" size="icon-sm" tooltip={t("downloads.cancel")} disabled={busy} onClick={() => cancel.mutate()}>
+        {canCancel && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            tooltip={t("downloads.cancel")}
+            disabled={busy}
+            onClick={() => cancel.mutate()}
+          >
             <XIcon className="size-3.5" />
           </Button>
         )}
-        {(done || task.status === "failed" || task.status === "canceled") && (
-          <Button variant="outline" size="icon-sm" tooltip={t("common.delete")} disabled={busy} onClick={() => remove.mutate()}>
+        {!canCancel && (
+          <Button
+            variant="outline"
+            size="icon-sm"
+            tooltip={t("common.delete")}
+            disabled={busy}
+            onClick={() => remove.mutate()}
+          >
             <Trash2Icon className="size-3.5" />
           </Button>
         )}
@@ -135,8 +201,6 @@ function TaskRow({ task, tasks }: { task: DownloadTask; tasks: readonly Download
     </div>
   );
 }
-
-const ACTIVE_STATUSES: DownloadTask["status"][] = ["downloading", "queued", "paused", "failed"];
 
 export function DownloadsButton() {
   const t = useT();
@@ -161,13 +225,9 @@ export function DownloadsButton() {
     return () => document.removeEventListener("mousedown", onDown);
   }, [open]);
 
-  const active = tasks.filter((t) => ACTIVE_STATUSES.includes(t.status)).length;
-  const completed = tasks.filter((t) => t.status === "completed").length;
-  // 正在下的排前面，历史（已完成/已取消）按时间倒序跟在后面。
-  const ordered = [
-    ...tasks.filter((t) => ACTIVE_STATUSES.includes(t.status)),
-    ...tasks.filter((t) => !ACTIVE_STATUSES.includes(t.status)),
-  ];
+  const groups = groupDownloadsByRepo(tasks);
+  const activeGroups = groups.filter((g) => g.status === "downloading" || g.status === "queued").length;
+  const completedGroups = groups.filter((g) => g.status === "completed").length;
   // 聚合信息：合计已下/总量 · 速度 · 剩余时间（总量未知时退化成只显示速度）。
   const summary = summarizeDownloads(tasks);
   const summaryEta = formatEta(summary.remainingBytes, summary.speed, t);
@@ -184,11 +244,13 @@ export function DownloadsButton() {
         : t("downloads.speedOnly", { speed: formatBytes(summary.speed) });
 
   const clearCompleted = () => {
-    const done = tasks.filter((t) => t.status === "completed");
-    for (const task of done) {
-      void rpcClient.removeDownload({ id: task.id }).then(() => {
-        queryClient.invalidateQueries({ queryKey: ["model-downloads"] });
-      });
+    for (const group of groups) {
+      if (group.status !== "completed") continue;
+      for (const task of group.tasks) {
+        void rpcClient.removeDownload({ id: task.id }).then(() => {
+          queryClient.invalidateQueries({ queryKey: ["model-downloads"] });
+        });
+      }
     }
   };
 
@@ -200,14 +262,14 @@ export function DownloadsButton() {
         tooltip={t("downloads.title")}
         onClick={() => setOpen((v) => !v)}
       >
-        {active > 0 ? (
+        {activeGroups > 0 ? (
           <Loader2Icon className="size-4 animate-spin" />
         ) : (
           <DownloadCloudIcon className="size-4" />
         )}
-        {active > 0 && (
+        {activeGroups > 0 && (
           <span className="absolute -top-0.5 -right-0.5 flex size-4 items-center justify-center rounded-full bg-primary text-[9px] font-semibold text-primary-foreground">
-            {active > 9 ? "9+" : active}
+            {activeGroups > 9 ? "9+" : activeGroups}
           </span>
         )}
       </Button>
@@ -222,7 +284,7 @@ export function DownloadsButton() {
             <div className="flex min-w-0 flex-col">
               <span className="min-w-0 truncate text-xs font-medium">
                 {t("downloads.title")}
-                <span className="ml-1.5 text-muted-foreground">({tasks.length})</span>
+                <span className="ml-1.5 text-muted-foreground">({groups.length})</span>
               </span>
               {/* 聚合进度：合计已下/总量 · 速度 · 剩余时间 */}
               {summaryText && (
@@ -231,7 +293,7 @@ export function DownloadsButton() {
                 </span>
               )}
             </div>
-            {completed > 0 && (
+            {completedGroups > 0 && (
               <Button
                 variant="ghost"
                 size="sm"
@@ -247,13 +309,13 @@ export function DownloadsButton() {
               （历史记录一屏放不下）。列表类弹层要常驻滚动条。 */}
           <ScrollArea scrollbarVisibility="always" className="h-[min(20rem,calc(100vh-8rem))] min-h-0">
             <div className="flex flex-col gap-2 p-2">
-              {tasks.length === 0 ? (
+              {groups.length === 0 ? (
                 <div className="flex flex-col items-center gap-1.5 py-10 text-center">
                   <DownloadCloudIcon className="size-6 text-muted-foreground/40" />
                   <p className="text-xs text-muted-foreground">{t("downloads.empty")}</p>
                 </div>
               ) : (
-                ordered.map((task) => <TaskRow key={task.id} task={task} tasks={tasks} />)
+                groups.map((group) => <ModelRow key={group.key} group={group} />)
               )}
             </div>
           </ScrollArea>

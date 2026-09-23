@@ -14,7 +14,7 @@
 ## 云端模型（所有功能页共用的配置模型）
 
 生图 / 语音 / OCR / 视频**都不在页面里填地址与密钥**，页面只存「厂商 id + 模型」；
-连接信息统一在 `cloud_providers` 表（设置 →「模型云服务」）。排查三件事：
+连接信息统一在 `cloud_providers` 表（设置 → 云端模型）。排查三件事：
 
 1. 厂商**启动**了吗（`enabled=1`）？只有启动过的厂商才会出现在功能页的选择器里，
    启动时会拿 `/v1/models` 校验密钥（401/403 = 密钥无效，事件 `cloud-provider-enable-failed`）。
@@ -23,6 +23,13 @@
 3. 功能页选的是哪个厂商？`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / `ASR_PROVIDER_ID` /
    `OCR_PROVIDER_ID` / `VIDEO_PROVIDER_ID`（`omi logs` 只能看到结果，配置看
    `bun scripts/omni-diag.ts` 的「云服务商」段）。
+
+**厂商是内置目录，不是用户自己攒的**：`CLOUD_PRESETS` 里那 20 多家安装即整份入驻
+（`ensureBuiltinProviders`，事件 `cloud-provider.builtin-seed`），页面上直接列出来、
+用户只填 Key。**地址由应用维护**：与预设一致的行在界面上只读、写库被拒
+（`updateCloudProvider`）、也删不掉（`deleteCloudProvider`）—— 写不进去地址不是 bug，
+别劝用户去改地址；要自建网关 / 中转，让他加「自定义服务商」。唯一例外是老行：地址
+被用户改过的（与预设不一致）不锁，仍可编辑，界面上另有「恢复官方地址」。
 
 一把梭：`bun run --cwd apps/studio scripts/omni-diag.ts` 会列出每个厂商的
 「已启动 / 有密钥 / 视频接口 / 模型数」与各功能页选中的厂商 id。
@@ -36,7 +43,7 @@
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
 | `请先输入提示词` | 调用侧没给 prompt | 让用户描述想生成的画面；若来自 Agent 工具，是 Agent 没传参 → 让它补 |
-| `还没选定云厂商…` / `请先在「设置 → 模型云服务」里启用一个厂商` | 生图后端是云端但没选（或没有可用）厂商 | 设置 →「模型云服务」填 Key 后点「启动」（会校验密钥），回「图像」页选厂商与生图模型 |
+| `还没选定云厂商…` / `请先在「设置 → 云端模型」里启用一个厂商` | 生图后端是云端但没选（或没有可用）厂商 | 设置 → 云端模型左侧选一家厂商、填 Key、打开开关（会校验密钥），回「图像」页选厂商与生图模型 |
 | `请先填写生图模型 ID` | 厂商选了、模型 ID 空 | 在「图像」页选该厂商的生图模型 |
 | `请先在左侧配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` / `Missing ComfyUI base URL` | 后端 `comfyui` 但没地址 | 「图像」→ 填 ComfyUI 地址，并确认 ComfyUI 已启动 |
 | `请先填写 ComfyUI checkpoint 名称` | ComfyUI 里没选 checkpoint | 在 ComfyUI 下载模型后，在应用里选 checkpoint |
@@ -59,20 +66,23 @@
 
 ## 生视频（source `video`，记录表 `video_records`）
 
-证据：`omi logs --source video --verbose`（`video.submit.failed` / `video.poll.failed` / `video.poll.timeout`）。
+证据：`omi logs --source video --verbose`（`video.submit.failed` / `video.poll.failed` / `video.poll.http` / `video.poll.timeout`）。
 
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
-| `还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生视频的厂商` | 云端后端没选厂商 | 设置 →「模型云服务」启动一个厂商（生视频接口见下条），回「视频」页选厂商与视频模型 |
+| `还没选择云厂商。请到「设置 → 云端模型」启用一个支持生视频的厂商` | 云端后端没选厂商 | 设置 → 云端模型打开一家厂商的开关（生视频接口见下条），回「视频」页选厂商与视频模型 |
 | `云厂商「X」没有配置生视频接口（在设置里选 MiniMax / Seedance）` | 厂商没选生视频协议 | 视频 API 各家不通用：在厂商详情里把「生视频接口」设为 MiniMax 或 Seedance |
 | `这条任务的厂商已删除，无法继续查询上游状态` | 轮询时记录里的厂商行被删了 | 该任务无法续查，重新提交；轮询按记录里的 providerId 查上游，删厂商前先确认没有在途任务 |
-| `请先配置 MiniMax 服务地址` / `请先配置 Seedance（火山方舟）服务地址` / `请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` | 后端地址空（云端看厂商行的地址） | 云端：设置 →「模型云服务」补地址；ComfyUI：「视频」页填地址 |
+| `请先配置 MiniMax 服务地址` / `请先配置 Seedance（火山方舟）服务地址` / `请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）` | 后端地址空（云端看厂商行的地址） | 云端：**内置厂商的地址由应用维护、页面上填不了** —— 地址为空说明这一行是自定义服务商（或老行被清过），到「云端模型」补地址；ComfyUI：「视频」页填地址 |
 | `未找到 ComfyUI checkpoint，请先在 ComfyUI 下载 Wan 模型` / `未找到 ComfyUI CLIP（umt5）…` / `未找到 ComfyUI VAE（wan vae）…` | ComfyUI 缺 Wan 系列依赖模型 | 在 ComfyUI 侧下载 Wan 模型，并在应用里选好 ckpt / clip / vae |
-| `MiniMax 未返回 task_id，请检查服务配置` / `Seedance 未返回任务 id，请检查 API Key 与模型` | 鉴权或模型名不对 | 核对 key、模型 id、base（Seedance 需方舟的 endpoint 与模型） |
+| `MiniMax 未返回 task_id：…` / `Seedance 未返回任务 id，请检查 API Key 与模型` | 上游响应里没有任务 id（参数 / 模型名不对，或地址打的不是那家接口） | 核对 key、模型 id、base。MiniMax 只跑 v2 接口，模型 id 只能是 `MiniMax-H3` / `MiniMax-H3-Max`（Hailuo 系与 T2V / I2V 那代是 v1 的老模型，提交新模型上游只回 `2013 invalid params, 该模型请使用 /v2/video_generation 接口`）；H3 是 768P/2K + 4~15 秒，H3-Max 是 480P/768P + 5~15 秒 |
+| `上游返回的是网页（HTML）而不是接口响应` / `上游没有 MiniMax v2 视频接口（当前 API 地址 …）` | 这个地址不是 MiniMax 视频服务（中转站 / 聚合站只做 OpenAI 那套，或地址填成了网站首页） | 换成 MiniMax 官方地址（`https://api.minimaxi.com` 或 `https://api.minimax.chat`，**不带** `/v1`），或换一个真有生视频能力的厂商；中转站不能用视频接口 |
 | `首帧图文件不存在，请重新选择` | 首帧图失效 | 重选 |
 | `上游任务不存在或已过期` | 上游把任务清了（隔太久才轮询） | 重新提交；避免跨天再回来看 |
-| `生成超时（超过 30 分钟），可重试或检查服务状态` | 上游长时间无终态 | 查上游控制台配额/排队；`video.poll.retry`(debug) 里有每次轮询的瞬时错误 |
-| 一直"生成中"但没有任何错误 | 轮询在重试（瞬时网络错）或上游排队 | `omi logs --source video --level debug` 看 `video.poll.retry`；超过 30 分钟会自动失败 |
+| `上游鉴权失败（401）：…` / `401 invalid api key（HTTP 401）` | 上游拒了密钥 —— v2 的错误信封配 4xx/5xx 的 HTTP 状态（401 是鉴权，`{type:"error", error:{message, http_code}}`） | 到「设置 → 云端模型」重填该厂商的 API Key（过期 / 被吊销只能换新的）。日志里会有 `video.poll.http`(error)；记录保持「生成中」并显示原因，**宽限 3 分钟**（够去改设置，改好还能接着把成片取回来）后才标失败，不再挂到 30 分钟超时 |
+| `404 page not found：上游没有这个接口路径（当前 API 地址 …）—— MiniMax 的任务查询只有 /v2/query/video_generation/{task_id} 一条路径` | API 地址填错：把文档里带版本的路径（`/v1`、`/v2`）一起填进了地址栏 | 把地址改成根地址（不带 `/v1`、`/v2`）；提交与轮询都会回这句提示，并剥掉误填的版本后缀。轮询这条同样有 3 分钟宽限 |
+| `生成超时（超过 30 分钟）…；最后一次查询失败：…` | 上游长时间无终态，或轮询一直在失败 | 查上游控制台配额 / 排队；`video.poll.http` 里有每次查询失败的上游原话 |
+| 一直"生成中"且 `video.poll.http` 反复出现 | 轮询在重试（上游 5xx / 网络抖动）—— 任务本身可能还在跑 | 看该事件的 `status` 与上游原话；连刷约 2 分钟后日志从 warn 升为 error，超过 30 分钟才自动失败 |
 
 ---
 
@@ -83,13 +93,13 @@
 
 | 原文 | 原因 | 修复 |
 | --- | --- | --- |
-| `没有可用的 TTS 引擎` / `未配置三方 TTS Provider` / `本地引擎未启动` | 一个可用引擎都没有 | 二选一：本地（「本地引擎 → TTS」下载引擎与模型并启动）或用三方厂商（「设置 → 模型云服务」启动厂商并在「语音」页选它的 TTS 模型） |
+| `没有可用的 TTS 引擎` / `未配置三方 TTS Provider` / `本地引擎未启动` | 一个可用引擎都没有 | 二选一：本地（「本地引擎 → TTS」下载引擎与模型并启动）或用三方厂商（「设置 → 云端模型」启动厂商并在「语音」页选它的 TTS 模型） |
 | `未找到 audiocpp_cli，请先下载 audio.cpp 推理引擎` | 本地引擎二进制缺失 | 「本地引擎 → TTS」点下载引擎；平台不支持自动下载时按提示手动装 `audiocpp_cli` 并加入 PATH |
 | `模型尚未下载，请先点击下载` / `模型未下载：X` | 权重缺失 | 下载对应 TTS 模型 |
 | `请先在本地引擎中选择一个已启动的 TTS 模型` | 引擎起了但没选模型 | 选模型并启动 |
 | `该模型需要参考音频，请先在「声音克隆」页创建一个克隆音色` / `找不到所选克隆音色的参考音频` | 用了克隆音色但参考音频丢了 | 重建克隆音色 |
 | `本地合成失败（退出码 N）` | 引擎进程报错 | `omi logs --source tts --verbose` 看上下文；换模型/重建引擎 |
-| `Edge TTS 连接失败，请检查网络` / `Edge TTS 合成超时` / `Edge TTS 未收到音频` | 需要公网访问 Edge 服务 | 检查网络与**设置 → 偏好 → 通用**的代理（WebSocket 也走它），或改用本地引擎 |
+| `Edge TTS 连接失败，请检查网络` / `Edge TTS 合成超时` / `Edge TTS 未收到音频` | 需要公网访问 Edge 服务 | 检查网络与**设置 → 通用**的代理（WebSocket 也走它），或改用本地引擎 |
 | `No inference server configured` / `TTS request failed` | 走了推理服务通道但服务没起 | `omi status`；没起就 `omi start --server` |
 
 ---
@@ -102,7 +112,7 @@
 | --- | --- | --- |
 | `未检测到 whisper.cpp，请先安装（brew install whisper-cpp）或使用 OpenAI 兼容 API` | 缺本地引擎 | `brew install whisper-cpp`，或在「语音 / ASR」切到远端 API |
 | `请先下载并选择一个本地 ASR 模型` / `模型未下载：X` | 权重缺失 | 下载 ASR 模型 |
-| `没有可用的推理服务（本地引擎或远程服务）` | 两条路都没配好 | 起本地引擎，或在「设置 → 模型云服务」启动厂商后在「语音 / ASR」选它的 ASR 模型 |
+| `没有可用的推理服务（本地引擎或远程服务）` | 两条路都没配好 | 起本地引擎，或在「设置 → 云端模型」启动厂商后在「语音 / ASR」选它的 ASR 模型 |
 | `音频文件不存在` | 输入失效 | 重新选择音频 |
 | `转写结果为空` | 音频无声 / 太短 / 采样率异常 | 换一个音频验证是文件问题还是引擎问题 |
 | `whisper-cli 转写失败（退出码 N）` | 引擎报错（模型损坏 / 参数） | 看日志上下文；重下模型 |
@@ -120,7 +130,7 @@
 | `未检测到 Tesseract，请先安装（macOS: brew install tesseract）` | 缺二进制 | `brew install tesseract` |
 | `语言包尚未下载，请先点击下载` / `语言包未下载：X` | tessdata 缺失 | 「OCR」页下载语言包 |
 | `Tesseract 引擎未启用，请先在 OCR 页切换到 Tesseract 引擎` / `请先在本地引擎中选择一个 Tesseract 语言模型` | 引擎/模型没选 | 按提示切换 |
-| `请先在 OCR 页配置远程 OpenAI 兼容服务的 Base URL` / `Missing API base URL` | VLM 走远端但没配 | 「设置 → 模型云服务」启动厂商，再在「OCR → VLM」选厂商与模型（VLM 属于对话类模型） |
+| `请先在 OCR 页配置远程 OpenAI 兼容服务的 Base URL` / `Missing API base URL` | VLM 走远端但没配 | 「设置 → 云端模型」启动厂商，再在「OCR → VLM」选厂商与模型（VLM 属于对话类模型） |
 | `无法解析图片` / `图片文件不存在` | 输入文件问题 | 重选图片；PDF 先确认页图能生成（Sharp 转换是否失败） |
 | `识别结果为空` | 图片无文字或引擎不匹配 | 换引擎试（VLM 对复杂版式更强） |
 | `PaddleOCR 引擎未安装，请先点击「下载引擎」` / `引擎未安装完整，请重新点击「下载引擎」` | 引擎缺失/半装 | 重装引擎 |
@@ -159,7 +169,7 @@
 | --- | --- | --- |
 | `download.failed` + 磁盘可用为 0 | 磁盘满 | 清理后 `omi` / 界面点「继续」（会从断点续传） |
 | 反复重试后失败，错误含 `404` / `not found` | 仓库或文件名变了（镜像同步延迟也常见） | 换下载源（ModelScope ↔ HuggingFace）或换同名仓库 |
-| 卡在 0% 或速度长期为 0 | 网络到镜像不通 | 检查**设置 → 偏好 → 通用**的代理模式与地址（下载与云端调用共用这一份设置，回环地址永远直连）；HuggingFace 源优先走 hf-mirror |
+| 卡在 0% 或速度长期为 0 | 网络到镜像不通 | 检查**设置 → 通用**的代理模式与地址（下载与云端调用共用这一份设置，回环地址永远直连）；HuggingFace 源优先走 hf-mirror |
 | `非法的下载路径：X` | 文件名含 `../` 或绝对路径（安全拦截） | 正常现象，换合法文件名 |
 | 任务"消失" | `MODEL_DOWNLOADS` 里的状态被清理 | 重新发起下载（已有 `.part` 会续传） |
 
@@ -179,7 +189,7 @@
 | --- | --- | --- |
 | `engine.download.ok` 里 `host` 不是 `github.com` | 直连不通，走了镜像（**正常**，不是故障） | 无需处理；日志里的 `ms` / `bytes` 能看出实际速度 |
 | `engine.download.source-failed`，error 含 `连接超时`/`传输停滞` | 那条链路连不上或传一半卡住（每条链路都是短预算，会自动换下一条） | 看后续有没有 `ok`；全失败再处理 |
-| `engine.download.all-failed` | 所有链路都不通 | 按 error 里逐条列出的原因判断：全是被墙特征 → 让用户配代理（**设置 → 偏好 → 通用**：模式选「系统代理」，或选「自定义代理」填 http 地址如 `http://127.0.0.1:7890`，填完点「测试代理」确认通）；镜像被限流 → 稍后重试 |
+| `engine.download.all-failed` | 所有链路都不通 | 按 error 里逐条列出的原因判断：全是被墙特征 → 让用户配代理（**设置 → 通用**：模式选「系统代理」，或选「自定义代理」填 http 地址如 `http://127.0.0.1:7890`，填完点「测试代理」确认通）；镜像被限流 → 稍后重试 |
 | 点了「下载引擎」按钮一直转 | 历史行为是每源白等 10 分钟（已修）；现在最慢 budget ≈ 连接 8s / 停滞 15s / 单链路传输 180s | 若新版仍长转，用 `engine.download.*` 事件看卡在哪条链路 |
 | `当前平台暂不支持自动下载 audio.cpp 引擎` | audio.cpp 只有 macOS(arm64/x64) 与 Linux x64 资产 | 手动装 `audiocpp_cli` 并加入 PATH |
 | 下载成功但引擎仍显示「未检测到」 | 引擎按数据目录分开放（dev / canary / 正式版各一份） | 确认界面所在渠道与 `DATA_DIR/engines/<引擎>` 是同一份 |

@@ -1,5 +1,6 @@
 import {
   closeSync,
+  type Dirent,
   existsSync,
   ftruncateSync,
   mkdirSync,
@@ -9,6 +10,7 @@ import {
   readdirSync,
   rmSync,
   statSync,
+  type Stats,
   unlinkSync,
   writeFileSync,
   writeSync,
@@ -45,6 +47,15 @@ export type DownloadOptions = {
 
 /** 单个文件并发连接数：8 路在 ModelScope 上会偶发 500，4 路更稳。 */
 const DEFAULT_PARTS = 4;
+/**
+ * 对同一个站的**总**并发连接上限（同时下载的文件数 × 每个文件的分片数）。
+ *
+ * 分片数此前只在「单个文件」这一层被调到 4，但下载管理器同时跑 2 个文件，
+ * 于是对 ModelScope 的实际并发是 8 —— 正好是那个会偶发 500 的档位，用户侧
+ * 表现就是「小文件一个个报 Download failed: 500」。真正的约束必须落在总量上：
+ * 由 `partsBudgetFor()` 按当前并发文件数分摊，任何时刻总连接数不超过这个值。
+ */
+const GLOBAL_CONNECTIONS = 4;
 /** 小于该大小不分片，直接单流。 */
 const PARALLEL_MIN_TOTAL = 4 * 1024 * 1024;
 /** 每片最少字节：文件越大片越多，但不超过并发上限。 */
@@ -99,6 +110,15 @@ export function concurrentFileLimit(): number {
 export function partCountFor(total: number, override?: number): number {
   const parts = override ?? envInt("OMNI_DOWNLOAD_PARTS", DEFAULT_PARTS);
   return Math.max(1, Math.min(parts, Math.ceil(total / PART_MIN_BYTES)));
+}
+
+/**
+ * 每个文件能分到几条连接：按当前同时在下的文件数分摊全局预算。
+ * 2 个文件 → 每个 2 片（合计 4）；1 个文件 → 4 片。总量恒定，不会随并发文件数放大。
+ */
+export function partsBudgetFor(concurrentFiles: number): number {
+  const budget = envInt("OMNI_DOWNLOAD_CONNECTIONS", GLOBAL_CONNECTIONS);
+  return Math.max(1, Math.floor(budget / Math.max(1, concurrentFiles)));
 }
 
 function sidecarPath(destPath: string): string {
@@ -224,6 +244,79 @@ export function partialBytesFor(destPath: string, total?: number | null): number
   for (const part of sidecar.parts) inParts += part.have;
   // 不能用最终文件长度：它一开始就被预分配到完整大小了。
   return Math.min(sidecar.total, sidecar.flushed + inParts);
+}
+
+/**
+ * 这个路径上的文件「还没下完」吗？
+ *
+ * **不能用尺寸判断**：分片路径一上来就把最终文件预分配到完整长度（定位写不留空洞的
+ * 前提），所以下到一半的文件尺寸就是完整大小、后半段还是空内容 —— 它在资源管理器、
+ * 模型列表、市场页里看着都「没问题」，一加载却只得到一句笼统的 `exiting due to
+ * model loading error`（issue #16 报告者的「模型大小没有问题」正是这么来的）。
+ *
+ * 权威口径是旁路数据：侧车里的 `flushed + 各分片 have`（见 `partialBytesFor`）。
+ * 反方向也成立 —— 下完那一刻 sidecar 与分片都会被删掉；万一崩在这两步之间留下陈旧
+ * sidecar，它记录的字节也是齐的，不会把好文件误判成半成品。
+ */
+export function hasUnfinishedDownload(destPath: string): boolean {
+  const size = sizeOf(destPath);
+  if (size <= 0) return false;
+  return partialBytesFor(destPath, size) < size;
+}
+
+/** 侧车后缀（`<目标文件>.download.json`）：它的存在说明这里有过一次没下完的下载。 */
+const SIDECAR_SUFFIX = ".download.json";
+/** 目录里找侧车时的规模与深度上限：模型目录可以很大，别把一次列表查询拖成全盘扫描。 */
+const SIDECAR_WALK_MAX_ENTRIES = 2000;
+const SIDECAR_WALK_MAX_DEPTH = 4;
+
+function sidecarOf(name: string): string | null {
+  return name.endsWith(SIDECAR_SUFFIX) ? name.slice(0, -SIDECAR_SUFFIX.length) : null;
+}
+
+/** 目录（含子目录）里有没有没下完的文件。放在这里而不是外层：读目录要 fs。 */
+function unfinishedUnder(dir: string): boolean {
+  let visited = 0;
+  const walk = (current: string, depth: number): boolean => {
+    if (depth > SIDECAR_WALK_MAX_DEPTH) return false;
+    let entries: Dirent[];
+    try {
+      entries = readdirSync(current, { withFileTypes: true });
+    } catch {
+      return false;
+    }
+    for (const entry of entries) {
+      if (++visited > SIDECAR_WALK_MAX_ENTRIES) return false;
+      if (entry.name.startsWith(".")) continue;
+      const full = path.join(current, entry.name);
+      const target = sidecarOf(entry.name);
+      // 判据仍是「那个文件本身没下完」：陈旧侧车（字节其实齐了）不会误判。
+      if (target && entry.isFile()) {
+        if (hasUnfinishedDownload(path.join(current, target))) return true;
+        continue;
+      }
+      if (entry.isDirectory() && walk(full, depth + 1)) return true;
+    }
+    return false;
+  };
+  return walk(dir, 0);
+}
+
+/**
+ * 这个目标（**文件或目录**）里有没有「还没下完」的东西。
+ *
+ * 目录这一支是必须的：市场里的文件可以是 `BF16/xxx.gguf` 这种带子路径的名字，下载就落在
+ * `<仓库目录>/BF16/` 下、侧车也跟着在那里 —— 而扫描给列表的 `files` 只有**基名**，
+ * 按基名去拼路径永远拼不到它，于是仓库目录条目里的半成品会一路装成「已安装」。
+ */
+export function hasUnfinishedDownloadAt(target: string): boolean {
+  let st: Stats;
+  try {
+    st = statSync(target);
+  } catch {
+    return false;
+  }
+  return st.isDirectory() ? unfinishedUnder(target) : hasUnfinishedDownload(target);
 }
 
 /** 清理某个文件的全部旁路数据（取消下载用）。 */
@@ -726,6 +819,25 @@ async function downloadOnce(
     }
     onProgress?.({ received, total, percent: null });
   };
+
+  // 本地已经是完整文件（体积与调用方给的一致，且没有分片 / 旁路数据）→ 直接当完成，不发请求。
+  //
+  // 为什么要专门判一下：小文件走单流路径，续传请求是 `Range: bytes=<本地长度>-`，而
+  // ModelScope 对「起点已到文件末尾」的区间直接回 **500**（实测 73 字节的文件也是这样），
+  // 于是早就下好的 config.json 每次重下都被记成「失败」，模型卡片因此永远挂着红字。
+  // 判据必须排除分片路径：那条路会把最终文件预分配到目标大小（`preallocate`），光看体积
+  // 的话下到一半的文件也"完整"；单流路径从不预分配，体积 == 目标就是真的下完了。
+  if (
+    opts.total != null &&
+    opts.total > 0 &&
+    sizeOf(destPath) === opts.total &&
+    partFilesOnDisk(destPath).length === 0 &&
+    !existsSync(sidecarPath(destPath))
+  ) {
+    totals.total = opts.total;
+    report(opts.total, opts.total, true);
+    return { path: destPath, size: opts.total };
+  }
 
   if (totals.total == null) {
     const probed = await probeRemote(url, opts.signal);

@@ -59,7 +59,7 @@ export type ImageRecordRow = {
 export type ImageGenConfig = {
   backend: ImageGenBackend;
   /**
-   * 云端后端选中的服务商 id（「设置 → 模型云服务」里配置的厂商）。
+   * 云端后端选中的服务商 id（「设置 → 云端模型」里配置的厂商）。
    * 地址与密钥由服务商行提供 —— 图像页只挑厂商 + 模型，不再单独保存连接信息。
    */
   providerId: string;
@@ -146,16 +146,128 @@ function normalizeComfyBase(base: string): string {
   return base.trim().replace(/\/+$/, "");
 }
 
+/**
+ * 上游报错取一句人话。
+ *
+ * 报错信封不止 OpenAI 那一种：除了 `{ error: { message } }`，国内不少聚合网关用的是
+ * `{ code, message }`（硅基流动 20012 那种）。只认第一种的后果是把整段 JSON 原样丢给
+ * 用户 —— 小应用里显示的就是 `{"code":20012,"message":"Model does not exist…"}`，
+ * 既不好看也没告诉人去哪儿改。
+ */
+export function upstreamErrorText(body: string): string {
+  const raw = (body ?? "").trim();
+  if (!raw) return "";
+  try {
+    const parsed = JSON.parse(raw) as {
+      error?: { message?: unknown } | string;
+      message?: unknown;
+    };
+    const nested = parsed?.error;
+    if (nested && typeof nested === "object" && typeof nested.message === "string") {
+      return nested.message;
+    }
+    if (typeof nested === "string" && nested) return nested;
+    if (typeof parsed?.message === "string" && parsed.message) return parsed.message;
+  } catch {
+    // 不是 JSON 就当纯文本
+  }
+  return raw.slice(0, 300);
+}
+
 async function errorMessage(res: Response, fallback: string): Promise<string> {
   const body = await res.text().catch(() => "");
-  if (body) {
-    try {
-      return JSON.parse(body)?.error?.message ?? body.slice(0, 300);
-    } catch {
-      return body.slice(0, 300);
-    }
+  const text = upstreamErrorText(body);
+  return text || `${fallback} (${res.status})`;
+}
+
+/**
+ * "兼容层"参数：聚合网关要靠它们，OpenAI 原生端点不认，且不认的方式是直接 400。
+ *
+ * - `response_format: "b64_json"`：有的网关默认回 URL（不落盘的图片会随上游过期），
+ *   所以要显式要 base64；而 gpt-image-1 / gpt-image-2 本来就只回 b64，带上这个参数
+ *   得到的是一句 `Unknown parameter: 'response_format'`。
+ * - `negative_prompt`：同理由第三方扩展，OpenAI 没有这个字段。
+ *
+ * 处理办法是**不预判**：先照常发，上游明确点名某个参数不认识就去掉它重发一次。
+ * 按模型名硬编码"gpt-image 不要发这两个"也能跑，但聚合平台转发 gpt-image-2 时
+ * 有的又会要求 response_format —— 与其猜，不如听上游自己的话。
+ */
+const OPTIONAL_IMAGE_PARAMS = ["response_format", "negative_prompt"] as const;
+
+function pickUnsupportedParam(
+  message: string,
+  fields: Record<string, unknown>,
+): (typeof OPTIONAL_IMAGE_PARAMS)[number] | null {
+  for (const key of OPTIONAL_IMAGE_PARAMS) {
+    if (!(key in fields)) continue;
+    // 上游措辞五花八门（Unknown parameter / unrecognized / 不支持），但都会点名参数；
+    // 即便不是"参数不存在"而是"取值不合法"，去掉它也是对的（两者都长这样）。
+    if (message.toLowerCase().includes(key)) return key;
   }
-  return `${fallback} (${res.status})`;
+  return null;
+}
+
+/**
+ * 发一次生图请求；上游说某个可选参数不认识时去掉它重发（最多两个参数各一次）。
+ *
+ * 失败时抛的就是上游那句话说人话的版本（`upstreamErrorText`），与原来的行为一致 ——
+ * 这条路径只是多给一次机会，不改报错口径。
+ */
+async function sendImageRequest(params: {
+  fields: Record<string, unknown>;
+  send: (fields: Record<string, unknown>) => Promise<Response>;
+  hint: (message: string) => string;
+  /** 上游没给可读报错时的兜底文案（生图 / 修图各一句）。 */
+  fallback: string;
+  log: Record<string, unknown>;
+}): Promise<Response> {
+  const fields: Record<string, unknown> = { ...params.fields };
+  for (let attempt = 0; ; attempt++) {
+    const res = await params.send(fields);
+    if (res.ok) return res;
+    const message = await errorMessage(res, params.fallback);
+    const drop =
+      res.status === 400 && attempt < OPTIONAL_IMAGE_PARAMS.length
+        ? pickUnsupportedParam(message, fields)
+        : null;
+    if (!drop) throw new Error(params.hint(message));
+    delete fields[drop];
+    // 去掉一个参数是正常降级（不是错误）：留一条 info，排查"为什么这次没走代理的
+    // b64 通道 / 负向提示词没生效"时能看到上游说了什么。
+    logEvent({
+      level: "info",
+      source: "image",
+      event: "image.param.dropped",
+      message: `上游不接受参数 ${drop}，已去掉后重试`,
+      detail: { ...params.log, dropped: drop, status: res.status, upstream: message.slice(0, 300) },
+    });
+  }
+}
+
+/**
+ * 「模型不存在」这类报错补一句能照着做的提示。
+ *
+ * 实测最常见的成因不是上游坏了：`IMG_MODEL` 是三个后端共用的一个槽位，从本地 MLX
+ * 切到云端时它不会被清掉，于是 `z-image-turbo`（MLX 的 preset id）被原样发给了
+ * 硅基流动 —— 上游只回一句 "Model does not exist"，用户没法从这句话看出问题在
+ * 自己的设置里，更看不出该改哪儿。
+ */
+export function modelNotFoundHint(
+  message: string,
+  model: string,
+  providerName?: string,
+): string {
+  const hit =
+    /model\s+(does not exist|not found|is not exist)|invalid\s+model|no such model|模型不存在|不存在的模型/i.test(
+      message,
+    );
+  if (!hit) return message;
+  const where = providerName?.trim() || "当前厂商";
+  return (
+    `${where} 没有这个模型：${model}。` +
+    `到「图像生成 → 云端」的模型选择器里换一个该厂商提供的生图模型` +
+    `（或把生图后端切回本地 MLX / ComfyUI）。上游原始报错：${message}`
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -176,6 +288,25 @@ export async function listImageApiModels(
   const r = await CloudProviders.fetchRemoteModels({ baseUrl: base, apiKey });
   if (!r.ok) throw new Error(r.error);
   return r.models;
+}
+
+/**
+ * 列出某个后端可用的模型 id（RPC 与 Agent 弹窗共用的入口）。
+ *
+ * 凭据只有一个来源：`IMG_PROVIDER_ID` 指向的服务商行。调用方**不能**传地址或密钥 ——
+ * 页面此前传的是 `apiKey: ""`，而空串不会被 `??` 拦下，需要鉴权的上游列模型必然 401。
+ * 唯一例外是 `comfyBaseOverride`：ComfyUI 地址是用户自己的服务地址（不是凭据），
+ * 且弹窗要用「还没落盘的表单值」探测。
+ */
+export async function listImageGenModelIds(
+  backend?: ImageGenBackend,
+  comfyBaseOverride?: string,
+): Promise<string[]> {
+  const cfg = getImageGenConfig();
+  const picked = backend ?? cfg.backend;
+  if (picked === "comfyui") return listComfyCheckpoints(comfyBaseOverride ?? cfg.comfyBase);
+  if (picked === "mlx") return MlxGen.MLX_MODELS.map((m) => m.id);
+  return listImageApiModels(cfg.apiBase, cfg.apiKey);
 }
 
 /** 从 ComfyUI /object_info 拉取可用 checkpoint 列表。 */
@@ -440,55 +571,71 @@ async function generateViaApi(
   const count = Math.max(1, Math.min(params.count ?? 1, 8));
   const size = `${params.width ?? 1024}x${params.height ?? 1024}`;
   const usageCtx = { provider: imageProviderLabel("api", cfg.providerId), model };
+  // 「模型不存在」时把厂商名写进报错：用户要照着它去改设置。
+  const hint = (message: string) =>
+    modelNotFoundHint(message, model, CloudProviders.resolveCloudProvider(cfg.providerId)?.name);
 
   // AI 修图：带参考图时走 /v1/images/edits（multipart 以图改图）；否则走纯文生图。
   if (params.referenceImageRef) {
     const abs = resolveImageRef(params.referenceImageRef);
     if (!abs) throw new Error("参考图文件不存在");
 
-    const form = new FormData();
-    form.append("model", model);
-    form.append("prompt", params.prompt);
-    form.append("n", String(count));
-    form.append("size", size);
-    form.append("response_format", "b64_json");
-    if (params.negativePrompt?.trim()) form.append("negative_prompt", params.negativePrompt.trim());
-    form.append(
-      "image",
-      new File([await Bun.file(abs).arrayBuffer()], path.basename(abs), {
-        type: "image/png",
-      }),
-    );
+    const bytes = await Bun.file(abs).arrayBuffer();
+    const filename = path.basename(abs);
+    const fields: Record<string, unknown> = {
+      model,
+      prompt: params.prompt,
+      n: String(count),
+      size,
+      response_format: "b64_json",
+    };
+    if (params.negativePrompt?.trim()) fields.negative_prompt = params.negativePrompt.trim();
 
-    const res = await fetch(`${base}/images/edits`, {
-      method: "POST",
-      headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {},
-      body: form,
-      signal: AbortSignal.timeout(600_000),
+    const res = await sendImageRequest({
+      fields,
+      send: (current) => {
+        const form = new FormData();
+        for (const [key, value] of Object.entries(current)) form.append(key, String(value));
+        form.append("image", new File([bytes], filename, { type: "image/png" }));
+        return fetch(`${base}/images/edits`, {
+          method: "POST",
+          headers: cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {},
+          body: form,
+          signal: AbortSignal.timeout(600_000),
+        });
+      },
+      hint,
+      fallback: "修图请求失败",
+      log: { backend: "api", model, apiBase: base, reference: params.referenceImageRef },
     });
-    if (!res.ok) throw new Error(await errorMessage(res, "修图请求失败"));
     return saveApiItems(res, usageCtx);
   }
 
-  const body: Record<string, unknown> = {
+  const fields: Record<string, unknown> = {
     model,
     prompt: params.prompt,
     n: count,
     size,
     response_format: "b64_json",
   };
-  if (params.negativePrompt?.trim()) body.negative_prompt = params.negativePrompt.trim();
+  if (params.negativePrompt?.trim()) fields.negative_prompt = params.negativePrompt.trim();
 
-  const res = await fetch(`${base}/images/generations`, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
-    },
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(600_000),
+  const res = await sendImageRequest({
+    fields,
+    send: (current) =>
+      fetch(`${base}/images/generations`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}),
+        },
+        body: JSON.stringify(current),
+        signal: AbortSignal.timeout(600_000),
+      }),
+    hint,
+    fallback: "生图请求失败",
+    log: { backend: "api", model, apiBase: base },
   });
-  if (!res.ok) throw new Error(await errorMessage(res, "生图请求失败"));
   return saveApiItems(res, usageCtx);
 }
 

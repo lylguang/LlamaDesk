@@ -136,7 +136,7 @@ test("切会话 / 切应用页 / 窗口失焦都会重报给主进程", async ()
 
   // 走进设置页：会话还在选着，但已经不在眼前了
   await act(async () => {
-    useRouter.getState().setRoute({ path: "settings", tab: "store" });
+    useRouter.getState().setRoute({ path: "settings", tab: "library" });
   });
   await flush();
   expect(lastReport()).toMatchObject({ conversationId: null });

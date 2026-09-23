@@ -25,10 +25,9 @@ export { MINIMAX_VIDEO_MODELS, SEEDANCE_VIDEO_MODELS };
  *
  * 三种后端，全部是「提交任务 + 轮询」的异步模式：
  *
- * 1. **MiniMax（云端，H3）**：POST /v2/video_generation 提交，
- *    GET /v2/query/video_generation/{task_id} 轮询，成片从 content.url /
- *    /v2/files/{file_id} 下载。支持首帧图（图生视频）。自部署的 MiniMax
- *    兼容服务改 Base URL 即可。
+ * 1. **MiniMax（云端，H3 系）**：POST /v2/video_generation 提交（content 数组），
+ *    GET /v2/query/video_generation/{task_id} 轮询，成片地址在 task.content.url。
+ *    支持首帧图（图生视频）。自部署的 MiniMax 兼容服务改 Base URL 即可（只做 v2）。
  *
  * 2. **Seedance（云端，火山方舟）**：POST /api/v3/contents/generations/tasks
  *    提交（分辨率/比例/时长等以 `--flag` 尾缀写在提示词里），
@@ -123,6 +122,17 @@ type RecordRow = typeof videoRecords.$inferSelect;
 // 常量
 // ---------------------------------------------------------------------------
 
+/**
+ * MiniMax v2 各模型的分辨率与时长上限（官方文档：分辨率只认 768P / 2K / 480P，
+ * 其中 H3 是 768P / 2K、4~15 秒，H3-Max 是 480P / 768P、5~15 秒）。
+ * 不在表里的模型（中转站自造的 id）不校验，只按协议区间夹一下，
+ * 免得把上游的参数错误提前变成我们自己的拦路虎。
+ */
+const MINIMAX_MODEL_SPECS: Record<string, { resolutions: string[]; min: number; max: number }> = {
+  "MiniMax-H3": { resolutions: ["768P", "2K"], min: 4, max: 15 },
+  "MiniMax-H3-Max": { resolutions: ["480P", "768P"], min: 5, max: 15 },
+};
+
 /** 各接口协议的时长范围（秒）：云端按厂商协议分（MiniMax / Seedance），本地是 ComfyUI。 */
 export const VIDEO_DURATION_RANGE: Record<"minimax" | "seedance" | "comfyui", {
   min: number;
@@ -202,7 +212,7 @@ type CloudVideoTarget = {
 function resolveCloudTarget(providerId: string): CloudVideoTarget {
   const provider = CloudProviders.resolveCloudProvider(providerId);
   if (!provider) {
-    throw new Error("还没选择云厂商。请到「设置 → 模型云服务」启用一个支持生视频的厂商");
+    throw new Error("还没选择云厂商。请到「设置 → 云端模型」启用一个支持生视频的厂商");
   }
   if (!provider.baseUrl.trim()) throw new Error(`云厂商「${provider.name}」还没有填 API 地址`);
   const videoApi = provider.videoApi;
@@ -245,28 +255,75 @@ function providerTargetForLog(providerId: string): { base: string; hasApiKey: bo
   return { base: provider.baseUrl.trim(), hasApiKey: Boolean(provider.apiKey.trim()) };
 }
 
-function normalizeBase(base: string, suffix: string): string {
+/**
+ * 归一化厂商根地址：剥掉用户误填的版本后缀，再拼本协议要求的前缀。
+ *
+ * 用户常把接口文档里带版本的整段路径直接填进「API 地址」（`…/v1`、`…/v2`、
+ * `…/api/v3`），而调用处还会再拼一次自己的路径 —— 请求就落成
+ * `…/v1/v2/video_generation`，上游只回一句 404 page not found（真踩过）。
+ * 所以先把末尾的版本段（`/v1`、`/v2` …，可连写多个）剥掉，再补协议前缀。
+ */
+export function normalizeApiBase(base: string, prefix: "" | "/api/v3"): string {
   let b = base.trim().replace(/\/+$/, "");
-  if (b && !b.endsWith(suffix)) b = `${b}${suffix}`;
-  return b;
+  if (prefix && b.endsWith(prefix)) b = b.slice(0, -prefix.length);
+  while (/\/v\d+$/i.test(b)) b = b.replace(/\/v\d+$/i, "").replace(/\/+$/, "");
+  return b ? `${b}${prefix}` : "";
 }
 
-async function errorMessage(res: Response, fallback: string): Promise<string> {
-  const body = await res.text().catch(() => "");
-  if (body) {
-    try {
-      const json = JSON.parse(body);
-      return (
-        json?.error?.message ??
-        json?.base_resp?.status_msg ??
-        json?.message ??
-        body.slice(0, 300)
-      );
-    } catch {
-      return body.slice(0, 300);
+/** 读一次响应正文（Response 只能读一次），同时给出原始文本与其中可读的报错信息。 */
+async function readErrorBody(res: Response): Promise<{ raw: string; message: string }> {
+  const raw = (await res.text().catch(() => "")).trim();
+  if (!raw) return { raw: "", message: "" };
+  try {
+    const json = JSON.parse(raw) as
+      | {
+          error?: { message?: string };
+          base_resp?: { status_code?: unknown; status_msg?: string };
+          message?: string;
+        }
+      | null;
+    const message = json?.error?.message ?? json?.base_resp?.status_msg ?? json?.message;
+    if (typeof message === "string" && message.trim()) {
+      // 中转站（以及 MiniMax 音乐那类老接口）把业务码放在 base_resp.status_code，
+      // 正文里往往不带它 —— 而排查时大家搜的恰恰是这个码（1004 login fail）。
+      // 丢掉就白记了，所以有码就并进消息里。
+      const code = json?.base_resp?.status_code;
+      const withCode =
+        code === undefined || code === null || message.includes(String(code))
+          ? message
+          : `${String(code)} ${message}`;
+      return { raw, message: withCode };
     }
+    return { raw, message: raw.slice(0, 300) };
+  } catch {
+    return { raw, message: raw.slice(0, 300) };
   }
-  return `${fallback}（${res.status}）`;
+}
+
+/**
+ * 正文像不像 JSON：不像 JSON 的 404 是网关 / 路由回的（`404 page not found`），
+ * 跟上游业务层的「任务不存在」是两回事 —— 前者要改地址，后者才是任务过期。
+ */
+function looksLikeJson(raw: string): boolean {
+  const t = raw.trim();
+  return t.startsWith("{") || t.startsWith("[");
+}
+
+/**
+ * 路由级 404（正文不是 JSON）补一句「地址可能填错」——光回一句 `404 page not found`
+ * 用户没法知道问题出在地址上（这正是首次提交失败的现场）。
+ */
+function withRouteHint(base: string, status: number, raw: string, message: string): string {
+  if (status !== 404 || looksLikeJson(raw)) return message;
+  const text = message || "404 page not found";
+  return `${text}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 云端模型」检查该厂商的地址 —— 填根地址即可，不要带 /v1、/v2`;
+}
+
+/** 上游报错文案。`hintBase` 给定时，路由级 404 会补上「地址可能填错」的提示。 */
+async function errorMessage(res: Response, fallback: string, hintBase?: string): Promise<string> {
+  const { raw, message } = await readErrorBody(res);
+  const text = message || `${fallback}（${res.status}）`;
+  return hintBase ? withRouteHint(hintBase, res.status, raw, text) : text;
 }
 
 // ---------------------------------------------------------------------------
@@ -373,6 +430,7 @@ function insertVideoRecord(data: {
   source?: MediaSource;
   backend?: VideoGenBackend | null;
   providerId?: string | null;
+  comfyBase?: string | null;
   model?: string | null;
   prompt?: string | null;
   negativePrompt?: string | null;
@@ -395,6 +453,7 @@ function insertVideoRecord(data: {
       source: data.source ?? "manual",
       backend: data.backend ?? null,
       providerId: data.providerId ?? null,
+      comfyBase: data.comfyBase ?? null,
       model: data.model ?? null,
       prompt: data.prompt ?? null,
       negativePrompt: data.negativePrompt ?? null,
@@ -462,51 +521,163 @@ async function downloadToRef(url: string, fallbackName: string): Promise<string>
 }
 
 // ---------------------------------------------------------------------------
-// 提交：MiniMax（H3）
+// 提交：MiniMax（v2 接口）
 // ---------------------------------------------------------------------------
 
+/**
+ * MiniMax 生视频只走 v2 —— 官方现行接口，模型是 H3 系：
+ *
+ *   POST {root}/v2/video_generation                提交（model + content 数组 + resolution + duration）
+ *   GET  {root}/v2/query/video_generation/{id}     查状态（queued / running / succeeded / failed / cancelled）
+ *
+ * 成片地址在查询响应的 `task.content.url` 里，直接下载即可（没有 file_id 换链那一步）。
+ *
+ * 三个真踩过的坑，都写在这里，别再退回去：
+ *
+ * 1. **请求体是 `content` 数组**（文本项 + 首帧图项），不是 v1 的 `prompt` 字符串 /
+ *    `first_frame_image`；`resolution` / `duration` 是必填，`ratio` 纯文生视频时必填。
+ * 2. **v1 那套上游已经不认**：`/v1/video_generation` + Hailuo / T2V 系模型 id 提交新模型，
+ *    上游回 `2013 invalid params, 该模型请使用 /v2/video_generation 接口`。所以这里只留 v2，
+ *    不再做 v1/v2 双形状兜底 —— 两套并存的代价是每次请求都要猜哪套能用。
+ * 3. **错误不再是 HTTP 200 + base_resp**：v2 用 OpenAI 风格（`{error:{message,http_code}}`
+ *    配 4xx/5xx）。但仍要防住网关 / 中转站把任意路径兜底成 **200 + HTML 首页**，
+ *    那时连 JSON 都不是。
+ */
+
+/**
+ * 时长收敛到 v2 认可的区间（整数秒）：H3 4~15、H3-Max 5~15。
+ * 缺省给 5 秒（H3 系的默认档，H3-Max 的下限），上游不会因为"没选时长"直接拒。
+ */
+export function clampMinimaxDuration(seconds: number | undefined, model = ""): number {
+  const spec = MINIMAX_MODEL_SPECS[model.trim()] ?? VIDEO_DURATION_RANGE.minimax;
+  const want = Math.round(seconds ?? 5);
+  return Math.min(Math.max(want, spec.min), spec.max);
+}
+
+/** v2 的默认分辨率：768P 是 H3 与 H3-Max 的共同档，也是官方给的默认值。 */
+export const MINIMAX_DEFAULT_RESOLUTION = "768P";
+
+/** 分辨率收敛到该模型的合法档位：模型不在表里（中转站自造 id）就原样下发。 */
+function clampMinimaxResolution(resolution: string | undefined, model: string): string {
+  const spec = MINIMAX_MODEL_SPECS[model.trim()];
+  const want = (resolution ?? "").trim();
+  if (!spec) return want || MINIMAX_DEFAULT_RESOLUTION;
+  if (spec.resolutions.includes(want)) return want;
+  // 不合档位时退回 768P —— 上游对不合档位的分辨率只回一句 2013，含糊得很，
+  // 与其让用户猜，不如把 H3-Max 上选的 2K 换成人人都有的那一档。
+  return spec.resolutions.includes(MINIMAX_DEFAULT_RESOLUTION)
+    ? MINIMAX_DEFAULT_RESOLUTION
+    : spec.resolutions[0]!;
+}
+
+/** 提交用的请求头。 */
+function minimaxHeaders(key: string): Record<string, string> {
+  return {
+    "Content-Type": "application/json",
+    ...(key ? { Authorization: `Bearer ${key}` } : {}),
+  };
+}
+
+/**
+ * 解析 MiniMax 的响应体：提取 v2 的错误信封（`{type:"error", error:{message, http_code}}`），
+ * 也拦下"返回的是网页"这种连 JSON 都不是的情况。
+ *
+ * 只认 v2 的形状：错误一定配着 4xx/5xx 的 HTTP 状态（v1 那套「HTTP 200 + base_resp.status_code」
+ * 已经随接口一起作废），所以调用方先看 `res.ok`，再看这里给出的可读消息。
+ */
+function parseMinimaxJson(raw: string): {
+  json: Record<string, unknown> | null;
+  error: string | null;
+} {
+  const text = raw.trim();
+  if (!text) return { json: null, error: "上游返回了空响应" };
+  if (!looksLikeJson(text)) {
+    return {
+      json: null,
+      error:
+        "上游返回的是网页（HTML）而不是接口响应 —— 这个地址多半是网站首页或中转站，" +
+        "不支持 MiniMax 视频接口，请到「设置 → 云端模型」换一个厂商",
+    };
+  }
+  let json: Record<string, unknown>;
+  try {
+    json = JSON.parse(text) as Record<string, unknown>;
+  } catch {
+    return { json: null, error: `上游响应不是合法 JSON：${text.slice(0, 120)}` };
+  }
+  const err = json.error as { message?: unknown; type?: unknown } | undefined;
+  const message = typeof err?.message === "string" ? err.message.trim() : "";
+  if (message) {
+    const type = typeof err?.type === "string" ? err.type.trim() : "";
+    return { json, error: type ? `${type}: ${message}` : message };
+  }
+  return { json, error: null };
+}
+
+/** 从响应里取 task_id（v2 在顶层，个别中转站会塞进 data）。 */
+function minimaxTaskId(json: Record<string, unknown> | null): string {
+  const direct = json?.task_id;
+  if (typeof direct === "string" && direct) return direct;
+  const nested = (json?.data as { task_id?: unknown } | undefined)?.task_id;
+  return typeof nested === "string" ? nested : "";
+}
+
+/** 提交一次 MiniMax v2 生成任务，返回 task_id。 */
 async function submitMinimax(
   target: CloudVideoTarget,
   params: SubmitVideoParams,
   fallbackModel: string,
 ): Promise<string> {
-  const base = normalizeBase(target.base, "/v2").replace(/\/v2$/, "");
-  if (!base) throw new Error("请先配置 MiniMax 服务地址");
+  const root = normalizeApiBase(target.base, "");
+  if (!root) throw new Error("请先配置 MiniMax 服务地址");
   const model = params.model?.trim() || fallbackModel || MINIMAX_VIDEO_MODELS[0]!;
 
   const content: Record<string, unknown>[] = [{ type: "text", text: params.prompt }];
   if (params.firstFrameRef) {
     const dataUrl = await firstFrameDataUrl(params.firstFrameRef);
-    if (dataUrl) content.push({ type: "image_url", image_url: dataUrl });
+    // 图像项是 `image_url: { url }` 对象（裸字符串是旧私约的形状，v2 不认）
+    if (dataUrl) {
+      content.push({ type: "image_url", image_url: { url: dataUrl }, role: "first_frame" });
+    }
   }
-
-  const range = VIDEO_DURATION_RANGE.minimax;
-  const duration = Math.max(range.min, Math.min(range.max, Math.round(params.duration ?? 5)));
-
   const body: Record<string, unknown> = {
     model,
     content,
-    duration,
-    aigc_watermark: params.watermark ?? false,
+    // resolution 与 duration 在 v2 里是必填，没给就落到该模型的默认档
+    resolution: clampMinimaxResolution(params.resolution, model),
+    duration: clampMinimaxDuration(params.duration, model),
+    // 纯文生视频必须给具体比例（adaptive 只在带图 / 参考素材时合法），没给就按横屏
+    ratio: params.ratio?.trim() || "16:9",
   };
-  if (params.ratio) body.ratio = params.ratio;
-  if (params.resolution) body.resolution = params.resolution;
+  // v2 文档里没有水印字段：只在用户显式打开时才带（真不认也只是被上游忽略）
+  if (params.watermark) body.aigc_watermark = true;
 
-  const res = await fetch(`${base}/v2/video_generation`, {
+  const res = await fetch(`${root}/v2/video_generation`, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      ...(target.key ? { Authorization: `Bearer ${target.key}` } : {}),
-    },
+    headers: minimaxHeaders(target.key),
     body: JSON.stringify(body),
     signal: AbortSignal.timeout(120_000),
   });
-  if (!res.ok) throw new Error(await errorMessage(res, "提交 MiniMax 生成任务失败"));
-  const json = (await res.json().catch(() => null)) as
-    | { task_id?: string; data?: { task_id?: string } }
-    | null;
-  const taskId = json?.task_id ?? json?.data?.task_id;
-  if (!taskId) throw new Error("MiniMax 未返回 task_id，请检查服务配置");
+  const { raw, message } = await readErrorBody(res);
+  if (res.status === 404 && !looksLikeJson(raw)) {
+    // 路由级 404：这地址不是 MiniMax v2 视频服务（中转站 / 首页都会这样）
+    throw new Error(
+      `上游没有 MiniMax v2 视频接口（当前 API 地址 ${root}）：生视频只有 /v2/video_generation 这一条路径。` +
+        `请到「设置 → 云端模型」确认该厂商的地址是 MiniMax 官方（https://api.minimaxi.com 或 https://api.minimax.chat，不带 /v1）`,
+    );
+  }
+  if (!res.ok) {
+    throw new Error(
+      message
+        ? `${message}（HTTP ${res.status}）`
+        : `提交 MiniMax 生成任务失败（${res.status}）`,
+    );
+  }
+
+  const parsed = parseMinimaxJson(raw);
+  if (parsed.error) throw new Error(parsed.error);
+  const taskId = minimaxTaskId(parsed.json);
+  if (!taskId) throw new Error(`MiniMax 未返回 task_id：${raw.slice(0, 200) || "（空响应）"}`);
   return taskId;
 }
 
@@ -519,7 +690,7 @@ async function submitSeedance(
   params: SubmitVideoParams,
   fallbackModel: string,
 ): Promise<string> {
-  const base = normalizeBase(target.base, "/api/v3");
+  const base = normalizeApiBase(target.base, "/api/v3");
   if (!base) throw new Error("请先配置 Seedance（火山方舟）服务地址");
   const model = params.model?.trim() || fallbackModel || SEEDANCE_VIDEO_MODELS[0]!;
 
@@ -556,7 +727,7 @@ async function submitSeedance(
     body: JSON.stringify({ model, content }),
     signal: AbortSignal.timeout(60_000),
   });
-  if (!res.ok) throw new Error(await errorMessage(res, "提交 Seedance 生成任务失败"));
+  if (!res.ok) throw new Error(await errorMessage(res, "提交 Seedance 生成任务失败", base));
   const json = (await res.json().catch(() => null)) as { id?: string } | null;
   if (!json?.id) throw new Error("Seedance 未返回任务 id，请检查 API Key 与模型");
   return json.id;
@@ -657,6 +828,8 @@ async function submitComfy(
   seed: number;
   /** 实际用的 checkpoint（没填时会自动探一个），用量记录要的是它。 */
   checkpoint: string;
+  /** 实际提交到的地址（去掉尾部斜杠）：轮询必须问同一台服务器。 */
+  base: string;
 }> {
   const base = cfg.comfyBase.trim().replace(/\/+$/, "");
   if (!base) throw new Error("请先配置 ComfyUI 服务地址（如 http://127.0.0.1:8188）");
@@ -707,7 +880,15 @@ async function submitComfy(
   if (!res.ok) throw new Error(await errorMessage(res, "提交 ComfyUI 工作流失败"));
   const json = (await res.json().catch(() => null)) as { prompt_id?: string } | null;
   if (!json?.prompt_id) throw new Error("ComfyUI 未返回 prompt_id，请检查服务日志");
-  return { promptId: json.prompt_id, width: size.width, height: size.height, frames, seed, checkpoint };
+  return {
+    promptId: json.prompt_id,
+    width: size.width,
+    height: size.height,
+    frames,
+    seed,
+    checkpoint,
+    base,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +950,9 @@ export async function submitVideoGeneration(
       const submitted = await submitComfy(cfg, params);
       const record = insertVideoRecord({
         ...common,
+        // 记下"提交到哪台 ComfyUI"：轮询按它查，用户中途改地址不会让在途任务查错服务器
+        // （改地址后 404 会被当成"还在队列"，一路空转到 30 分钟超时）。
+        comfyBase: submitted.base,
         taskId: submitted.promptId,
         width: submitted.width,
         height: submitted.height,
@@ -784,6 +968,13 @@ export async function submitVideoGeneration(
 
     // 云端：厂商决定接口协议（MiniMax / Seedance），地址与密钥同样来自厂商行。
     const target = resolveCloudTarget(cfg.providerId);
+    // 时长与分辨率都要按模型收敛（H3 4~15 秒 / 768P·2K，H3-Max 5~15 秒 / 480P·768P）：
+    // 库里记的得与真正发出去的一致，否则卡片上写着 4s，上游生成的是 5s。
+    if (target.videoApi === "minimax") {
+      const model = common.model ?? cfg.model;
+      common.duration = clampMinimaxDuration(params.duration, model);
+      common.resolution = clampMinimaxResolution(params.resolution, model);
+    }
     const taskId =
       target.videoApi === "seedance"
         ? await submitSeedance(target, params, cfg.model)
@@ -823,8 +1014,19 @@ export async function submitVideoGeneration(
 // 对外入口：轮询（前端每 5s 调一次；应用重启后继续，任务不丢）
 // ---------------------------------------------------------------------------
 
-const MINIMAX_DONE = new Set(["Success", "Succeeded", "success", "succeeded"]);
-const MINIMAX_FAILED = new Set(["Fail", "Failed", "fail", "Error", "error", "failed"]);
+// v2 的状态是 queued / running / succeeded / failed / cancelled；大小写与近义词多留几个，
+// 认不出的状态会当成"还在跑"一直轮询，宁可多认几个也别把终态漏掉。
+const MINIMAX_DONE = new Set(["succeeded", "success", "Success", "Succeeded"]);
+const MINIMAX_FAILED = new Set([
+  "failed",
+  "cancelled",
+  "canceled",
+  "fail",
+  "Fail",
+  "Failed",
+  "error",
+  "Error",
+]);
 const SEEDANCE_DONE = new Set(["succeeded"]);
 const SEEDANCE_FAILED = new Set(["failed", "cancelled"]);
 
@@ -835,74 +1037,169 @@ function normalizeProgress(raw: unknown): number | null {
   return n > 1 ? Math.min(1, n / 100) : n;
 }
 
-async function pollMinimax(target: CloudVideoTarget, taskId: string): Promise<{
+/**
+ * 一轮轮询撞上的上游失败。`fatal` 表示重试也不会好（鉴权被拒 / 接口地址不对），
+ * 调用方应当立刻把记录标失败，而不是 5 秒一次地白问到超时。
+ */
+type PollFailure = {
+  fatal: boolean;
+  message: string;
+  status?: number;
+};
+
+type PollResult = {
   done: boolean;
   failed?: string;
   videoUrl?: string;
   progress?: number | null;
-}> {
-  const base = normalizeBase(target.base, "/v2").replace(/\/v2$/, "");
-  const res = await fetch(`${base}/v2/query/video_generation/${taskId}`, {
+  /** 本轮查询失败但任务可能还在跑：保留 processing，下轮再查（同时让界面与日志看得见）。 */
+  pollFailure?: PollFailure;
+};
+
+/**
+ * 上游 HTTP 错误 → 能不能靠重试解决。
+ *
+ * 401/403 是鉴权被上游拒绝：每 5 秒重试一次不会变好，只会把真实原因埋掉 ——
+ * 真踩过：上游回 `login fail`，应用一路当成"还在生成"，任务挂到 30 分钟超时
+ * 才被标记失败，日志里一个字都没有，排查只能靠猜。
+ */
+function classifyPollStatus(status: number, message: string): PollFailure {
+  if (status === 401 || status === 403) {
+    return {
+      fatal: true,
+      status,
+      message: `上游鉴权失败（${status}）：${message || "API Key 被拒绝"} —— 请到「设置 → 云端模型」检查该厂商的 API Key`,
+    };
+  }
+  if (status >= 500) {
+    return {
+      fatal: false,
+      status,
+      message: `上游服务异常（${status}），正在自动重试${message ? `：${message}` : ""}`,
+    };
+  }
+  return {
+    fatal: false,
+    status,
+    message: `上游返回 ${status}${message ? `：${message}` : ""}`,
+  };
+}
+
+/**
+ * 轮询撞上 404 的两种面貌，处理方式相反：正文是 JSON 的，是上游在说「任务没了」——
+ * 终态；正文是纯文本的（`404 page not found`），是网关 / 路由没这个路径，地址填错了 ——
+ * 那是配置问题，用户改好地址还能接着把任务查回来，所以走致命失败那条路（宽限后判死）。
+ */
+function classifyPoll404(base: string, raw: string, message: string): PollResult {
+  if (looksLikeJson(raw)) return { done: true, failed: "上游任务不存在或已过期" };
+  return {
+    done: false,
+    pollFailure: {
+      fatal: true,
+      status: 404,
+      message: `${message || "404 page not found"}：上游没有这个接口路径（当前 API 地址 ${base}），请到「设置 → 云端模型」检查该厂商的地址`,
+    },
+  };
+}
+
+/** 成片地址在 v2 里是 `task.content.url`；各家中转站还可能塞在别的字段，逐个试。 */
+function minimaxVideoUrl(json: Record<string, unknown> | null): string {
+  if (!json) return "";
+  const content = json.content as { url?: unknown; video_url?: unknown } | undefined;
+  const candidates = [
+    content?.url,
+    content?.video_url,
+    json.video_url,
+    json.video,
+    json.output,
+    json.file_url,
+    json.url,
+  ];
+  for (const c of candidates) if (typeof c === "string" && c) return c;
+  return "";
+}
+
+/** 任务失败的原因：v2 放在 `task.error.message`（带内部码），个别中转站用 fail_reason / message。 */
+function minimaxFailureReason(task: Record<string, unknown> | null | undefined): string {
+  const err = task?.error as { message?: unknown; code?: unknown } | undefined;
+  const message = [err?.message, task?.fail_reason, task?.message].find(
+    (v): v is string => typeof v === "string" && v.trim() !== "",
+  );
+  if (!message) return "生成失败";
+  const code = err?.code;
+  return code === undefined || code === null ? message.trim() : `${String(code)} ${message.trim()}`;
+}
+
+/** 查一次 v2 任务状态（queued / running → 还在跑；succeeded → task.content.url）。 */
+async function pollMinimax(target: CloudVideoTarget, taskId: string): Promise<PollResult> {
+  const root = normalizeApiBase(target.base, "");
+  if (!root) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 云端模型」补上" };
+
+  const res = await fetch(`${root}/v2/query/video_generation/${encodeURIComponent(taskId)}`, {
     headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),
   });
-  if (res.status === 404) return { done: true, failed: "上游任务不存在或已过期" };
-  if (!res.ok) return { done: false }; // 网络抖动等：下轮再查
-  const json = (await res.json().catch(() => null)) as
-    | {
-        status?: string;
-        progress?: unknown;
-        content?: { url?: string };
-        video_url?: string;
-        video?: string;
-        output?: string;
-        file_url?: string;
-        file_id?: string;
-        file?: { name?: string; file_id?: string };
-        fail_reason?: string;
-        error?: string;
-        message?: string;
-        base_resp?: { status_msg?: string };
-      }
-    | null;
-  if (!json) return { done: false };
+  const { raw, message } = await readErrorBody(res);
+  if (res.status === 404) {
+    // 纯文本 404 = 路由不存在（地址填错，改好还能接着把任务查回来）；JSON 404 = 上游说任务没了（终态）
+    if (!looksLikeJson(raw)) {
+      return {
+        done: false,
+        pollFailure: {
+          fatal: true,
+          status: 404,
+          message:
+            `${message || "404 page not found"}：上游没有这个接口路径（当前 API 地址 ${root}）—— ` +
+            `MiniMax 的任务查询只有 /v2/query/video_generation/{task_id} 一条路径，地址填根地址即可（不要带 /v1、/v2），` +
+            `请到「设置 → 云端模型」检查该厂商的地址`,
+        },
+      };
+    }
+    return { done: true, failed: "上游任务不存在或已过期" };
+  }
+  if (!res.ok) {
+    // 网络抖动 / 5xx 下轮再查；鉴权被拒交给上层判死（不再静默 done:false）
+    return { done: false, pollFailure: classifyPollStatus(res.status, message) };
+  }
 
-  const status = json.status ?? "";
+  const parsed = parseMinimaxJson(raw);
+  if (parsed.error) {
+    // 错误信封配着 200（少数中转站会这样）：能重试，但原因要透到界面与日志
+    return { done: false, pollFailure: { fatal: false, status: res.status, message: parsed.error } };
+  }
+
+  // v2 把任务放在 `task` 里（个别中转站会把它摊平到顶层）
+  const json = parsed.json;
+  const task = (json?.task as Record<string, unknown> | undefined) ?? json;
+  const status = typeof task?.status === "string" ? task.status : "";
   if (MINIMAX_FAILED.has(status)) {
-    return {
-      done: true,
-      failed:
-        json.fail_reason ?? json.error ?? json.message ??
-        json.base_resp?.status_msg ?? "生成失败",
-    };
+    return { done: true, failed: minimaxFailureReason(task) };
   }
   if (!MINIMAX_DONE.has(status)) {
-    return { done: false, progress: normalizeProgress(json.progress) };
+    return { done: false, progress: normalizeProgress(task?.progress) };
   }
 
-  // 成片地址：content.url（可能是 /v2/files/xxx.mp4 相对路径）兜底其他字段；
-  // 只有 file_id 时用 /v2/files/{file_id} 取片。
-  let url = json.content?.url ?? json.video_url ?? json.video ?? json.output ?? json.file_url;
-  const fileId = json.file_id ?? json.file?.name ?? json.file?.file_id;
-  if (!url && fileId) url = `${base}/v2/files/${fileId}`;
-  if (!url) return { done: true, failed: "上游未返回成片地址" };
-  const absolute = /^https?:\/\//i.test(url) ? url : new URL(url, `${base}/`).toString();
+  const url = minimaxVideoUrl(task ?? null);
+  if (!url) return { done: true, failed: "上游未返回成片地址（查询响应里没有 task.content.url）" };
+  const absolute = /^https?:\/\//i.test(url) ? url : new URL(url, `${root}/`).toString();
   return { done: true, videoUrl: absolute };
 }
 
-async function pollSeedance(target: CloudVideoTarget, taskId: string): Promise<{
-  done: boolean;
-  failed?: string;
-  videoUrl?: string;
-  progress?: number | null;
-}> {
-  const base = normalizeBase(target.base, "/api/v3");
+async function pollSeedance(target: CloudVideoTarget, taskId: string): Promise<PollResult> {
+  const base = normalizeApiBase(target.base, "/api/v3");
+  if (!base) return { done: true, failed: "该厂商还没填 API 地址，请到「设置 → 云端模型」补上" };
   const res = await fetch(`${base}/contents/generations/tasks/${taskId}`, {
     headers: target.key ? { Authorization: `Bearer ${target.key}` } : {},
     signal: AbortSignal.timeout(30_000),
   });
-  if (res.status === 404) return { done: true, failed: "上游任务不存在或已过期" };
-  if (!res.ok) return { done: false };
+  if (res.status === 404) {
+    const { raw, message } = await readErrorBody(res);
+    return classifyPoll404(base, raw, message);
+  }
+  if (!res.ok) {
+    const { message } = await readErrorBody(res);
+    return { done: false, pollFailure: classifyPollStatus(res.status, message) };
+  }
   const json = (await res.json().catch(() => null)) as
     | {
         status?: string;
@@ -922,18 +1219,42 @@ async function pollSeedance(target: CloudVideoTarget, taskId: string): Promise<{
   return { done: true, videoUrl: url };
 }
 
-async function pollComfy(cfg: VideoGenConfig, promptId: string): Promise<{
-  done: boolean;
-  failed?: string;
-  videoUrl?: string;
-  progress?: number | null;
-}> {
-  const base = cfg.comfyBase.trim().replace(/\/+$/, "");
-  const res = await fetch(`${base}/history/${promptId}`, {
+/**
+ * 在途 ComfyUI 任务该问哪台服务器。
+ *
+ * 记在记录上的地址优先（提交时那台）；只有旧记录（这列还没有值）才回落到当前配置，
+ * 并留一条 warn —— 回落是"可能问错服务器"的状态，日志里要看得见。
+ */
+function comfyBaseForRow(row: RecordRow, cfg: VideoGenConfig): string {
+  const recorded = (row.comfyBase ?? "").trim();
+  if (recorded) return recorded;
+  logEvent({
+    level: "warn",
+    source: "video",
+    event: "video.poll.comfy_base_missing",
+    message: "这条 ComfyUI 任务没有记录提交地址，按当前配置查询",
+    detail: { id: row.id, taskId: row.taskId, currentBase: cfg.comfyBase || null },
+  });
+  return cfg.comfyBase;
+}
+
+async function pollComfy(base: string, promptId: string): Promise<PollResult> {  const cleanBase = base.trim().replace(/\/+$/, "");
+  if (!cleanBase) return { done: true, failed: "这条任务没有记录 ComfyUI 地址，无法继续查询" };
+  const res = await fetch(`${cleanBase}/history/${promptId}`, {
     signal: AbortSignal.timeout(15_000),
   });
   if (res.status === 404) return { done: false }; // 还在队列里
-  if (!res.ok) return { done: false };
+  if (!res.ok) {
+    const { message } = await readErrorBody(res);
+    return {
+      done: false,
+      pollFailure: {
+        fatal: false,
+        status: res.status,
+        message: `ComfyUI 返回 ${res.status}${message ? `：${message}` : ""}`,
+      },
+    };
+  }
   const json = (await res.json().catch(() => null)) as
     | Record<
         string,
@@ -975,6 +1296,71 @@ async function pollComfy(cfg: VideoGenConfig, promptId: string): Promise<{
   return { done: true, videoUrl: `${base}/view?${qs}` };
 }
 
+/**
+ * 连续轮询失败的状态（按记录 id）：日志节流 + 致命失败的宽限计时 + 超时文案里带上最后原因。
+ *
+ * 内存态足够：它只影响"多快把问题摆到眼前"，不影响任务本身（任务在 DB 里）。
+ */
+const pollFailures = new Map<
+  number,
+  { fails: number; lastMessage: string; lastLogAt: number; fatalSince: number | null }
+>();
+
+/** 连续失败到这个次数（前端 5s 一轮，约 2 分钟）把日志升到 error —— 一直 warn 会被当噪声忽略。 */
+const POLL_FAIL_ESCALATE = 24;
+
+/** 同一条记录的轮询失败日志最多每分钟一条：不节流会被每 5 秒一次的轮询刷满。 */
+const POLL_FAIL_LOG_INTERVAL_MS = 60_000;
+
+/**
+ * 致命失败（鉴权被拒 / 地址填错）的宽限期：重试确实不会好，但也不宜第一枪就判死 ——
+ * 云端任务已经提交并计费，用户趁这会儿去设置里把 Key / 地址改对，还能接着把成片取回来。
+ * 期间记录保持 processing、原因透在界面上；超过宽限期仍失败才标失败。
+ */
+const FATAL_POLL_GRACE_MS = 3 * 60_000;
+
+/**
+ * 记一次轮询失败：计数 + 节流日志（首次必然记，之后每分钟一条），并维护致命失败的计时。
+ * 返回更新后的状态，调用方据此决定"还等不等"。
+ */
+function notePollFailure(
+  row: { id: number; backend: string | null; taskId: string | null },
+  providerId: string,
+  fail: PollFailure,
+): { fails: number; fatalSince: number | null } {
+  const now = Date.now();
+  const prev = pollFailures.get(row.id);
+  const fails = (prev?.fails ?? 0) + 1;
+  const lastLogAt = prev?.lastLogAt ?? 0;
+  // 非致命失败清掉致命计时：401 中间夹了一次 5xx，不该把宽限期接着算下去。
+  const fatalSince = fail.fatal ? (prev?.fatalSince ?? now) : null;
+  const shouldLog = fails === 1 || now - lastLogAt >= POLL_FAIL_LOG_INTERVAL_MS;
+  pollFailures.set(row.id, {
+    fails,
+    lastMessage: fail.message,
+    lastLogAt: shouldLog ? now : lastLogAt,
+    fatalSince,
+  });
+  if (!shouldLog) return { fails, fatalSince };
+  logEvent({
+    // 致命失败第一枪就记 error：它要用户去改设置，混在 warn 里会被忽略
+    level: fail.fatal || fails >= POLL_FAIL_ESCALATE ? "error" : "warn",
+    source: "video",
+    event: "video.poll.http",
+    message: fail.message,
+    detail: {
+      id: row.id,
+      backend: row.backend,
+      providerId: providerId || null,
+      taskId: row.taskId,
+      status: fail.status ?? null,
+      fails,
+      fatal: fail.fatal,
+    },
+  });
+  return { fails, fatalSince };
+}
+
 export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]> {
   if (ids.length === 0) return [];
   const rows = db
@@ -987,51 +1373,104 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
 
   for (const row of rows) {
     if (row.status !== "processing") {
+      pollFailures.delete(row.id);
       out.push(toRow(row));
       continue;
     }
 
+    // 轮询按**记录里的厂商**去查：用户中途换了厂商也要把之前提交的任务查完。
+    // 升级前提交的记录没有 providerId（那一列是新加的），它的 backend 就是当时的
+    // 协议名；迁移把同一套地址 + 密钥搬成了当前选中的厂商行，所以这些在途任务
+    // 还能查回上游 —— 不兜底就会被误判成「厂商已删除」。
+    const legacyCloud = row.backend === "minimax" || row.backend === "seedance";
+    const providerId = row.providerId ?? (legacyCloud ? cfg.providerId : "");
+
     // 兜底超时：上游一直不回来就标记失败，避免永远「生成中」。
+    // 带上最后一次查询失败的原因 —— 否则用户只看到"超时"，排查还得自己翻日志。
     if (Date.now() - (row.createdAt ?? 0) > STALE_MS) {
+      const last = pollFailures.get(row.id)?.lastMessage;
+      pollFailures.delete(row.id);
       const updated = updateVideoRecord(row.id, {
         status: "failed",
-        error: "生成超时（超过 30 分钟），可重试或检查服务状态",
+        error: last
+          ? `生成超时（超过 30 分钟）；最后一次查询失败：${last}`
+          : "生成超时（超过 30 分钟），可重试或检查服务状态",
       });
       logEvent({
         level: "error",
         source: "video",
         event: "video.poll.timeout",
         message: "视频生成超时（超过 30 分钟）",
-        detail: { id: row.id, backend: row.backend, taskId: row.taskId, prompt: row.prompt?.slice(0, 200) },
+        detail: {
+          id: row.id,
+          backend: row.backend,
+          providerId: providerId || null,
+          taskId: row.taskId,
+          lastPollError: last ?? null,
+          prompt: row.prompt?.slice(0, 200),
+        },
       });
       out.push(toRow(updated));
       continue;
     }
 
     try {
-      // 轮询按**记录里的厂商**去查：用户中途换了厂商也要把之前提交的任务查完。
-      // 升级前提交的记录没有 providerId（那一列是新加的），它的 backend 就是当时的
-      // 协议名；迁移把同一套地址 + 密钥搬成了当前选中的厂商行，所以这些在途任务
-      // 还能查回上游 —— 不兜底就会被误判成「厂商已删除」。
-      const legacyCloud = row.backend === "minimax" || row.backend === "seedance";
-      const providerId = row.providerId ?? (legacyCloud ? cfg.providerId : "");
-      const cloudTarget =
-        row.backend === "comfyui" || !providerId ? null : resolveCloudTarget(providerId);
-      const result = !row.taskId
-        ? { done: true, failed: "缺少上游任务 id" }
-        : cloudTarget?.videoApi === "seedance"
-          ? await pollSeedance(cloudTarget, row.taskId)
-          : cloudTarget?.videoApi === "minimax"
-            ? await pollMinimax(cloudTarget, row.taskId)
-            : row.backend === "comfyui"
-              ? await pollComfy(cfg, row.taskId)
-              : { done: true, failed: "这条任务的厂商已删除，无法继续查询上游状态" };
+      // 厂商行被删 / 没配协议这类配置问题：resolveCloudTarget 会抛，抛出去会被当成
+      // "瞬时错误"每 5 秒重试到超时 —— 它是配置问题，重试不会有结果，直接失败。
+      let cloudTarget: CloudVideoTarget | null = null;
+      let setupError: string | null = null;
+      if (row.backend !== "comfyui" && providerId) {
+        try {
+          cloudTarget = resolveCloudTarget(providerId);
+        } catch (e) {
+          setupError = e instanceof Error ? e.message : String(e);
+        }
+      }
+      const result: PollResult = setupError
+        ? { done: true, failed: `无法继续查询上游状态：${setupError}` }
+        : !row.taskId
+          ? { done: true, failed: "缺少上游任务 id" }
+          : cloudTarget?.videoApi === "seedance"
+            ? await pollSeedance(cloudTarget, row.taskId)
+            : cloudTarget?.videoApi === "minimax"
+              ? await pollMinimax(cloudTarget, row.taskId)
+              : row.backend === "comfyui"
+                ? await pollComfy(comfyBaseForRow(row, cfg), row.taskId)
+                : { done: true, failed: "这条任务的厂商已删除，无法继续查询上游状态" };
 
       if (!result.done) {
-        out.push(toRow(row, result.progress ?? null));
+        const fail = result.pollFailure;
+        const state = fail ? notePollFailure(row, providerId, fail) : null;
+        // 致命失败（鉴权被拒 / 地址填错）留一段宽限期：期间保留 processing、原因透在
+        // 界面上，让人有机会改好设置再把成片取回来；过了宽限期才判死。
+        if (
+          fail?.fatal &&
+          state?.fatalSince &&
+          Date.now() - state.fatalSince >= FATAL_POLL_GRACE_MS
+        ) {
+          pollFailures.delete(row.id);
+          const updated = updateVideoRecord(row.id, { status: "failed", error: fail.message });
+          logEvent({
+            level: "error",
+            source: "video",
+            event: "video.poll.failed",
+            message: fail.message,
+            detail: {
+              id: row.id,
+              backend: row.backend,
+              providerId: providerId || null,
+              taskId: row.taskId,
+              status: fail.status ?? null,
+            },
+          });
+          out.push(toRow(updated));
+          continue;
+        }
+        out.push(toRow(row, result.progress ?? null, fail?.message ?? null));
         continue;
       }
       if (result.failed) {
+        pollFailures.delete(row.id);
         const updated = updateVideoRecord(row.id, { status: "failed", error: result.failed });
         logEvent({
           level: "error",
@@ -1046,19 +1485,16 @@ export async function pollVideoRecords(ids: number[]): Promise<VideoRecordRow[]>
       // 下载成片并落盘（文件名沿用上游，扩展名白名单校验）。
       const name = result.videoUrl!.split("?")[0]!.split("/").pop() ?? "video.mp4";
       const ref = await downloadToRef(result.videoUrl!, name);
+      pollFailures.delete(row.id);
       const updated = updateVideoRecord(row.id, { status: "done", videoPath: ref });
       out.push(toRow(updated));
     } catch (e) {
-      // 下载失败等瞬时错误：保留 processing，下一轮重试（超时兜底在上面）。
-      // 记 debug 而不是 error —— 这条每 5 秒可能重复一次，重试成功就没事了。
-      logEvent({
-        level: "debug",
-        source: "video",
-        event: "video.poll.retry",
-        message: e instanceof Error ? e.message : String(e),
-        detail: { id: row.id, backend: row.backend, taskId: row.taskId },
-      });
-      out.push(toRow(row, null, e instanceof Error ? e.message : String(e)));
+      // 下载失败 / 网络异常这类瞬时错误：保留 processing，下一轮重试（超时兜底在上面）。
+      // 走 notePollFailure 而不是直接落 debug：首次失败要看得见，重复失败按分钟节流
+      // （前端每 5 秒轮询一次，不节流会把日志刷满）。
+      const message = e instanceof Error ? e.message : String(e);
+      notePollFailure(row, providerId, { fatal: false, message });
+      out.push(toRow(row, null, message));
     }
   }
   return out;

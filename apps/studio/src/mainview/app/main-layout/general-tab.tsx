@@ -25,7 +25,7 @@ import {
   type ProxyMode,
 } from "@/shared/proxy";
 import { cn } from "@/mainview/lib/utils";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
 
 /** 「谁走代理、谁直连」的采样地址：覆盖用户最关心的四类目标。 */
 const SAMPLES: { key: string; url: string }[] = [
@@ -36,7 +36,7 @@ const SAMPLES: { key: string; url: string }[] = [
 ];
 
 /**
- * 设置 → 偏好 → 通用：网络代理。
+ * 设置 → 通用：网络代理。
  *
  * 这张卡决定「出去的网络请求怎么走」：云端模型（对话 / 生图 / 语音 / OCR / 视频）、
  * 模型与引擎下载、联网检索、远端备份都按这里的设置走代理，回环地址（本地推理服务、

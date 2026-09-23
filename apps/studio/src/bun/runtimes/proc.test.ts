@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { collapseCarriageReturns, killProcessTree, spawnServerProcess } from "./proc";
+import { collapseCarriageReturns, killProcessTree, probeCommand, spawnServerProcess, waitExit } from "./proc";
 
 /** 进程组是否还存在（不存在 → ESRCH，返回 false）。 */
 function groupAlive(pid: number): boolean {
@@ -53,5 +53,35 @@ describe("spawnServerProcess", () => {
     expect(out.trim()).toBe("hello");
     expect(err.trim()).toBe("err");
     expect(code).toBe(3);
+  });
+});
+
+/**
+ * 引擎探测必须看**退出码**，不能只看"进程退出了"。
+ *
+ * 此前 vLLM / SGLang / MLX 的 `checkBinary` 用的是 `waitExit`（它回答的是"退出了吗"，
+ * 给 SIGTERM → SIGKILL 分级用的）—— 于是 `python3 -m vllm --help` 在没有 vllm 的机器
+ * 上以退出码 1 结束，同样被判成"已安装"，引导页与引擎管理页因此显示一个跑不起来的
+ * 引擎"就绪"（真机实测：装了 python3 的 macOS 上 vLLM / SGLang 双双报 found）。
+ */
+describe("probeCommand", () => {
+  test("退出码为 0 才算通过", async () => {
+    expect(await probeCommand(["/bin/sh", "-c", "exit 0"])).toBe(true);
+    expect(await probeCommand(["/bin/sh", "-c", "exit 1"])).toBe(false);
+  });
+
+  test("与 waitExit 的差别就在退出码上（同一个立刻报错的命令）", async () => {
+    expect(await waitExit(Bun.spawn(["/bin/sh", "-c", "exit 1"]), 5_000)).toBe(true);
+    expect(await probeCommand(["/bin/sh", "-c", "exit 1"])).toBe(false);
+  });
+
+  test("超时算不通过，且不留挂着的子进程", async () => {
+    const started = Date.now();
+    expect(await probeCommand(["/bin/sh", "-c", "sleep 10"], 300)).toBe(false);
+    expect(Date.now() - started).toBeLessThan(5_000);
+  });
+
+  test("命令不存在时不抛，算不通过", async () => {
+    expect(await probeCommand(["/definitely/missing/binary", "--version"])).toBe(false);
   });
 });

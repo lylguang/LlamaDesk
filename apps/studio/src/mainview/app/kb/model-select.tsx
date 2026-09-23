@@ -42,13 +42,20 @@ export function useKbModelCandidates(
   base: string,
   apiKey: string,
   enabled = true,
+  /** 云服务商 id：非空时地址/密钥/模型候选都取该厂商。 */
+  providerId = "",
 ) {
   const trimmedBase = base.trim();
   const trimmedKey = apiKey.trim();
+  const trimmedProvider = providerId.trim();
   return useQuery({
-    queryKey: ["kb-model-candidates", source, trimmedBase],
+    queryKey: ["kb-model-candidates", source, trimmedBase, trimmedProvider],
     queryFn: () => {
-      const params = { base: trimmedBase || undefined, apiKey: trimmedKey || undefined };
+      const params = {
+        base: trimmedBase || undefined,
+        apiKey: trimmedKey || undefined,
+        providerId: trimmedProvider || undefined,
+      };
       return source === "embedding"
         ? rpcClient.kbEmbeddingModels(params)
         : rpcClient.kbRerankModels(params);
@@ -73,12 +80,17 @@ type KbModelCandidatesView = {
   service: { base: string; kind: KbServiceKind };
   /** 一个都没认出该类模型、已回退成全量时为 true。 */
   relaxed?: boolean;
+  /** 服务端引导（i18n key）：本地模式没有运行中的嵌入服务时给出。 */
+  hint?: string;
 };
 
 /**
  * 知识库嵌入 / 重排模型选择器：从「本地推理服务」和「云端 API」两组里挑，
  * 候选按场景过滤（嵌入选择器只列嵌入模型，重排只列重排名模型），
- * 不需要手填模型 ID，也不需要配密钥（密钥只在自定义地址时用得上）。
+ * 不需要配密钥（密钥只在自定义地址时用得上）。
+ *
+ * 默认纯下拉；传 `allowCustom` 后支持手填模型名 —— 搜索框回车，或点候选区顶部的
+ * 「使用「xxx」」项，输入的名字原样提交（默认模型面板这类自定义服务场景需要）。
  */
 export function KbModelSelect({
   id,
@@ -87,6 +99,7 @@ export function KbModelSelect({
   onChange,
   candidates,
   loading,
+  allowCustom,
   className,
 }: {
   /** 供 <Label htmlFor> 关联，点标签也能聚焦选择器。 */
@@ -97,6 +110,8 @@ export function KbModelSelect({
   onChange: (model: string) => void;
   candidates?: KbModelCandidatesView;
   loading?: boolean;
+  /** 允许手填候选之外的模型名（回车或「使用」项提交）。 */
+  allowCustom?: boolean;
   className?: string;
 }) {
   const t = useT();
@@ -111,6 +126,13 @@ export function KbModelSelect({
   const kind = candidates?.service.kind;
   const base = candidates?.service.base ?? "";
   const known = hasCandidate(candidates, value);
+  // 手填值（allowCustom）：正在输入且不在候选里的名字 —— 可回车或点「使用」项直接采用。
+  const typed = query.trim();
+  const typedKnown = Boolean(typed) && hasCandidate(candidates, typed);
+  const commitTyped = () => {
+    if (typed && typed !== value) onChange(typed);
+    closeAndReset(false);
+  };
   // 分组标题：[本地推理服务 | 云端 API | 自定义地址] · 实际地址
   // 本地服务这一组就是本机模型；另一组是云端：地址来自云服务商槽位时标「云端 API」，
   // 手填地址时标「自定义地址」。
@@ -160,13 +182,30 @@ export function KbModelSelect({
               if (e.key === "Escape") {
                 e.preventDefault();
                 closeAndReset(false);
+                return;
+              }
+              // 手填模式：回车把输入的名字原样提交（不在候选里也行）
+              if (allowCustom && e.key === "Enter") {
+                e.preventDefault();
+                commitTyped();
               }
             }}
-            placeholder={t("chat.modelSearch")}
+            placeholder={allowCustom ? t("kb.modelSelect.searchOrType") : t("chat.modelSearch")}
             autoFocus
             className="h-7 text-xs"
           />
         </div>
+
+        {/* 手填项：名字不在候选里时给出可点的「使用」入口（与回车等价） */}
+        {allowCustom && typed && !typedKnown && (
+          <SelectGroup>
+            <SelectItem value={typed}>
+              <span className="min-w-0 flex-1 truncate">
+                {t("kb.modelSelect.useTyped", { model: typed })}
+              </span>
+            </SelectItem>
+          </SelectGroup>
+        )}
 
         <SelectGroup>
           <SelectItem value={NO_MODEL} className="text-xs">
@@ -233,6 +272,13 @@ export function KbModelSelect({
         {candidates?.relaxed && total > 0 && (
           <div className="border-t px-2 py-2 text-[11px] leading-4 text-muted-foreground">
             {t("models.filter.relaxed")}
+          </div>
+        )}
+        {/* 服务端引导：本地模式没有运行中的嵌入服务 —— 本地组为空，先去模型页把
+            嵌入模型（类别为「嵌入」）启动起来，或改用云端 / 自定义地址。 */}
+        {candidates?.hint && (
+          <div className="border-t px-2 py-2 text-[11px] leading-4 text-muted-foreground">
+            {t(candidates.hint)}
           </div>
         )}
       </SelectContent>

@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, statSync } from "fs";
 import path from "path";
 import { downloadFile, downloadHuggingFaceFile, modelDestPath, removePartialFiles } from "./modelscope";
-import { concurrentFileLimit, type DownloadProgress } from "./downloader";
+import { concurrentFileLimit, partsBudgetFor, type DownloadProgress } from "./downloader";
 import { setModelMeta } from "./model-store";
 import { getSetting, updateSettings } from "./db/settings";
 import type { ModelCategory, ModelSource } from "../shared/modelscope";
@@ -363,6 +363,9 @@ export class DownloadManager {
       const dl = task.source === "huggingface" ? downloadHuggingFaceFile : downloadFile;
       const result = await dl(task.repo, task.fileName, {
         total: task.size ?? task.total ?? undefined,
+        // 分片数按当前并发文件数分摊全局连接预算：2 个文件同时下时每个 2 片，
+        // 而不是各自 4 片 —— 后者对站点的实际并发是 8，会触发 ModelScope 的 500。
+        parts: partsBudgetFor(concurrentFileLimit()),
         signal: ac.signal,
         onProgress: (p) => {
           task.received = p.received;

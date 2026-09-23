@@ -7,7 +7,9 @@ import {
   CopyIcon,
   EyeIcon,
   EyeOffIcon,
+  LockIcon,
   PlusIcon,
+  RotateCcwIcon,
   SearchIcon,
   StarIcon,
   Trash2Icon,
@@ -31,11 +33,17 @@ import { Spinner } from "@ui/spinner";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
 import {
-  CLOUD_PRESETS,
+  CLOUD_PRESET_SECTIONS,
+  getPreset,
+  isBuiltinBaseUrl,
+  isLocalBaseUrl,
   modelTypeOf,
+  presetApiKeyUrl,
   providerColor,
   type CloudModelEntry,
   type CloudModelType,
+  type CloudMusicApi,
+  type CloudPresetSection,
   type CloudProviderInfo,
   type CloudVideoApi,
 } from "@/shared/cloud-providers";
@@ -58,9 +66,14 @@ import {
 import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
 
 /**
- * 「模型云服务」面板：严格三栏布局（左设置导航由 SettingsScreen 提供）——
- * 中栏服务商源列表（搜索 + 启动开关 + 模型数 + 添加），右栏选中服务商的
- * 连接配置（API 密钥 / API 地址）与模型管理表格。
+ * 「模型云服务」面板：左栏是**内置厂商目录 + 自定义服务商**，右栏是选中厂商的
+ * 连接配置（API 密钥为主）与模型管理表格。
+ *
+ * 厂商不用"先添加再配置"：内置目录安装后整份列在左栏（`ensureBuiltinProviders`），
+ * 用户只需要填 API Key；**地址由应用维护，界面上只读**（`isBuiltinBaseUrl`）——
+ * 每家的 OpenAI 兼容地址都是固定的，让用户去填只会填错。要自建网关 / 中转走
+ * 「自定义服务商」，那一行的地址才可改、可删。
+ *
  * 所有操作即时落库（cloud_providers 表），激活行同步写回 VLLM_* 槽位。
  *
  * 关于「启动」：可以同时启动多个服务商。启动时会拿 /v1/models 校验密钥 ——
@@ -68,6 +81,15 @@ import { PROVIDER_LOGOS, MONO_LOGO_PATHS } from "./provider-logos";
  * 已启动服务商的模型，页面里不再有地址与密钥输入框。
  * 每个模型带「用途」（生图 / TTS / ASR / 视频 / 对话…），决定它出现在哪个功能页。
  */
+
+/** 左栏分栏：内置目录四段 + 自定义服务商。 */
+const SECTION_LABEL_KEYS: Record<CloudPresetSection | "custom", string> = {
+  official: "cloud.section.official",
+  cn: "cloud.section.cn",
+  aggregator: "cloud.section.aggregator",
+  global: "cloud.section.global",
+  custom: "cloud.section.custom",
+};
 
 /**
  * 服务商品牌 Logo：位图 Logo（官网/GitHub 头像）→ 品牌色底单色图形
@@ -188,27 +210,54 @@ export function CloudProviderPanel() {
     queryClient.invalidateQueries({ queryKey: ["chat-models"] });
   };
 
-  // 默认选中激活行（或第一行）
+  // 默认选中：激活行 → 第一个配好 Key 的行 → 列表第一个。
+  // 装上就整份目录都在，第一眼看哪家都行，但别落在"一家还没配的空行"上。
   useEffect(() => {
     if (providers.length === 0) {
       setSelectedId(null);
       return;
     }
     if (!selectedId || !providers.some((p) => p.id === selectedId)) {
-      setSelectedId(activeId ?? providers[0]!.id);
+      const configured = providers.find((p) => p.apiKey.trim() || isLocalBaseUrl(p.baseUrl));
+      setSelectedId(activeId ?? configured?.id ?? providers[0]!.id);
     }
   }, [providers, activeId, selectedId]);
 
   const selected = providers.find((p) => p.id === selectedId) ?? null;
   const isSelectedActive = !!selected && selected.id === activeId && remoteMode;
+  /** 选中行的预设（内置厂商才有）：备注 / 取密钥地址 / 官方 API 地址都从它来。 */
+  const selectedPreset = selected ? getPreset(selected.id) : undefined;
+  /** 地址是不是"内置厂商的官方地址"：是则只读（写库也会被拒，见 bun/cloud-providers.ts）。 */
+  const baseLocked = !!selected && isBuiltinBaseUrl(selected);
+  /** 用了内置厂商但还没填 Key：把这行提示放在最显眼处，用户只需要做这一件事。 */
+  const selectedNeedsKey = !!selected && !selected.apiKey.trim() && !isLocalBaseUrl(selected.baseUrl);
+  /** 「获取密钥」跳转地址：预设的密钥页 → 退回 API 域名根。 */
+  const keyUrl = selectedPreset
+    ? presetApiKeyUrl(selectedPreset)
+    : (() => {
+        try {
+          return selected?.baseUrl.trim() ? new URL(selected.baseUrl.trim()).origin : "";
+        } catch {
+          return "";
+        }
+      })();
 
   // ------------------------------------------------------------------
-  // 中栏：服务商列表
+  // 中栏：服务商列表（内置目录按分栏列出，自定义单开一栏）
   // ------------------------------------------------------------------
   const vendorNeedle = vendorSearch.trim().toLowerCase();
-  const filteredProviders = vendorNeedle
-    ? providers.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(vendorNeedle))
-    : providers;
+  const providerGroups = useMemo(() => {
+    const matched = vendorNeedle
+      ? providers.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(vendorNeedle))
+      : providers;
+    const order: (CloudPresetSection | "custom")[] = [...CLOUD_PRESET_SECTIONS, "custom"];
+    return order
+      .map((section) => ({
+        section,
+        items: matched.filter((p) => (getPreset(p.id)?.section ?? "custom") === section),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [providers, vendorNeedle]);
 
   /**
    * 启动 / 停用服务商。启动时主进程会用 /v1/models 校验密钥，失败原因回填到
@@ -259,8 +308,17 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
+  const musicApiMutation = useMutation({
+    mutationFn: (musicApi: CloudMusicApi) => {
+      if (!selected) return Promise.resolve({ ok: false });
+      return rpcClient.cloudProviderUpdate({ id: selected.id, musicApi });
+    },
+    onSuccess: invalidate,
+  });
+
   const commitBase = () => {
-    if (!selected) return;
+    // 内置地址是只读的（没有输入框，正常也走不到这里）：写库同样会被主进程拒掉。
+    if (!selected || baseLocked) return;
     if (draftBase.trim() !== selected.baseUrl) {
       saveMutation.mutate({ baseUrl: draftBase });
       // 地址 / 密钥改过了，上一次「拉不到清单」的结论不再成立。
@@ -283,13 +341,15 @@ export function CloudProviderPanel() {
       }),
   });
 
-  const consoleUrl = (() => {
-    try {
-      return draftBase.trim() ? new URL(draftBase.trim()).origin : "";
-    } catch {
-      return "";
-    }
-  })();
+  /** 内置厂商的地址被改过（老版本允许改）时，一键回到官方地址。 */
+  const restoreBaseMutation = useMutation({
+    mutationFn: () => {
+      if (!selected || !selectedPreset) return Promise.resolve({ ok: false });
+      setDraftBase(selectedPreset.baseUrl);
+      return rpcClient.cloudProviderUpdate({ id: selected.id, baseUrl: selectedPreset.baseUrl });
+    },
+    onSuccess: invalidate,
+  });
 
   // ------------------------------------------------------------------
   // 模型管理：获取 / 添加 / 删除 / 设为默认
@@ -430,9 +490,12 @@ export function CloudProviderPanel() {
     onSuccess: invalidate,
   });
 
-  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote
+  // 设为默认模型：selectChatModel("api", id) 同步 VLLM_MODEL_NAME + CHAT_MODEL + remote。
+  // providerId 必须带上 —— 网关只往**默认厂商**发云端请求，不把默认厂商切到这台服务商，
+  // 记下的模型名就会拿到另一家的地址和密钥去问，回来的是一句莫名其妙的「模型不存在」。
   const setDefaultMutation = useMutation({
-    mutationFn: (modelId: string) => rpcClient.selectChatModel({ type: "api", value: modelId }),
+    mutationFn: (modelId: string) =>
+      rpcClient.selectChatModel({ type: "api", value: modelId, providerId: selected?.id }),
     onSuccess: invalidate,
   });
 
@@ -485,43 +548,63 @@ export function CloudProviderPanel() {
             <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 opacity-50" />
           </div>
           <div className="flex max-h-[560px] flex-col gap-0.5 overflow-y-auto rounded-xl bg-muted/40 p-1.5">
-            {filteredProviders.map((p) => {
-              const isSelected = p.id === selectedId;
-              return (
-                <div
-                  key={p.id}
-                  role="button"
-                  tabIndex={0}
-                  onClick={() => setSelectedId(p.id)}
-                  onKeyDown={(e) => e.key === "Enter" && setSelectedId(p.id)}
-                  className={cn(
-                    "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
-                    isSelected ? "bg-primary/10 text-primary" : "text-foreground hover:bg-muted",
-                  )}
-                >
-                  <ProviderLogo provider={p} />
-                  <span className="min-w-0 flex-1">
-                    <span className="block truncate text-[13px] font-medium">{p.name}</span>
-                    {p.vendor && (
-                      <span className="block truncate text-[11px] opacity-60">{p.vendor}</span>
-                    )}
-                  </span>
-                  <span className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums">
-                    {p.models.length}
-                  </span>
-                  <Toggle
-                    checked={p.enabled}
-                    disabled={enableMutation.isPending}
-                    title={t("cloud.enableTitle")}
-                    onChange={() => {
-                      setSelectedId(p.id);
-                      enableMutation.mutate({ id: p.id, enabled: !p.enabled });
-                    }}
-                  />
-                </div>
-              );
-            })}
-            {filteredProviders.length === 0 && (
+            {providerGroups.map(({ section, items }) => (
+              <div key={section} className="flex flex-col gap-0.5">
+                {/* 分栏标题：内置目录按 官方 / 国内大厂 / 聚合平台 / 海外 分组，
+                    一屏 20 多家才找得到东西。 */}
+                <p className="px-2.5 pt-2 pb-0.5 text-[10px] font-medium tracking-wide text-muted-foreground/70 select-none">
+                  {t(SECTION_LABEL_KEYS[section])}
+                </p>
+                {items.map((p) => {
+                  const isSelected = p.id === selectedId;
+                  const needsKey = !p.apiKey.trim() && !isLocalBaseUrl(p.baseUrl);
+                  return (
+                    <div
+                      key={p.id}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedId(p.id)}
+                      onKeyDown={(e) => e.key === "Enter" && setSelectedId(p.id)}
+                      className={cn(
+                        "flex cursor-pointer items-center gap-2.5 rounded-lg px-2.5 py-2 text-left transition-colors",
+                        isSelected ? "bg-primary/10 text-primary" : "text-foreground hover:bg-muted",
+                      )}
+                    >
+                      <ProviderLogo provider={p} />
+                      <span className="min-w-0 flex-1">
+                        <span className="block truncate text-[13px] font-medium">{p.name}</span>
+                        <span className="block truncate text-[11px] opacity-60">{p.vendor}</span>
+                      </span>
+                      {needsKey ? (
+                        <span
+                          className="shrink-0 rounded-full bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-medium text-amber-600 dark:text-amber-400"
+                          title={t("cloud.needKey")}
+                        >
+                          {t("cloud.needKeyShort")}
+                        </span>
+                      ) : (
+                        <span
+                          className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums"
+                          title={t("cloud.colModel")}
+                        >
+                          {p.models.length}
+                        </span>
+                      )}
+                      <Toggle
+                        checked={p.enabled}
+                        disabled={enableMutation.isPending}
+                        title={t("cloud.enableTitle")}
+                        onChange={() => {
+                          setSelectedId(p.id);
+                          enableMutation.mutate({ id: p.id, enabled: !p.enabled });
+                        }}
+                      />
+                    </div>
+                  );
+                })}
+              </div>
+            ))}
+            {providerGroups.length === 0 && (
               <p className="py-6 text-center text-xs text-muted-foreground">
                 {t("cloud.noProviders")}
               </p>
@@ -534,7 +617,7 @@ export function CloudProviderPanel() {
             onClick={() => setShowAddProvider(true)}
           >
             <PlusIcon data-icon="inline-start" className="size-3.5" />
-            {t("cloud.add")}
+            {t("cloud.custom")}
           </Button>
           <p className="text-[11px] leading-relaxed text-muted-foreground">
             {t("cloud.enableAllHint")}
@@ -553,7 +636,8 @@ export function CloudProviderPanel() {
             </div>
           ) : (
             <>
-              {/* 详情头部：徽章 + 名称 + 厂商/备注 + 删除 */}
+              {/* 详情头部：徽章 + 名称 + 厂商 + 启动开关 + 删除（只有自定义服务商才给删：
+                  内置厂商删了下次读取还会原样入驻，主进程那边也会拒） */}
               <div className="flex items-center gap-3.5">
                 <ProviderLogo provider={selected} size="lg" />
                 <div className="min-w-0 flex-1">
@@ -582,16 +666,26 @@ export function CloudProviderPanel() {
                   title={t("cloud.enableTitle")}
                   onChange={() => enableMutation.mutate({ id: selected.id, enabled: !selected.enabled })}
                 />
-                <Button
-                  variant="ghost"
-                  size="icon-sm"
-                  className="shrink-0 text-muted-foreground hover:text-destructive"
-                  tooltip={t("cloud.delete")}
-                  onClick={() => setConfirmDelete(true)}
-                >
-                  <Trash2Icon className="size-4" />
-                </Button>
+                {!selectedPreset && (
+                  <Button
+                    variant="ghost"
+                    size="icon-sm"
+                    className="shrink-0 text-muted-foreground hover:text-destructive"
+                    tooltip={t("cloud.delete")}
+                    data-provider-delete={selected.id}
+                    onClick={() => setConfirmDelete(true)}
+                  >
+                    <Trash2Icon className="size-4" />
+                  </Button>
+                )}
               </div>
+
+              {/* 厂商备注：内置目录带来的说明（免费额度 / 需要额外操作等） */}
+              {selectedPreset?.note && (
+                <p className="text-[11px] leading-relaxed text-muted-foreground">
+                  {selectedPreset.note}
+                </p>
+              )}
 
               {/* 启动失败的密钥校验原因：直接显示在详情里，不让用户去猜 */}
               {enableMutation.isPending && enableMutation.variables?.id === selected.id && (
@@ -608,18 +702,18 @@ export function CloudProviderPanel() {
                 </p>
               )}
 
-              {/* 连接配置卡片：API 密钥 / API 地址 */}
+              {/* 连接配置卡片：API 密钥（唯一要填的东西）/ API 地址（内置厂商只读） */}
               <div className="divide-y rounded-xl border bg-card shadow-sm">
                 <div className="px-4 py-3.5">
                   <div className="flex items-end gap-3">
                     <div className="min-w-0 flex-1">
                       <Label className="mb-1 block text-xs">
                         {t("cloud.apiKey")}
-                        {consoleUrl && (
+                        {keyUrl && (
                           <button
                             type="button"
                             className="ml-1.5 font-normal text-primary hover:underline"
-                            onClick={() => void rpcClient.openGatewayDocs({ url: consoleUrl })}
+                            onClick={() => void rpcClient.openGatewayDocs({ url: keyUrl })}
                           >
                             {t("cloud.getKey")}
                           </button>
@@ -687,22 +781,69 @@ export function CloudProviderPanel() {
                       )}
                     </p>
                   )}
+                  {/* 内置厂商唯一的必做事项：填 Key。写清楚"填完就能用"，别让人接着去找地址。 */}
+                  {selectedNeedsKey && !checkMutation.isSuccess && (
+                    <p className="mt-2 text-[11px] text-muted-foreground">
+                      {t("cloud.keyOnlyHint")}
+                    </p>
+                  )}
                 </div>
 
                 <div className="px-4 py-3.5">
-                  <Label className="mb-1 block text-xs">{t("cloud.apiBase")}</Label>
-                  <Input
-                    placeholder={t("cloud.apiBasePh")}
-                    value={draftBase}
-                    onChange={(e) => setDraftBase(e.target.value)}
-                    onBlur={commitBase}
-                    className="h-8 font-mono text-xs"
-                  />
-                  {isSelectedActive && (
-                    <p className="mt-1.5 text-[11px] text-muted-foreground">
-                      {t("cloud.activeHint")}
-                    </p>
+                  <Label className="mb-1 flex items-center gap-1.5 text-xs">
+                    {t("cloud.apiBase")}
+                    {baseLocked && (
+                      <span
+                        className="flex items-center gap-1 font-normal text-muted-foreground"
+                        title={t("cloud.baseLockedHint")}
+                      >
+                        <LockIcon className="size-3" />
+                        {t("cloud.baseLocked")}
+                      </span>
+                    )}
+                  </Label>
+                  {baseLocked ? (
+                    /* 内置厂商的 OpenAI 兼容地址是固定的：显示成只读文本而不是输入框
+                       —— 输入框会让人以为"这里该填点什么"，填错之后这家就永远调不通。 */
+                    <div
+                      className="flex h-8 items-center gap-2 rounded-md border bg-muted/40 px-3 font-mono text-xs text-muted-foreground"
+                      title={selected.baseUrl}
+                      data-provider-base="locked"
+                    >
+                      <span className="truncate">{selected.baseUrl}</span>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Input
+                        placeholder={t("cloud.apiBasePh")}
+                        value={draftBase}
+                        onChange={(e) => setDraftBase(e.target.value)}
+                        onBlur={commitBase}
+                        data-provider-base="editable"
+                        className="h-8 min-w-0 flex-1 font-mono text-xs"
+                      />
+                      {/* 内置厂商但地址被改过（老版本允许改）：给一条回到官方地址的路 */}
+                      {selectedPreset && (
+                        <Button
+                          variant="outline"
+                          size="sm"
+                          className="h-8 shrink-0 text-xs"
+                          disabled={restoreBaseMutation.isPending}
+                          onClick={() => restoreBaseMutation.mutate()}
+                        >
+                          <RotateCcwIcon data-icon="inline-start" className="size-3.5" />
+                          {t("cloud.restoreBase")}
+                        </Button>
+                      )}
+                    </div>
                   )}
+                  <p className="mt-1.5 text-[11px] text-muted-foreground">
+                    {baseLocked
+                      ? t("cloud.baseLockedFooter")
+                      : isSelectedActive
+                        ? t("cloud.activeHint")
+                        : t("cloud.baseEditableHint")}
+                  </p>
                 </div>
 
                 {/* 生视频接口：视频 API 各家不通用，选协议后该厂商才能用来生视频 */}
@@ -725,6 +866,31 @@ export function CloudProviderPanel() {
                   </div>
                   <p className="max-w-72 text-[11px] text-muted-foreground">
                     {t("cloud.videoApiHint")}
+                  </p>
+                </div>
+
+                {/* 生音乐接口：音乐 API 同样各家不通用 —— 而且执行模型都不一样
+                    （StepFun 是提交 + 轮询，MiniMax 是一次同步长请求），
+                    所以协议也要在这里按厂商选一次。 */}
+                <div className="flex items-center gap-3 border-t px-4 py-3.5">
+                  <div className="min-w-0 flex-1">
+                    <Label className="mb-1 block text-xs">{t("cloud.musicApi")}</Label>
+                    <Select
+                      value={selected.musicApi || "none"}
+                      onValueChange={(v) => musicApiMutation.mutate(v === "none" ? "" : (v as CloudMusicApi))}
+                    >
+                      <SelectTrigger size="sm" className="h-8 w-52 text-xs">
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="none">{t("cloud.musicApiNone")}</SelectItem>
+                        <SelectItem value="stepfun">StepFun（/v1/audio/music）</SelectItem>
+                        <SelectItem value="minimax">MiniMax（/v1/music_generation）</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <p className="max-w-72 text-[11px] text-muted-foreground">
+                    {t("cloud.musicApiHint")}
                   </p>
                 </div>
               </div>
@@ -780,6 +946,10 @@ export function CloudProviderPanel() {
                       {t("cloud.checkFail")}
                     </p>
                   )}
+                  {/* 内置厂商的清单是预置的常用模型：说清楚"还能拉当前全量"，别让人以为到头了。 */}
+                  {selectedPreset && models.length > 0 && (
+                    <p className="text-[11px] text-muted-foreground">{t("cloud.modelsHint")}</p>
+                  )}
                   {models.length > 0 && (
                     /* 分类筛选：模型带分类进场（云端清单里对话 / 嵌入 / 重排 / 语音…混在一起），
                        切 tab 只看一类，右侧标出该类模型数。 */
@@ -798,14 +968,25 @@ export function CloudProviderPanel() {
                   ) : (
                     <table className="w-full text-xs">
                       <thead>
+                        {/* 表头一律不折行：右侧那几列本来就只有一个徽章宽，标题一折行
+                            就会在列里竖成两行，反而比列内容还占地方。 */}
                         <tr className="border-b text-left text-muted-foreground">
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colModel")}</th>
-                          <th className="px-2 py-1.5 font-medium" title={t("cloud.modelTypeHint")}>
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colModel")}
+                          </th>
+                          <th
+                            className="px-2 py-1.5 font-medium whitespace-nowrap"
+                            title={t("cloud.modelTypeHint")}
+                          >
                             {t("cloud.colType")}
                           </th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colGroup")}</th>
-                          <th className="px-2 py-1.5 font-medium">{t("cloud.colStatus")}</th>
-                          <th className="px-2 py-1.5 text-right font-medium">
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colGroup")}
+                          </th>
+                          <th className="px-2 py-1.5 font-medium whitespace-nowrap">
+                            {t("cloud.colStatus")}
+                          </th>
+                          <th className="px-2 py-1.5 text-right font-medium whitespace-nowrap">
                             {t("cloud.colActions")}
                           </th>
                         </tr>
@@ -815,15 +996,28 @@ export function CloudProviderPanel() {
                           const isDefault = cloudActive && entry.id === currentModel;
                           return (
                             <tr key={entry.id} className="border-b border-muted/50 last:border-0">
-                              <td className="max-w-0 px-2 py-1.5" title={entry.remark || entry.id}>
-                                <span className="block truncate">
-                                  {entry.name || entry.id}
-                                  {entry.name && entry.name !== entry.id && (
-                                    <span className="ml-1.5 font-mono text-[10px] text-muted-foreground/60">
+                              {/* 模型 id 是这条记录的唯一标识（要拿去填 API、要在相似型号之间
+                                  区分），任何情况下都完整显示：列窄了就换行，不出现省略号，也不
+                                  靠悬浮提示兜底 —— 别名（`name`）再长也只是补充，不许把 id 挤掉。 */}
+                              <td
+                                className="px-2 py-1.5"
+                                data-model-id={entry.id}
+                                title={entry.remark || entry.id}
+                              >
+                                {entry.name && entry.name !== entry.id ? (
+                                  <span className="flex flex-col gap-0.5">
+                                    <span className="text-[11px] wrap-anywhere">
+                                      {entry.name}
+                                    </span>
+                                    <span className="font-mono text-[10px] wrap-anywhere text-muted-foreground">
                                       {entry.id}
                                     </span>
-                                  )}
-                                </span>
+                                  </span>
+                                ) : (
+                                  <span className="block font-mono text-[11px] wrap-anywhere">
+                                    {entry.id}
+                                  </span>
+                                )}
                               </td>
                               {/* 用途可改：自动识别认不出（other）或认错时，用户在这里
                                   定死它属于哪个功能页。改完功能页的选择器立即跟着变。 */}
@@ -893,6 +1087,7 @@ export function CloudProviderPanel() {
                                       size="icon-sm"
                                       className="h-6 w-6 text-muted-foreground"
                                       tooltip={t("cloud.setDefault")}
+                                      data-set-default={entry.id}
                                       disabled={setDefaultMutation.isPending}
                                       onClick={() => setDefaultMutation.mutate(entry.id)}
                                     >
@@ -1082,11 +1277,10 @@ export function CloudProviderPanel() {
         onRemove={(ids) => removeModelMutation.mutate(ids)}
       />
 
-      {/* 添加服务商弹窗 */}
+      {/* 添加自定义服务商弹窗 */}
       <AddProviderDialog
         open={showAddProvider}
         onOpenChange={setShowAddProvider}
-        existingIds={new Set(providers.map((p) => p.id))}
         onAdded={(id) => {
           setSelectedId(id);
           invalidate();
@@ -1286,7 +1480,8 @@ function RemoteModelsDialog({
                           isCollapsed && "-rotate-90",
                         )}
                       />
-                      <span className="truncate text-[11px] font-medium">
+                      {/* 分组名是 id 的前缀（行里只留后缀），截了就等于 id 缺一截 */}
+                      <span className="min-w-0 font-medium text-[11px] wrap-anywhere">
                         {group || t("cloud.groupOther")}
                       </span>
                       <span className="shrink-0 font-mono text-[10px] text-muted-foreground tabular-nums">
@@ -1321,7 +1516,7 @@ function RemoteModelsDialog({
                             label={t(`models.cat.${row.category}`)}
                           />
                           <span
-                            className="min-w-0 flex-1 truncate font-mono text-[11px]"
+                            className="min-w-0 flex-1 font-mono text-[11px] wrap-anywhere"
                             title={row.id}
                           >
                             {label}
@@ -1392,33 +1587,29 @@ function RemoteModelsDialog({
 }
 
 /**
- * 添加服务商弹窗：预设厂商网格（搜索 + 品牌徽章，已添加的置灰），
- * 「自定义」卡片进入第二步表单（名称 + API 地址）。
+ * 添加服务商弹窗：**只处理自定义服务商**（自建网关 / 中转 / 其它 OpenAI 兼容服务）。
+ *
+ * 内置厂商不再需要在这里"添加"——它们已经整份列在左栏，选一下填 Key 即可；
+ * 以前那个预设网格因此永远全是灰的「已添加」，成了纯粹的干扰。
  */
 function AddProviderDialog({
   open,
   onOpenChange,
-  existingIds,
   onAdded,
 }: {
   open: boolean;
   onOpenChange: (v: boolean) => void;
-  existingIds: Set<string>;
   onAdded: (id: string) => void;
 }) {
   const t = useT();
-  const [search, setSearch] = useState("");
-  const [customStep, setCustomStep] = useState(false);
-  const [customName, setCustomName] = useState("");
-  const [customBase, setCustomBase] = useState("");
+  const [name, setName] = useState("");
+  const [baseUrl, setBaseUrl] = useState("");
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (open) {
-      setSearch("");
-      setCustomStep(false);
-      setCustomName("");
-      setCustomBase("");
+      setName("");
+      setBaseUrl("");
       setError("");
     }
   }, [open]);
@@ -1437,140 +1628,67 @@ function AddProviderDialog({
     onError: (e) => setError(String(e)),
   });
 
-  const needle = search.trim().toLowerCase();
-  const presets = needle
-    ? CLOUD_PRESETS.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(needle))
-    : CLOUD_PRESETS;
-
-  const submitCustom = () => {
-    const name = customName.trim();
-    if (!name) return;
-    createMutation.mutate({ name, baseUrl: customBase.trim() });
+  const submit = () => {
+    const label = name.trim();
+    if (!label) return;
+    createMutation.mutate({ name: label, baseUrl: baseUrl.trim() });
   };
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-w-xl">
+      <DialogContent className="max-w-md">
         <DialogHeader>
-          <DialogTitle>{customStep ? t("cloud.custom") : t("cloud.add")}</DialogTitle>
-          {!customStep && <DialogDescription>{t("cloud.addDesc")}</DialogDescription>}
+          <DialogTitle>{t("cloud.custom")}</DialogTitle>
+          <DialogDescription>{t("cloud.customDesc")}</DialogDescription>
         </DialogHeader>
 
-        {customStep ? (
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center gap-3">
-              <Label htmlFor="np-label" className="w-20 shrink-0 text-xs">
-                {t("cloud.name")} <span className="text-destructive">*</span>
-              </Label>
-              <Input
-                id="np-label"
-                placeholder={t("cloud.namePh")}
-                value={customName}
-                onChange={(e) => setCustomName(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter" && customName.trim()) submitCustom();
-                }}
-                autoFocus
-                className="h-8 min-w-0 flex-1 text-xs"
-              />
-            </div>
-            <div className="flex items-center gap-3">
-              <Label htmlFor="np-base" className="w-20 shrink-0 text-xs">
-                {t("cloud.apiBase")}
-              </Label>
-              <Input
-                id="np-base"
-                placeholder={t("cloud.apiBasePh")}
-                value={customBase}
-                onChange={(e) => setCustomBase(e.target.value)}
-                className="h-8 min-w-0 flex-1 font-mono text-xs"
-              />
-            </div>
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center gap-3">
+            <Label htmlFor="np-label" className="w-20 shrink-0 text-xs">
+              {t("cloud.name")} <span className="text-destructive">*</span>
+            </Label>
+            <Input
+              id="np-label"
+              placeholder={t("cloud.namePh")}
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && name.trim()) submit();
+              }}
+              autoFocus
+              className="h-8 min-w-0 flex-1 text-xs"
+            />
           </div>
-        ) : (
-          <div className="flex flex-col gap-3">
-            <div className="relative">
-              <Input
-                placeholder={t("cloud.search")}
-                value={search}
-                onChange={(e) => setSearch(e.target.value)}
-                className="h-8 rounded-lg pl-8 text-xs"
-              />
-              <SearchIcon className="pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2 opacity-50" />
-            </div>
-            <div className="grid max-h-[440px] grid-cols-2 gap-2 overflow-y-auto">
-              {presets.map((p) => {
-                const added = existingIds.has(p.id);
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    disabled={added}
-                    title={[p.name, p.vendor, p.note].filter(Boolean).join(" · ")}
-                    onClick={() => createMutation.mutate({ presetId: p.id })}
-                    className={cn(
-                      "flex items-center gap-2.5 rounded-xl border px-3 py-2.5 text-left transition-colors",
-                      added
-                        ? "cursor-not-allowed opacity-50"
-                        : "hover:border-primary/40 hover:bg-muted/60",
-                    )}
-                  >
-                    <ProviderLogo provider={{ id: p.id, name: p.name }} />
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate text-xs font-medium">{p.name}</span>
-                      <span className="block truncate text-[10px] text-muted-foreground">
-                        {added ? t("cloud.added") : p.vendor}
-                      </span>
-                    </span>
-                  </button>
-                );
-              })}
-              {/* 自定义入口：进入第二步表单 */}
-              <button
-                type="button"
-                onClick={() => setCustomStep(true)}
-                className="flex items-center gap-2.5 rounded-xl border border-dashed px-3 py-2.5 text-left transition-colors hover:border-primary/40 hover:bg-muted/60"
-              >
-                <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted">
-                  <PlusIcon className="size-4 text-muted-foreground" />
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="block truncate text-xs font-medium">{t("cloud.custom")}</span>
-                  <span className="block truncate text-[10px] text-muted-foreground">
-                    {t("cloud.customHint")}
-                  </span>
-                </span>
-              </button>
-              {presets.length === 0 && (
-                <p className="col-span-2 py-6 text-center text-xs text-muted-foreground">
-                  {t("cloud.noProviders")}
-                </p>
-              )}
-            </div>
+          <div className="flex items-center gap-3">
+            <Label htmlFor="np-base" className="w-20 shrink-0 text-xs">
+              {t("cloud.apiBase")}
+            </Label>
+            <Input
+              id="np-base"
+              placeholder={t("cloud.apiBasePh")}
+              value={baseUrl}
+              onChange={(e) => setBaseUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" && name.trim()) submit();
+              }}
+              className="h-8 min-w-0 flex-1 font-mono text-xs"
+            />
           </div>
-        )}
+          <p className="text-[11px] leading-relaxed text-muted-foreground">
+            {t("cloud.customHint")}
+          </p>
+        </div>
 
         {error && <p className="text-xs text-destructive">{error}</p>}
 
         <DialogFooter>
-          {customStep && (
-            <Button variant="ghost" size="sm" onClick={() => setCustomStep(false)}>
-              {t("common.back")}
-            </Button>
-          )}
           <Button variant="outline" size="sm" onClick={() => onOpenChange(false)}>
             {t("common.cancel")}
           </Button>
-          {customStep && (
-            <Button
-              size="sm"
-              onClick={submitCustom}
-              disabled={!customName.trim() || createMutation.isPending}
-            >
-              {createMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
-              {t("cloud.add")}
-            </Button>
-          )}
+          <Button size="sm" onClick={submit} disabled={!name.trim() || createMutation.isPending}>
+            {createMutation.isPending ? <Spinner data-icon="inline-start" /> : null}
+            {t("cloud.add")}
+          </Button>
         </DialogFooter>
       </DialogContent>
     </Dialog>

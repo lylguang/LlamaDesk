@@ -127,46 +127,50 @@ def _local_targets(repo, defs):
 
 
 def _remote_targets(repo, defs, timeout=10):
-    """联网拿仓库文件清单（镜像 → 官方，带超时），失败返回 None。
+    """联网拿仓库文件清单（镜像 + 官方都拉，取**并集**，带超时），失败返回 None。
 
     返回 [(path, size), ...]（已排序）；联网不可用时调用方回退本地枚举。
+
+    关键：两个端点取并集，而不是「镜像通了就只用镜像的」。hf-mirror.com 的
+    `list_repo_tree` 对文件很多 / 单文件很大的仓库可能只回一小部分文件（分页
+    截断 / 迟迟不出全量）。若只信它一份，`run_download` 就会只下那几份就打印 OK，
+    表现成「下载只有两个文件、然后启动报错」。官方 + 镜像并存，彼此兜底。
     """
     import concurrent.futures
 
     from huggingface_hub import HfApi
 
     patterns = _download_patterns(repo, defs)
+    merged: dict = {}
 
     def _list(endpoint):
         api = HfApi(endpoint=endpoint)
-        return api.list_repo_tree(repo, recursive=True)
+        out = {}
+        for f in api.list_repo_tree(repo, recursive=True):
+            path = getattr(f, "path", None)
+            size = int(getattr(f, "size", 0) or 0)
+            if not path or not size:
+                continue
+            for p in patterns:
+                pat = p if not p.endswith("/**") else p[:-3] + "*"
+                if _match(pat, path):
+                    out[path] = size
+                    break
+        return out
 
     def _run(endpoint):
-        def work():
-            return _list(endpoint)
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as ex:
-            return ex.submit(work).result(timeout=timeout)
+            return ex.submit(_list, endpoint).result(timeout=timeout)
 
     for endpoint in (HF_MIRROR, HF_OFFICIAL):
         try:
-            tree = _run(endpoint)
-            out = []
-            for f in tree:
-                path = getattr(f, "path", None)
-                size = int(getattr(f, "size", 0) or 0)
-                if not path or not size:
-                    continue
-                for p in patterns:
-                    pat = p if not p.endswith("/**") else p[:-3] + "*"
-                    if _match(pat, path):
-                        out.append((path, size))
-                        break
-            if out:
-                return sorted(out)
+            merged.update(_run(endpoint))
         except Exception:
             continue
-    return None
+
+    if not merged:
+        return None
+    return sorted((p, s) for p, s in merged.items())
 
 
 def _clean_orphan_incomplete(repo):
@@ -214,50 +218,64 @@ def _resolve(name):
 
 
 def _check_targets_complete(local, patterns):
-    """本地是否已覆盖全部下载规则（每个 pattern 至少有一个完整文件）。"""
+    """本地是否已覆盖全部下载规则（每个 pattern 至少有一个完整文件）。
+
+    注意这是**粗粒度**判定：一个 `transformer/*.safetensors` pattern 只要有一份
+    shard 就算过，多个分片缺几份也看不出来。只用于离线快速拦截「明显没下完」，
+    权威判定必须走 `_verify_local`（逐文件对清单、对大小）。
+    """
     for p in patterns:
         if not any(_match(p, path) for path in local):
             return False
     return True
 
 
+def _verify_local(repo, targets):
+    """对每个远端目标做 local-only 逐文件校验，返回缺失 / 损坏的文件名列表。
+
+    一个目标既可能根本没下、也可能下成 `.incomplete`、还可能下下来但大小对不上，
+    三种都算缺失。离线可用（`local_files_only=True`）。这是「模型真的下全了」的
+    唯一权威判定 —— 下载完必须过这一关才能打印 OK。
+    """
+    from huggingface_hub import hf_hub_download
+
+    missing = []
+    for path, size in targets:
+        try:
+            f = hf_hub_download(repo_id=repo, filename=path, local_files_only=True)
+        except Exception:
+            missing.append(path)
+            continue
+        if not f or ".incomplete" in f:
+            missing.append(path)
+            continue
+        try:
+            if os.path.getsize(f) != size:
+                missing.append(path)
+        except OSError:
+            missing.append(path)
+    return missing
+
+
 def run_check(name):
     repo, defs = _resolve(name)
     patterns = _download_patterns(repo, defs)
 
-    # 一) 本地优先：已完整缓存就秒级返回 OK，完全不联网。
+    # 一) 本地优先：粗判「每个 pattern 至少有一份」就秒回 OK，完全不联网。
+    #     这只做快速拦截；真正的「是否全」由下面联网清单逐文件核对兜底。
     local = _local_targets(repo, defs)
     if _check_targets_complete(local, patterns):
         print(f"OK {sum(local.values())}", flush=True)
         return 0
 
-    # 二) 本地确有缺漏时才需要联网拿权威清单做逐文件核对（大小 + 完整性）。
+    # 二) 本地确有缺漏时才联网拿权威清单（镜像 + 官方并集）做逐文件核对。
     targets = _remote_targets(repo, defs)
     if targets is None:
         print("NOT_DOWNLOADED", flush=True)
         return 0
-    import os
-
-    from huggingface_hub import hf_hub_download
-
-    for path, size in targets:
-        try:
-            f = hf_hub_download(
-                repo_id=repo, filename=path, local_files_only=True
-            )
-        except Exception:
-            print("NOT_DOWNLOADED", flush=True)
-            return 0
-        if not f or ".incomplete" in f:
-            print("NOT_DOWNLOADED", flush=True)
-            return 0
-        try:
-            if os.path.getsize(f) != size:
-                print("NOT_DOWNLOADED", flush=True)
-                return 0
-        except Exception:
-            print("NOT_DOWNLOADED", flush=True)
-            return 0
+    if _verify_local(repo, targets):
+        print("NOT_DOWNLOADED", flush=True)
+        return 0
 
     print("OK", flush=True)
     return 0
@@ -283,9 +301,29 @@ def run_download(name):
     if removed:
         print(f"已清理 {removed} 个残留的未完成下载文件", flush=True)
 
-    # 本地已有完整缓存 → 全部复用，不断网（hf_hub_download 对已缓存文件秒回）。
+    # 本地已有哪些完整文件；粗判「每个 pattern 至少一份」只是快速拦截，不当最终结论。
     local = _local_targets(repo, defs)
-    if _check_targets_complete(local, patterns):
+    # 权威清单（镜像 + 官方并集）：这份才决定「这个模型到底有哪些文件」。
+    remote = _remote_targets(repo, defs)
+
+    # 联网可用 → 以权威清单为准：本地真全才复用（不断网），缺哪个下哪个。
+    if remote is not None:
+        if not _verify_local(repo, remote):
+            total = sum(s for _, s in remote)
+            print(f"REPO {repo}", flush=True)
+            print(f"TOTAL {total}", flush=True)
+            done = 0
+            for path, size in remote:
+                print(f"FILE {path} {done} {size}", flush=True)
+                _download_file(repo, path)
+                done += size
+                print(f"DONE {path}", flush=True)
+            print("OK", flush=True)
+            return 0
+        # 权威清单在但不全 → 扫尾那里统一补，这里只是打个招呼。
+        print("本地权重不完整，继续从远端下载…", flush=True)
+    elif _check_targets_complete(local, patterns):
+        # 完全离线且本地已粗判完整：只能信粗判（拿不到权威清单），复用本地下网不打了。
         total = sum(local.values())
         print(f"REPO {repo}", flush=True)
         print(f"TOTAL {total}", flush=True)
@@ -297,22 +335,19 @@ def run_download(name):
             print(f"DONE {path}", flush=True)
         print("OK", flush=True)
         return 0
-
-    # 本地缺文件 → 联网拿权威清单（镜像 → 官方）逐文件下载，断点续传。
-    targets = _remote_targets(repo, defs)
-    if targets is None:
+    else:
         print(
             "ERROR 本地缺少部分权重且无法联网获取文件清单（huggingface.co / hf-mirror.com 均不可达），请检查网络后重试",
             flush=True,
         )
         return 1
-    total = sum(s for _, s in targets)
-    print(f"REPO {repo}", flush=True)
-    print(f"TOTAL {total}", flush=True)
 
     os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "0"
+    total = sum(s for _, s in remote)
+    print(f"REPO {repo}", flush=True)
+    print(f"TOTAL {total}", flush=True)
     done = 0
-    for path, size in targets:
+    for path, size in remote:
         print(f"FILE {path} {done} {size}", flush=True)
         try:
             _download_file(repo, path)
@@ -321,6 +356,14 @@ def run_download(name):
             return 1
         done += size
         print(f"DONE {path}", flush=True)
+
+    # 收尾再做一次 local-only 逐文件校验（大小一致、非 .incomplete）。
+    # 清单是镜像 + 官方并集，正常情况下全覆盖；这里把「下载一半卡住 / 大小对不上」的
+    # 情况当场揪出来，绝不假报成功 —— 修复「只有两个文件却显示下好了、一启动就报错」。
+    missing = _verify_local(repo, remote)
+    if missing:
+        print(f"ERROR 以下权重文件未完整下载，请点「继续下载」重试：{', '.join(missing)}", flush=True)
+        return 1
     print("OK", flush=True)
     return 0
 

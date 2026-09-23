@@ -1,5 +1,7 @@
 import { MODEL_PROFILES } from "@/shared/model-profiles";
-import { CLOUD_PRESETS } from "@/shared/cloud-providers";
+import { CLOUD_PRESETS, presetApiKeyUrl } from "@/shared/cloud-providers";
+import type { ModelCandidates } from "@/shared/hardware";
+import type { InferenceEngine } from "@/shared/modelscope";
 
 export const REMOTE_PROFILES = [
   ...MODEL_PROFILES,
@@ -8,8 +10,8 @@ export const REMOTE_PROFILES = [
 
 /**
  * 引导界面「URL 模式」的服务商列表：单一数据源在 shared/cloud-providers.ts
- * （与「模型云服务」页共用），末尾追加「自定义」占位项。
- * 选择服务商后只需填入 API Key，Base URL 自动带出（仍可手动修改）；
+ * （与「模型云服务」页共用同一份内置目录），末尾追加「自定义」占位项。
+ * 选择服务商后只需填入 API Key，Base URL 自动带出且**不可修改**；
  * 列表末尾的“自定义”才需要手动输入完整 URL。
  */
 export type RemoteProvider = {
@@ -24,6 +26,8 @@ export type RemoteProvider = {
   models: string[];
   /** 简短备注（免费额度 / 需要额外操作等） */
   note?: string;
+  /** 控制台创建 API Key 的页面（引导页「获取密钥」直达）。 */
+  apiKeyUrl?: string;
 };
 
 export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
@@ -34,6 +38,7 @@ export const REMOTE_PROVIDERS: readonly RemoteProvider[] = [
     baseUrl: p.baseUrl,
     models: [...p.models],
     note: p.note,
+    apiKeyUrl: presetApiKeyUrl(p),
   })),
   {
     id: "custom",
@@ -59,6 +64,15 @@ export function formatBytes(bytes: number): string {
 }
 
 /**
+ * 每 token 的 KV 缓存（bytes）：层数 × KV 头 × head_dim × 2(K/V) × 2B（fp16）。
+ * 与上下文长度相乘即为 KV 缓存总量。不是实测值，是引导页展示量级的估算口径
+ * —— 架构参数变了（层数 / KV 头数）要跟着改，否则估算会静默偏小。
+ */
+function kvBytesPerToken(layers: number, kvHeads: number, headDim = 128): number {
+  return layers * kvHeads * headDim * 2 * 2;
+}
+
+/**
  * 主力对话模型（引导界面用）。OCR 模型不再出现在引导里——
  * 需要 OCR 的用户可在应用内自行选择。
  */
@@ -66,7 +80,11 @@ export type SetupModelOption = {
   id: string;
   label: string;
   params: string;
+  /** 参数规模（十亿），用于「本机跑得动的前提下挑最大的」排序。 */
+  paramsB: number;
   description: string;
+  /** 每 token 的 KV 缓存（bytes），见 `kvBytesPerToken`。 */
+  kvBytesPerToken: number;
   /** llama.cpp 使用的 GGUF 量化仓库（unsloth），`-hf repo:quant` 直接拉取。 */
   ggufRepo: string;
   /** vLLM / SGLang 使用的 safetensors 官方仓库。 */
@@ -82,7 +100,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-4b",
     label: "Qwen3.5 4B",
     params: "4B",
+    paramsB: 4,
     description: "轻量通用对话模型，低内存也能流畅运行",
+    kvBytesPerToken: kvBytesPerToken(36, 8),
     ggufRepo: "unsloth/Qwen3.5-4B-GGUF",
     hfRepo: "Qwen/Qwen3.5-4B",
     hfSizeBytes: 9.3 * 1e9,
@@ -98,7 +118,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-9b",
     label: "Qwen3.5 9B",
     params: "9B",
+    paramsB: 9,
     description: "均衡的通用对话模型，质量与资源占用兼顾",
+    kvBytesPerToken: kvBytesPerToken(48, 8),
     ggufRepo: "unsloth/Qwen3.5-9B-GGUF",
     hfRepo: "Qwen/Qwen3.5-9B",
     hfSizeBytes: 19.3 * 1e9,
@@ -114,7 +136,10 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen35-35b",
     label: "Qwen3.5 35B-A3B",
     params: "35B",
+    paramsB: 35,
     description: "MoE 大模型，激活参数仅 3B，本地也能高效推理",
+    // MoE：KV 头只有 4 个，KV 缓存比同尺寸稠密模型小得多。
+    kvBytesPerToken: kvBytesPerToken(48, 4),
     ggufRepo: "unsloth/Qwen3.5-35B-A3B-GGUF",
     hfRepo: "Qwen/Qwen3.5-35B-A3B",
     hfSizeBytes: 71.9 * 1e9,
@@ -130,7 +155,9 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     id: "qwen36-27b",
     label: "Qwen3.6 27B",
     params: "27B",
+    paramsB: 27,
     description: "新一代旗舰通用对话模型，中文与推理能力突出",
+    kvBytesPerToken: kvBytesPerToken(64, 8),
     ggufRepo: "unsloth/Qwen3.6-27B-GGUF",
     hfRepo: "Qwen/Qwen3.6-27B",
     hfSizeBytes: 55.6 * 1e9,
@@ -143,6 +170,31 @@ export const SETUP_MODELS: readonly SetupModelOption[] = [
     defaultQuant: "Q4_K_M",
   },
 ];
+
+/**
+ * 把引导页的模型表翻译成内存估算需要的形状（权重档位 + 架构常数）。
+ *
+ * 两条口径：**llama.cpp** 按 GGUF 量化档（4B 上 Q4_K_M 只有 2.7GB）；**vLLM / SGLang /
+ * MLX** 直接吃 bf16 safetensors，没有量化档可挑，只有"整仓库"这一档。
+ *
+ * MLX 以前返回空数组（理由是"预设只有仓库名、没有体积信息"）—— 而它当时唯一的两个
+ * 预设是两个 DeepSeek 大 MoE，界面上因此永远把那一个标成"推荐"，32GB 的机器也被推
+ * 一个装不下的模型。现在 MLX 和 vLLM 走同一份千问模型表（HF safetensors，mlx-lm
+ * 直接加载），推荐就跟着内存走了。
+ */
+export function setupModelCandidates(engine: InferenceEngine): ModelCandidates[] {
+  return SETUP_MODELS.map((model) => ({
+    id: model.id,
+    paramsB: model.paramsB,
+    kvBytesPerToken: model.kvBytesPerToken,
+    variants:
+      engine === "llama.cpp"
+        ? model.quants.map((q) => ({ name: q.name, sizeBytes: q.size }))
+        : // bf16 safetensors 的整仓库体积（与 vLLM / SGLang 同一口径）
+          [{ name: "BF16", sizeBytes: model.hfSizeBytes }],
+    defaultQuant: engine === "llama.cpp" ? model.defaultQuant : "BF16",
+  }));
+}
 
 export const MODEL_QUANTS: Record<string, ModelQuantInfo> = {
   chandra: {

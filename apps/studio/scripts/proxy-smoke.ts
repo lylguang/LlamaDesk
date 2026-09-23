@@ -1,5 +1,5 @@
 /**
- * 代理（设置 → 偏好 → 通用）冒烟：设置解析 → fetch 包装 → 子进程 env / WebSocket 选项
+ * 代理（设置 → 通用）冒烟：设置解析 → fetch 包装 → 子进程 env / WebSocket 选项
  * → 真实过一个本地 HTTP 代理（端到端） → 「测试代理」按钮。
  *
  * 跑法：bun run scripts/proxy-smoke.ts（或 OMNI_DATA_DIR=… 指定目录保留现场）。

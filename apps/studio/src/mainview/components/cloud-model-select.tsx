@@ -26,7 +26,7 @@ import { ModelCategoryIcon } from "@components/model-category-badge";
  * - 厂商列表只列**已启用**的（设置页「启动」时校验过密钥），且必须在该用途下有模型
  *   （生图只列有生图模型的厂商，TTS 只列有 TTS 模型的厂商，依此类推）；
  * - 模型列表只列该厂商下这一用途的模型 —— 用户不会再看到"这个模型是不是能用在这里"；
- * - 页面不提供地址 / 密钥输入：连接信息统一在「设置 → 模型云服务」里维护。
+ * - 页面不提供地址 / 密钥输入：连接信息统一在「设置 → 云端模型」里维护。
  *
  * 选厂商后该厂商只有一个可用模型时直接选中它，少一次点击。
  *
@@ -44,6 +44,7 @@ export function CloudModelSelect({
   onChange,
   disabled,
   requireVideoApi,
+  requireMusicApi,
   size = "default",
   className,
 }: {
@@ -55,6 +56,8 @@ export function CloudModelSelect({
   disabled?: boolean;
   /** 生视频：只列配置了生视频接口（MiniMax / Seedance）的厂商。 */
   requireVideoApi?: boolean;
+  /** 生音乐：只列配置了生音乐接口（StepFun / MiniMax）的厂商。 */
+  requireMusicApi?: boolean;
   size?: "sm" | "default";
   className?: string;
 }) {
@@ -69,16 +72,18 @@ export function CloudModelSelect({
   });
   const all = useMemo(() => providersQuery.data?.providers ?? [], [providersQuery.data]);
 
-  // 可选厂商：已启用 + 该用途下有模型（生视频还要有生视频协议）。
+  // 可选厂商：已启用 + 该用途下有模型（生视频 / 生音乐还要有各自的接口协议 ——
+  // 这两类 API 没有统一标准，协议缺失时选它也调不通）。
   const candidates = useMemo(
     () =>
       all.filter(
         (p) =>
           p.enabled &&
           (!requireVideoApi || Boolean(p.videoApi)) &&
+          (!requireMusicApi || Boolean(p.musicApi)) &&
           providerModelsOfType(p, kind).length > 0,
       ),
-    [all, kind, requireVideoApi],
+    [all, kind, requireVideoApi, requireMusicApi],
   );
 
   // 当前选中的厂商不在候选里（已停用 / 模型被删）时也要显示出来，
@@ -115,7 +120,7 @@ export function CloudModelSelect({
     if (!open) setModelSearch("");
   };
 
-  const goSettings = () => setRoute({ path: "settings", tab: "network" });
+  const goSettings = () => setRoute({ path: "settings", tab: "cloud" });
   const empty = candidates.length === 0;
   const height = size === "sm" ? "h-8 text-xs" : "";
   const modelCount = providerModelList.length;

@@ -1,7 +1,15 @@
 import type { InferenceEngine } from "./engines";
+import type { StartupErrorKind } from "./engine-errors";
 
 /** 本地模型服务实例的状态（与单实例时代的 ServerStatus 同名同义）。 */
 export type ServedModelStatus = "stopped" | "starting" | "downloading" | "running" | "error";
+
+/**
+ * 实例用途：chat = 对话 / 补全（默认端点的语义）；embedding = 向量化（llama.cpp
+ * `--embeddings`）。嵌入实例走独立的端口段、**永不**接管聊天活动状态
+ * （SERVED_ACTIVE_ID / CHAT_MODEL / 活动端口都只跟 chat 实例走）。
+ */
+export type ModelPurpose = "chat" | "embedding";
 
 /**
  * 一个已启动的本地模型服务实例。
@@ -22,9 +30,18 @@ export type ServedModelInfo = {
   endpoint: string;
   /** 请求里该填的 model id（llama.cpp / vLLM / SGLang 是 slug，MLX 是绝对路径）。 */
   servedName: string;
+  /** 用途（chat / embedding），决定端口段与是否参与聊天活动状态。 */
+  purpose: ModelPurpose;
   status: ServedModelStatus;
   pid?: number;
   error?: string;
+  /**
+   * `error` 的类型（缺依赖 / 显存不足 / 端口被占 / 权重问题 / 权限）。
+   *
+   * 原文只说明「怎么坏的」，类型才决定「下一步做什么」—— 界面按它给可执行的建议，
+   * 所以分类在主进程完成（那里有日志上下文），webview 只负责翻译成当前语言。
+   */
+  errorKind?: StartupErrorKind;
   startedAt?: number;
   /**
    * 端口就是该引擎设置里的端口：各 App、`omi`、外部集成默认连它，

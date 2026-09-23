@@ -7,7 +7,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { Spinner } from "@ui/spinner";
 import { useT, useUILang } from "@stores/ui-lang";
 import { LANGS, type UILang } from "@/shared/i18n";
-import { PageHeader, SettingsSection, SettingRow } from "./setting-ui";
+import { PageHeader, SettingsSection, SettingRow } from "@components/setting-ui";
+import { AppRailMenuSection } from "./app-rail-config";
 
 export const THEME_OPTIONS = ["system", "light", "dark"] as const;
 export type ThemeOption = (typeof THEME_OPTIONS)[number];
@@ -20,7 +21,7 @@ export function applyTheme(theme: string) {
   document.documentElement.classList.toggle("dark", dark);
 }
 
-/** 设置 → 偏好 → 外观：主题与界面语言。 */
+/** 设置 → 外观：主题、界面语言与左侧一级菜单（顺序 / 显隐）。 */
 export function AppearanceTab({
   form,
   updateField,
@@ -109,6 +110,9 @@ export function AppearanceTab({
           {t("settings.appearance.hint")}
         </p>
       </div>
+
+      {/* 左侧一级菜单：改动即时保存（拖动排序没有"草稿"的概念），不走上面这个保存按钮。 */}
+      <AppRailMenuSection />
     </div>
   );
 }

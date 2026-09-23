@@ -59,27 +59,50 @@ export function encryptSecret(plain: string): string {
   return PREFIX + Buffer.concat([iv, tag, enc]).toString("base64");
 }
 
+/** 解密的两种结果：`ok: false` 时带上原因（调用方决定降级还是抛）。 */
+export type SecretDecryptResult = { ok: true; value: string } | { ok: false; error: string };
+
 /**
- * 解密 `encryptSecret` 产生的密文。非 `v1:` 前缀（旧明文）原样透传，保证兼容。
- * 密文损坏 / 密钥不匹配时抛错（不静默吞掉：否则会把坏值当明文用出去）。
+ * 解密的**不抛**版本：解不开不抛，返回 `{ ok: false, error }`。
+ *
+ * 读盘路径（设置 / 云厂商 / 网关密钥）一律用它：归档里**不含** `secrets.key`，把
+ * 别的机器（或别的数据目录）的备份恢复进来之后，库里会躺着本机钥匙解不开的密文 ——
+ * 而读设置是整个应用启动的第一个调用，在这里抛出去等于引导页永远走不完、进不去
+ * 主界面（点「跳过」也没用：它写完 SETUP_COMPLETE，界面还要再读一次设置）。
+ * 调用方拿到 `ok: false` 的统一语义是「这个凭据在本机读不出来」：按空值处理并记一条日志。
+ *
+ * 写路径仍用 `decryptSecret`（会抛）：坏密文绝不能当明文用出去。
  */
-export function decryptSecret(cipherText: string): string {
+export function tryDecryptSecret(cipherText: string): SecretDecryptResult {
   const value = cipherText ?? "";
-  if (!value || !value.startsWith(PREFIX)) return value;
+  if (!value || !value.startsWith(PREFIX)) return { ok: true, value };
   try {
     const buf = Buffer.from(value.slice(PREFIX.length), "base64");
     // 布局：iv(12) · tag(16) · ciphertext(rest)
-    if (buf.length < 28) return value; // 过短，非合法密文，按明文透传保守处理
+    if (buf.length < 28) return { ok: true, value }; // 过短，非合法密文，按明文透传保守处理
     const iv = buf.subarray(0, 12);
     const tag = buf.subarray(12, 28);
     const enc = buf.subarray(28);
     const key = getMasterKey();
     const decipher = createDecipheriv("aes-256-gcm", key, iv);
     decipher.setAuthTag(tag);
-    return Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8");
+    return {
+      ok: true,
+      value: Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8"),
+    };
   } catch (e) {
-    throw new Error(`密钥解密失败: ${String(e)}`);
+    return { ok: false, error: String(e) };
   }
+}
+
+/**
+ * 解密 `encryptSecret` 产生的密文。非 `v1:` 前缀（旧明文）原样透传，保证兼容。
+ * 密文损坏 / 密钥不匹配时抛错（不静默吞掉：否则会把坏值当明文用出去）。
+ */
+export function decryptSecret(cipherText: string): string {
+  const result = tryDecryptSecret(cipherText);
+  if (!result.ok) throw new Error(`密钥解密失败: ${result.error}`);
+  return result.value;
 }
 
 /** 判断一个值是否已是加密形式（用于启用时统一迁移 / 幂等加密）。 */

@@ -29,6 +29,7 @@ import {
 } from "fs";
 import { join } from "path";
 import { getDataDir } from "./paths";
+import { safeJoin, safeName } from "./path-safety";
 
 export type AppLogLevel = "debug" | "info" | "warn" | "error";
 
@@ -40,6 +41,7 @@ export type AppLogSource =
   | "chat" // 对话
   | "image" // 生图（云端 API / ComfyUI / MLX）
   | "video" // 生视频
+  | "music" // 生音乐（StepFun 提交 + 轮询 / MiniMax 同步长请求 / 本地预留位）
   | "tts" // 语音合成
   | "asr" // 语音识别
   | "ocr" // OCR / 文档解析
@@ -47,13 +49,17 @@ export type AppLogSource =
   | "media-server" // 图片 / 音频预览服务
   | "server" // 推理服务器（llama.cpp / vLLM / SGLang / MLX）
   | "gateway" // OpenAI 兼容网关
+  | "tunnel" // 内网穿透（Cloudflare 隧道：cloudflared 安装、启停、连接状态）
   | "download" // 模型下载
   | "skills" // 技能中心
   | "kb" // 知识库
   | "memory" // 共享记忆
   | "backup" // 备份 / 恢复
+  | "settings" // 设置读取（凭据密文在本机解不开这类降级）
   | "mcp" // MCP 服务
   | "automation" // 自动化
+  | "benchmark" // 基准测试（速度扫描 / 能力评测）
+  | "miniapp" // 小应用（应用中心里的沙箱页面：能力探测、一次性补全、产物落盘）
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
   | "usage" // 用量账本（记录失败这类不影响业务的告警）
@@ -95,6 +101,19 @@ export type AppLogQuery = {
   limit?: number;
   /** true = 时间正序（老的在前）；默认倒序（新的在前）。 */
   oldestFirst?: boolean;
+  /**
+   * 只读某一个日志文件（只能是 `appLogFiles()` 里的 basename，如 `app.log`
+   * 或轮转出来的 `app-2026-….log`）—— 界面的「轮转文件」切换靠它翻历史。
+   * 给了它就是「只看这份文件」，内存缓冲不参与。
+   */
+  file?: string;
+  /**
+   * 只读本进程内存环形缓冲。跟随最新时界面每秒轮询一次，seq 是进程内递增的，
+   * 「比 since 新」的记录因此只可能在内存里；不这么标注的话每次轮询都会回落到
+   * 磁盘整份读日志文件（2MB 上限），日志一大就把主进程拖住。
+   * 与 `file` 同时给时以 `file` 为准（要的是那份文件，不是内存）。
+   */
+  memoryOnly?: boolean;
 };
 
 const APP_LOG_FILE = "app.log";
@@ -110,8 +129,87 @@ const MAX_MEMORY_ENTRIES = 2000;
 
 const LEVEL_RANK: Record<AppLogLevel, number> = { debug: 10, info: 20, warn: 30, error: 40 };
 
-/** 需要脱敏的字段名（命中即整体替换，不看值）。 */
-const SECRET_KEY_PATTERN = /(api[_-]?key|apikey|token|secret|password|passwd|authorization|cookie)/i;
+/**
+ * 需要脱敏的字段名（命中即整体替换，不看值）。
+ *
+ * 只看名字是不够的（见 `redactSecrets`），但名字这一层仍然要留着：它的成本是零，
+ * 而且能盖住「值是密钥但形状看不出来」的情况。这里的补充是那几个以前漏掉的别名
+ * —— `access_key` / `secret_key` / `credential` / `pat` —— 老规则用的是子串匹配，
+ * 裸的 `key` 故意不收（`{ key: "SERVER_TEMP" }` 这种调试字段很常见，收掉反而丢信息）。
+ */
+const SECRET_KEY_PATTERN =
+  /(api[_-]?key|apikey|access[_-]?key|secret[_-]?key|private[_-]?key|token|secret|password|passwd|passphrase|authorization|cookie|credential)/i;
+
+/**
+ * 值里的密钥形状 —— 只脱敏「看起来就是密钥」的那一段。
+ *
+ * 为什么非要有这一层：日志里泄漏密钥的路径基本都不是 `{apiKey: "sk-…"}` 这种规整体，
+ * 而是**字符串**里夹着 —— `curl -H "Authorization: Bearer sk-…"` 这样的命令行、
+ * `?api_key=…` 这样的 URL、`api_key=…` 这样的环境变量转储。老实现只按字段名替换，
+ * 这些一个都盖不住（字段名是 `command` / `url` / `args`，谁也没写在名单里）。
+ *
+ * 反过来，**不能**对所有字符串一刀切替换：日志的价值全在内容里。
+ * 所以每条规则都要求一个明确的密钥形状（前缀、header、`key=` 赋值），
+ * 宁可漏掉一个「长得不像密钥的密钥」，也不要把整份日志变成 `***`。
+ */
+const SECRET_VALUE_RULES: { pattern: RegExp; replacement: string }[] = [
+  {
+    // 头名字后面可能先来一个引号（`"x-api-key": "…"` 这种 JSON / 对象字面量形态），
+    // 所以引号要放在冒号左边而不是值里面。
+    // 值里可能还带一个协议词（`Bearer sk-…`），一起吃掉 —— 只吃 Bearer 会留下
+    // `Authorization: *** ***` 这种既没了信息又看不出原来是什么的结果。
+    pattern: /\b(authorization|x-api-key|api-key)\b"?\s*[:=]\s*"?(?:(?:bearer|basic)\s+)?[^\s"',;)]+/gi,
+    replacement: "$1: ***",
+  },
+  // 没有头名字的裸协议词：`token rejected: Bearer sk-…`。
+  { pattern: /\b(bearer|basic)\s+[A-Za-z0-9._~+/=+-]{8,}/gi, replacement: "$1 ***" },
+  // 各家有固定前缀的密钥：认前缀最准，也不会误伤普通词。
+  {
+    pattern: /\b(?:sk|osk|hf|ghp|gho|ghs|ghr|glpat|xoxb|xoxp|pplx|r8)[-_][A-Za-z0-9_-]{12,}/g,
+    replacement: "***",
+  },
+  // 赋值形态，分两类。先说明为什么要分：
+  // `api_key` / `password` 这类名字本身就是「这是密钥」的信号，出现在 `IMG_API_KEY=…`
+  // 里时前面还顶着 `IMG_`，所以**不能**要求前面是空白或行首；
+  // 而 `key` / `token` / `secret` 这类名字单独看是有歧义的（`cache_key`、`max_tokens`），
+  // 必须要求一个明确的分隔符，否则会把正常字段一起吞掉。
+  {
+    // 名字前面**不加** `\b`：`IMG_API_KEY=…` 里 `API` 前面是 `_`，两个都是词字符，
+    // 加了 `\b` 反而匹配不上 —— 而前缀带厂商名（IMG_ / OPENAI_）恰恰是最常见的形态。
+    pattern:
+      /(api[-_]?key|apikey|access[-_]?key|secret[-_]?key|private[-_]?key|auth[-_]?token|access[-_]?token|refresh[-_]?token|password|passwd|passphrase)\b"?\s*[:=]\s*"?([^\s"'`,;&)\]}]{8,})/gi,
+    replacement: "$1=***",
+  },
+  {
+    pattern:
+      /((?:^|[?&\s"'`,\[(])(?:key|token|secret|credential|pat)\b"?\s*[:=]\s*"?)([^\s"'`,;&)\]}]{8,})/gi,
+    replacement: "$1***",
+  },
+  // CLI 形态：`--password hunter2`、`--api-key abc…`（空格分隔，不是赋值）。
+  {
+    pattern: /(--?[a-z-]*(?:password|passwd|token|api-key|api_key|secret))\s+\S{8,}/gi,
+    replacement: "$1 ***",
+  },
+  // URL 里的 userinfo：`https://user:pass@host`（备份远端、代理、webhook 都长这样）。
+  {
+    pattern: /([a-z][a-z0-9+.-]*:\/\/[^\s/:@]+:)[^\s/@]+(@)/gi,
+    replacement: "$1***$2",
+  },
+];
+
+/**
+ * 扫一遍文本，把里面看得出来的密钥换成 `***`。
+ *
+ * 纯函数、不抛异常：它跑在写日志的路径上，自己的失败不能反过来把日志写坏。
+ */
+export function redactSecrets(text: string): string {
+  if (!text) return text;
+  let out = text;
+  for (const rule of SECRET_VALUE_RULES) {
+    out = out.replace(rule.pattern, rule.replacement);
+  }
+  return out;
+}
 
 const memory: AppLogEntry[] = [];
 let seq = 0;
@@ -149,7 +247,8 @@ function errorToDetail(err: Error, depth: number): unknown {
 export function sanitizeValue(value: unknown, depth = 0, seen = new WeakSet<object>()): unknown {
   if (value == null) return value;
   if (value instanceof Error) return errorToDetail(value, depth);
-  if (typeof value === "string") return truncate(value, 2000);
+  // 字符串先按内容脱敏再截断：密钥可能恰好落在截断线上，先截就漏了。
+  if (typeof value === "string") return truncate(redactSecrets(value), 2000);
   if (typeof value === "number" || typeof value === "boolean") return value;
   if (typeof value === "bigint") return String(value);
   if (typeof value === "function") return "[function]";
@@ -253,7 +352,9 @@ export function logEvent(input: AppLogInput): AppLogEntry {
     level: input.level ?? "info",
     source: input.source,
     event: input.event,
-    message: truncate(String(input.message ?? ""), 2000),
+    // message 也要扫：失败原因里最常见的就是「把整条命令行 / URL 抄进来」，
+    // 而命令行与 URL 里带着密钥的情况比 detail 里多得多。
+    message: truncate(redactSecrets(String(input.message ?? "")), 2000),
     detail: normalizeDetail(input.detail),
     pid: process.pid,
   };
@@ -294,7 +395,11 @@ export function mirrorConsole(source: AppLogSource = "app"): void {
     };
   };
   console.warn = wrap("warn", "console.warn", console.warn.bind(console)) as typeof console.warn;
-  console.error = wrap("error", "console.error", console.error.bind(console)) as typeof console.error;
+  console.error = wrap(
+    "error",
+    "console.error",
+    console.error.bind(console),
+  ) as typeof console.error;
 }
 
 // ---------------------------------------------------------------------------
@@ -319,7 +424,8 @@ function matches(entry: AppLogEntry, query: AppLogQuery, minRank: number): boole
     const needle = query.search.toLowerCase();
     // 事件名也算在内：用户搜 "builtin" / "generate.failed" 时想找的就是事件，
     // 只搜 message 会让人以为"没有这条日志"。
-    const haystack = `${entry.event} ${entry.message} ${JSON.stringify(entry.detail ?? "")}`.toLowerCase();
+    const haystack =
+      `${entry.event} ${entry.message} ${JSON.stringify(entry.detail ?? "")}`.toLowerCase();
     if (!haystack.includes(needle)) return false;
   }
   return true;
@@ -339,7 +445,9 @@ export function readAppLogsInMemory(query: AppLogQuery = {}): AppLogEntry[] {
   const limit = Math.min(Math.max(query.limit ?? 100, 1), MAX_MEMORY_ENTRIES);
   const minRank = query.level ? LEVEL_RANK[query.level] : 0;
   const since = normalizeSince(query.since);
-  const hits = memory.filter((entry) => (since == null || entry.ts >= since) && matches(entry, query, minRank));
+  const hits = memory.filter(
+    (entry) => (since == null || entry.ts >= since) && matches(entry, query, minRank),
+  );
   return sortAndLimit(hits, query, limit);
 }
 
@@ -347,7 +455,9 @@ export function appLogFiles(): { path: string; size: number; rotated: boolean }[
   const dir = appLogDir();
   try {
     return readdirSync(dir)
-      .filter((n) => n === APP_LOG_FILE || (n.startsWith(APP_LOG_ROTATED_PREFIX) && n.endsWith(".log")))
+      .filter(
+        (n) => n === APP_LOG_FILE || (n.startsWith(APP_LOG_ROTATED_PREFIX) && n.endsWith(".log")),
+      )
       .sort()
       .map((name) => {
         const full = join(dir, name);
@@ -364,15 +474,56 @@ export function appLogFiles(): { path: string; size: number; rotated: boolean }[
   }
 }
 
+/** 同一个坏名字只报一次：坏客户端每秒轮询一次时不能把日志刷满。 */
+const rejectedFiles = new Set<string>();
+
+function reportRejectedFile(name: string): void {
+  if (rejectedFiles.has(name)) return;
+  rejectedFiles.add(name);
+  logEvent({
+    level: "warn",
+    source: "app",
+    event: "app_log.file.rejected",
+    message: `拒绝读取日志目录之外的文件：${truncate(name, 200)}`,
+  });
+}
+
+/**
+ * 把查询里的 `file` 收敛成日志目录里的一个真实文件；不合法返回 null。
+ *
+ * 这个值来自 webview / 控制 socket（用户可构造），所以**不能**拼完再用：
+ * 只认 `appLogFiles()` 里出现过的名字（那一层已经限定 `app.log` / `app-*.log`），
+ * 带分隔符、`..`、绝对路径的写法在 safeName 那一步就被拒掉，
+ * 即使真有人在日志目录里放了软链接，safeJoin 也会把它挡在目录之外。
+ * 返回的路径永远来自 `appLogFiles()`，不来自入参。
+ */
+export function resolveAppLogFile(name: unknown): string | null {
+  if (typeof name !== "string" || name !== safeName(name)) {
+    reportRejectedFile(String(name));
+    return null;
+  }
+  const joined = safeJoin(appLogDir(), name);
+  const hit = joined ? appLogFiles().find((f) => f.path === joined) : undefined;
+  if (!hit) {
+    reportRejectedFile(name);
+    return null;
+  }
+  return hit.path;
+}
+
 /**
  * 从磁盘读日志（应用没运行、或要看上次运行留下的记录时用）。
- * 轮转文件按文件名排序（时间戳即顺序），老的在前。
+ * 轮转文件按文件名排序（时间戳即顺序），老的在前；`file` 指定时只读那一份。
  */
 export function readAppLogFiles(query: AppLogQuery = {}): AppLogEntry[] {
   const limit = Math.min(Math.max(query.limit ?? 100, 1), 5000);
   const minRank = query.level ? LEVEL_RANK[query.level] : 0;
   const since = normalizeSince(query.since);
-  const files = appLogFiles().sort((a, b) => (a.rotated === b.rotated ? a.path.localeCompare(b.path) : a.rotated ? -1 : 1));
+  const selected = query.file == null ? null : resolveAppLogFile(query.file);
+  if (query.file != null && selected == null) return [];
+  const files = (selected ? appLogFiles().filter((f) => f.path === selected) : appLogFiles()).sort(
+    (a, b) => (a.rotated === b.rotated ? a.path.localeCompare(b.path) : a.rotated ? -1 : 1),
+  );
   const entries: AppLogEntry[] = [];
   // 从最新往前读，凑够 limit 就停 —— 日志文件可能很大，不整份载入。
   for (const file of [...files].reverse()) {
@@ -403,13 +554,23 @@ export function readAppLogFiles(query: AppLogQuery = {}): AppLogEntry[] {
 /**
  * 应用在跑时用这个：优先内存（含本条进程的全部事件），
  * 不够 limit 时再补磁盘上更早的记录（跨重启连续看）。
+ *
+ * 两个例外：
+ *   - `file`：只要那一份历史文件（内存里的记录不属于它）；
+ *   - `memoryOnly`：只要本进程内存（跟随最新的轮询，见 AppLogQuery 的注释）。
  */
 export function readAppLogs(query: AppLogQuery = {}): AppLogEntry[] {
+  if (query.file != null) return readAppLogFiles(query);
   const limit = Math.min(Math.max(query.limit ?? 100, 1), 5000);
+  if (query.memoryOnly) return readAppLogsInMemory({ ...query, limit });
   const inMemory = readAppLogsInMemory({ ...query, limit });
   if (inMemory.length >= limit) return inMemory;
-  const oldestInMemory = inMemory.length ? Math.min(...inMemory.map((e) => e.ts)) : Number.POSITIVE_INFINITY;
-  const fromFiles = readAppLogFiles({ ...query, limit }).filter((entry) => entry.ts < oldestInMemory);
+  const oldestInMemory = inMemory.length
+    ? Math.min(...inMemory.map((e) => e.ts))
+    : Number.POSITIVE_INFINITY;
+  const fromFiles = readAppLogFiles({ ...query, limit }).filter(
+    (entry) => entry.ts < oldestInMemory,
+  );
   const merged = [...inMemory, ...fromFiles];
   return sortAndLimit(merged, query, limit);
 }
@@ -433,5 +594,10 @@ export function appLogInfo(): {
   memoryEntries: number;
   files: { path: string; size: number; rotated: boolean }[];
 } {
-  return { dir: appLogDir(), path: appLogPath(), memoryEntries: memory.length, files: appLogFiles() };
+  return {
+    dir: appLogDir(),
+    path: appLogPath(),
+    memoryEntries: memory.length,
+    files: appLogFiles(),
+  };
 }

@@ -35,9 +35,10 @@ export function RemoteFlow({
   const [step, setStep] = useState<RemoteStep>("provider");
   // 选中的服务商 id：默认第一个国内服务商，仍可一键自定义。
   const [providerId, setProviderId] = useState<string>(REMOTE_PROVIDERS[0]!.id);
-  const [baseUrl, setBaseUrl] = useState(REMOTE_PROVIDERS[0]!.baseUrl);
+  const [baseUrl, setBaseUrl] = useState<string>(REMOTE_PROVIDERS[0]!.baseUrl);
   const [apiKey, setApiKey] = useState("");
   const [modelName, setModelName] = useState("");
+  const [saveError, setSaveError] = useState("");
   const provider = REMOTE_PROVIDERS.find((p) => p.id === providerId);
   const isCustom = providerId === CUSTOM_ID;
 
@@ -55,21 +56,39 @@ export function RemoteFlow({
     mutationFn: () => rpcClient.checkConnection({ baseUrl, apiKey: apiKey || "EMPTY" }),
   });
 
+  /**
+   * 收尾：写进「模型云服务」的厂商表（内置厂商用预设行、自定义按地址复用），
+   * 校验密钥后启用并激活。激活会把 baseUrl / apiKey / models 写回 VLLM_* 槽位，
+   * 网关、CLI 与集成模型选择器照旧读旧键 —— 所以这里不再单独写那几个键。
+   *
+   * 从前只写 VLLM_* 的话，用户在引导页填过的 Key 到了设置页看起来仍是"没配过"，
+   * 得重填第二遍：同一份凭据两个页面各存一份，就必然对不上。
+   */
   const saveSettings = useMutation({
     mutationFn: async () => {
-      const settings: Record<string, string> = {
-        SERVER_MODE: "remote",
-        VLLM_API_BASE: baseUrl,
-        VLLM_API_KEY: apiKey || "EMPTY",
-        VLLM_MODEL_NAME: modelName,
-        VLLM_MODEL_PROFILE: "none",
-      };
-      return rpcClient.updateSettings({ settings });
+      setSaveError("");
+      const res = await rpcClient.cloudProviderConfigure({
+        providerId: isCustom ? undefined : providerId,
+        baseUrl,
+        apiKey,
+        model: modelName.trim() || undefined,
+      });
+      if (!res.ok) return res;
+      await rpcClient.updateSettings({ settings: { VLLM_MODEL_PROFILE: "none" } });
+      return res;
     },
-    onSuccess: () => onComplete(),
+    onSuccess: (res) => {
+      if (!res.ok) {
+        setSaveError(res.error ?? "配置失败");
+        return;
+      }
+      onComplete();
+    },
+    onError: (e) => setSaveError(e instanceof Error ? e.message : String(e)),
   });
 
-  const canProceedToCredentials = isCustom ? baseUrl.trim().length > 0 : true;
+  // 「下一步」在这一步不该有前置条件：自定义服务商的地址是在**下一步**填的，
+  // 这里按 baseUrl 是否为空来禁用，等于选了自定义就再也点不动（只有一个"跳过"能出去）。
   const canProceedToTest = baseUrl.trim().length > 0 && modelName.trim().length > 0;
   const steps: RemoteStep[] = ["provider", "credentials", "test"];
 
@@ -166,7 +185,7 @@ export function RemoteFlow({
             })}
           </div>
 
-          <Button disabled={!canProceedToCredentials} onClick={() => setStep("credentials")}>
+          <Button onClick={() => setStep("credentials")}>
             下一步：填入 API Key
             <ArrowRightIcon />
           </Button>
@@ -208,6 +227,16 @@ export function RemoteFlow({
           <div className="flex flex-col gap-1.5">
             <Label htmlFor="apiKey" className="text-xs">
               API Key
+              {/* 直达控制台的密钥页：别让用户自己去翻厂商官网找"API Key 在哪"} */}
+              {!isCustom && provider?.apiKeyUrl && (
+                <button
+                  type="button"
+                  className="ml-1.5 font-normal text-primary hover:underline"
+                  onClick={() => void rpcClient.openGatewayDocs({ url: provider.apiKeyUrl! })}
+                >
+                  获取密钥
+                </button>
+              )}
             </Label>
             <Input
               id="apiKey"
@@ -351,6 +380,13 @@ export function RemoteFlow({
             {saveSettings.isPending && <Spinner data-icon="inline-start" />}
             开始使用
           </Button>
+          {/* 收尾失败（密钥校验没过 / 写库出错）：把原因摆出来，别让按钮像没反应一样 */}
+          {saveError && (
+            <p className="flex items-start gap-1.5 text-xs text-destructive">
+              <XCircleIcon className="mt-0.5 size-3.5 shrink-0" />
+              <span className="min-w-0">{saveError}</span>
+            </p>
+          )}
           <Button variant="ghost" size="sm" className="self-center" onClick={onComplete}>
             跳过 — 直接进入应用
           </Button>

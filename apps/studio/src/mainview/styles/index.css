@@ -281,6 +281,42 @@
 }
 
 /* ------------------------------------------------------------------ */
+/* 对话 — 流式输出时的文字微光（「生成中…」「处理中 · N 秒」）            */
+/* ------------------------------------------------------------------ */
+/* 等的这几秒里界面上别的东西都不动，而行静止的转圈与"卡死"在观感上没区别。
+   只让亮度缓慢流过文字本身：不改宽度、不挪位置，所以它不会带动正在流的正文。 */
+@keyframes chat-shimmer {
+  0% {
+    background-position: 200% 0;
+  }
+  100% {
+    background-position: -200% 0;
+  }
+}
+.chat-shimmer {
+  background-image: linear-gradient(
+    90deg,
+    var(--muted-foreground) 0%,
+    var(--foreground) 50%,
+    var(--muted-foreground) 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: transparent;
+  animation: chat-shimmer 2.4s linear infinite;
+  will-change: background-position;
+}
+/* 减弱动效偏好下退回静止的灰字：宁可少一个效果，也不给"看东西在闪"的人添麻烦。 */
+@media (prefers-reduced-motion: reduce) {
+  .chat-shimmer {
+    animation: none;
+    background-image: none;
+    color: var(--muted-foreground);
+  }
+}
+
+/* ------------------------------------------------------------------ */
 /* 语音合成 — 生成中的动画（跳动的频谱条）                                */
 /* ------------------------------------------------------------------ */
 @keyframes tts-eq {
@@ -295,6 +331,69 @@
 .tts-eq {
   transform-origin: 50% 100%;
   animation: tts-eq 1.1s ease-in-out infinite;
+}
+
+/* ------------------------------------------------------------------ */
+/* 音乐 — 正在播放的跳动条 + 封面唱片旋转                                */
+/* ------------------------------------------------------------------ */
+@keyframes music-eq {
+  0%,
+  100% {
+    transform: scaleY(0.3);
+  }
+  50% {
+    transform: scaleY(1);
+  }
+}
+.music-eq {
+  transform-origin: 50% 100%;
+  animation: music-eq 0.9s ease-in-out infinite;
+}
+
+@keyframes music-disc {
+  to {
+    transform: rotate(360deg);
+  }
+}
+/* 黑胶转盘：8s 一圈 —— 真唱机是 1.8s，但屏幕上转那么快像加载图标；
+   再慢（最初的 16s）一眼看上去又像没在动。
+   暂停用 animation-play-state 停在当前角度，而不是回到 0deg：重播一次整个转回去太跳。 */
+.music-disc {
+  animation: music-disc 8s linear infinite;
+}
+.music-disc[data-paused="true"] {
+  animation-play-state: paused;
+}
+
+/* 播放中在唱片背后慢慢呼吸的一圈光晕：不抢眼，但一眼能看出"在放"。 */
+@keyframes music-halo {
+  0%,
+  100% {
+    opacity: 0.5;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.2;
+    transform: scale(1.045);
+  }
+}
+.music-halo {
+  animation: music-halo 3.6s ease-in-out infinite;
+}
+
+/* 单曲播放页的浮入：从下方轻轻推上来（网易云那个页面也是升起来的）。 */
+@keyframes music-page-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.music-page-in {
+  animation: music-page-in 0.28s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 /* ------------------------------------------------------------------ */

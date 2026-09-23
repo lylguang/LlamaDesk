@@ -281,6 +281,13 @@ export type InstalledModel = {
    * 市场页用它判断"这个文件下过没有"：目录条目只有一条记录，只比 fileName 会漏。
    */
   files?: string[];
+  /**
+   * 同一仓库目录里的非权重文件（config.json / tokenizer / chat_template…）。
+   * 整仓库下载会把它们一起下，"已下载"的判定缺了它们就永远差几个文件。
+   */
+  supportFiles?: string[];
+  /** 模型的上下文窗口长度（从 config.json 解析），未解析时为 undefined。 */
+  contextLength?: number;
 };
 
 /**
@@ -298,6 +305,7 @@ export type ModelCategory =
   | "asr"
   | "image"
   | "video"
+  | "music"
   | "other";
 
 export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string }[] = [
@@ -309,6 +317,7 @@ export const MODEL_CATEGORIES: { value: ModelCategory | "all"; labelKey: string 
   { value: "asr", labelKey: "models.cat.asr" },
   { value: "image", labelKey: "models.cat.image" },
   { value: "video", labelKey: "models.cat.video" },
+  { value: "music", labelKey: "models.cat.music" },
   { value: "other", labelKey: "models.cat.other" },
 ];
 
@@ -330,7 +339,8 @@ export type ModelCategorySet =
   | "tts"
   | "asr"
   | "image"
-  | "video";
+  | "video"
+  | "music";
 
 export const MODEL_CATEGORY_SETS: Record<ModelCategorySet, readonly ModelCategory[]> = {
   chat: ["chat"],
@@ -340,6 +350,7 @@ export const MODEL_CATEGORY_SETS: Record<ModelCategorySet, readonly ModelCategor
   asr: ["asr"],
   image: ["image"],
   video: ["video"],
+  music: ["music"],
 };
 
 /**
@@ -437,6 +448,22 @@ export function classifyModelName(rawName: string): ModelCategory {
     return "asr";
   }
 
+  // 音乐生成：`music` 几乎总在名字里（stepaudio-3-music-preview / music-3.0 /
+  // musicgen / text-to-music），其余是各家开源型号。放在视频 / 生图之前判：
+  // 音乐模型名与它们没有交集，早判只是为了让"下一步要加的音乐型号"不必再回来看顺序。
+  //
+  // 带连字符的家族名必须用 `hasWord`（子串匹配）：`token` 是按非字母数字切出来的，
+  // `ACE-Step` 会变成 `ace` + `step`、`stable-audio` 变成 `stable` + `audio` ——
+  // 用 `has` 判会全部落空（真踩过）。`audio` 单独一条不能收：`qwen-audio` 那类
+  // 语音模型会被误判成音乐。
+  if (
+    hasWord("music") ||
+    has("musicgen", "suno", "udio", "mureka", "acestep", "diffrhythm", "audioldm") ||
+    hasWord("ace-step", "stable-audio", "text-to-music", "text2music")
+  ) {
+    return "music";
+  }
+
   // 文生视频：`t2v` / `i2v` 这类任务后缀最可靠，其次是厂商型号名。
   if (
     hasWord(
@@ -464,7 +491,6 @@ export function classifyModelName(rawName: string): ModelCategory {
   ) {
     return "video";
   }
-
   // 文生图。
   if (
     hasWord(
@@ -899,6 +925,7 @@ export function classifyModel(model: MarketModel): ModelCategory {
     names.some((n) => tags.includes(n) || tags.includes(`task:${n}`) || tags.includes(`custom_tag:${n}`));
 
   // 平台声明的任务类型最准，先按标签定；标签缺失时再退回按名字判断。
+  // 唯一例外：名字判定为嵌入时不被弱 chat 标签压过（见下方插桩点说明）。
   if (hasTag("reranking", "text-ranking", "cross-encoder")) return "rerank";
   if (hasTag("feature-extraction", "sentence-similarity", "text-embedding")) return "embedding";
   if (hasTag("text-to-speech", "audio-generation", "text-to-audio")) return "tts";
@@ -907,9 +934,18 @@ export function classifyModel(model: MarketModel): ModelCategory {
   }
   if (hasTag("text-to-video", "image-to-video", "video-generation")) return "video";
   if (hasTag("text-to-image-synthesis", "text-to-image", "image-to-image")) return "image";
+
+  // 插桩点（image 检查之后、chat 检查之前）：名字判定为嵌入时压制其后的弱 chat
+  // 标签组 —— 平台常给嵌入仓库挂 conversational / text-generation 这类宽泛标签，
+  // 若让弱标签压过嵌入模型名，模型会从嵌入选择器里消失（如 WeMM-Embedding-9B）。
+  // rerank / tts / asr / video / image 等强标签检查都在上方，text-to-image 等强
+  // 标签仍然胜过名字里的 Embedding，不受本规则影响。
+  const byName = classifyModelName(id);
+  if (byName === "embedding") return "embedding";
+
   if (hasTag("text-generation", "image-text-to-text", "chat", "conversational")) return "chat";
 
-  const byName = classifyModelName(id);
+  // 标签没认出、名字认出来了 —— 按名字。
   if (byName !== "other") return byName;
 
   // 名字里没有命名特征、标签也没说清 —— 再看一眼简介里的口语化描述。

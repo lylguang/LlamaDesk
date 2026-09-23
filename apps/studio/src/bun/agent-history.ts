@@ -226,3 +226,49 @@ function assistantMessage(
     timestamp,
   };
 }
+
+/**
+ * 「重新生成」的上下文决策。
+ *
+ * 重新生成 = 删掉这条回答及其之后的一切，再用**同一条**用户消息重跑一遍。要点在于
+ * 那条用户消息**不在删除区间内**（它排在目标回答之前），所以本轮绝不能再写一条 user 行：
+ * 写下去就是同一段任务在历史里出现两遍 —— 界面上两个一模一样的用户气泡，模型侧则
+ * 既在历史里看到它、又在 prompt 里收到它（这正是 dropCurrentPrompt 那条注释警告的形态）。
+ *
+ * 抽成纯函数是为了能单测：`regenerateAgentMessage` 那一层要连上模型才跑得起来，
+ * 而这条规则错一次的代价是"每次重新生成都多一条用户消息"，很难在界面上认出来。
+ */
+/**
+ * 回退到某条消息时要删哪些行（纯函数，理由同 `planRegenerate`）。
+ *
+ * 边界按角色分，这不是随手定的：
+ * - 落在**用户**消息上（「回到这条提问」）：连它一起删。留着它反而别扭 —— 那条提问
+ *   还在历史里，用户改完再发同一件事就会在库里出现两遍（`dropCurrentPrompt` 那条
+ *   注释警告的正是这个形态）。
+ * - 落在**助手**消息上（「保留到这里」）：只删它**后面**的。把这条答案一起删掉，
+ *   「这个回答是对的、后面跑偏了」这个最常见的诉求就没法表达了。
+ *
+ * 抽成纯函数是为了能单测：`revertAgentSession` 那一层要连库跑，而边界错一次
+ * 的代价是「用户明明想保留的那条回答被删了」，在界面上只能靠用户报障才发现。
+ */
+export function planRevertToMessage(
+  history: { id: number; role?: string | null }[],
+  messageId: number,
+): { doomed: number[]; keepTarget: boolean } {
+  const target = history.find((m) => m.id === messageId);
+  const keepTarget = target?.role !== "user";
+  return {
+    doomed: history.filter((m) => (keepTarget ? m.id > messageId : m.id >= messageId)).map((m) => m.id),
+    keepTarget,
+  };
+}
+
+export function planRegenerate(
+  history: { id: number; role?: string | null; content?: string | null }[],
+  messageId: number,
+): { ok: false; error: string } | { ok: true; deleteFromId: number; prompt: string } {
+  const beforeTarget = history.filter((m) => m.id < messageId);
+  const lastUser = [...beforeTarget].reverse().find((m) => m.role === "user");
+  if (!lastUser) return { ok: false, error: "Nothing to regenerate" };
+  return { ok: true, deleteFromId: messageId, prompt: lastUser.content ?? "" };
+}

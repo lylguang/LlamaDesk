@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { readFileSync, statSync } from "fs";
+import { appendFileSync, mkdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { join } from "path";
+// 类型导入会被编译掉，不触发模块求值（模块本体仍由下面的动态 import 在预加载之后求值）。
+import type { AppLogEntry } from "./app-log";
 
 // 用 bunfig 预加载的数据目录（test-preload.ts），不要自己再覆盖 OMNI_DATA_DIR ——
 // 单进程跑全部测试文件时，改 env 会泄漏给同进程的其它文件（model-store、media-tools
@@ -9,12 +11,15 @@ const dataDir = process.env.OMNI_DATA_DIR!;
 
 const {
   appLogDir,
+  appLogFiles,
   appLogInfo,
   appLogPath,
   clearAppLog,
   logEvent,
   readAppLogFiles,
+  readAppLogs,
   readAppLogsInMemory,
+  resolveAppLogFile,
   sanitizeValue,
 } = await import("./app-log");
 
@@ -236,5 +241,145 @@ describe("健壮性", () => {
     clearAppLog();
     const entry = logEvent({ source: "notice" as never, event: "x", message: "y" });
     expect(entry.source).toBe("notice");
+  });
+});
+
+/**
+ * 界面的日志控制台要能翻轮转文件（OPS-01）和每秒跟随最新（OPS-02）。
+ *
+ * 轮转是「文件写到 2MB」才发生的，测试里造不出来，只能自己往日志目录里写几份
+ * `app-<时间戳>.log`；`file` 是指定文件唯一入口，所以越界名字必须被挡住。
+ * 断言里统一按事件名前缀过滤：同一个进程里别的测试文件也会写日志。
+ */
+describe("指定文件与跟随轮询", () => {
+  const ROTATED = "app-2026-01-02T03-04-05-000Z.log";
+  const rotatedPath = (name = ROTATED) => join(appLogDir(), name);
+
+  /** 造一份轮转文件：ts 递增，方便断言 limit 取的是最新的 N 条。 */
+  function writeRotated(name: string, entries: Partial<AppLogEntry>[]): void {
+    mkdirSync(appLogDir(), { recursive: true });
+    const lines = entries.map((entry, i) =>
+      JSON.stringify({
+        seq: i + 1,
+        ts: 1_800_000_000_000 + i,
+        level: "info",
+        source: "app",
+        event: `rot.${i}`,
+        message: `消息 ${i}`,
+        pid: 4242,
+        ...entry,
+      }),
+    );
+    writeFileSync(join(appLogDir(), name), `${lines.join("\n")}\n`);
+  }
+
+  test("能读指定的轮转文件：只看它，内存里的记录不掺进来", () => {
+    clearAppLog();
+    writeRotated(ROTATED, [{ event: "rot.a" }, { event: "rot.b" }]);
+    logEvent({ source: "app", event: "live.entry", message: "内存里的" });
+
+    const listed = appLogFiles().find((f) => f.path === rotatedPath());
+    expect(listed?.rotated).toBe(true);
+    expect(listed?.size).toBeGreaterThan(0);
+
+    const newestFirst = readAppLogFiles({ file: ROTATED });
+    expect(newestFirst.map((e) => e.event)).toEqual(["rot.b", "rot.a"]);
+    expect(newestFirst.every((e) => e.pid === 4242)).toBe(true);
+
+    const fromReadAppLogs = readAppLogs({ file: ROTATED, oldestFirst: true });
+    expect(fromReadAppLogs.map((e) => e.event)).toEqual(["rot.a", "rot.b"]);
+    expect(fromReadAppLogs.some((e) => e.event === "live.entry")).toBe(false);
+  });
+
+  test("轮转文件也分页：limit 取最新的 N 条，oldestFirst 只改显示顺序", () => {
+    clearAppLog();
+    writeRotated(ROTATED, Array.from({ length: 10 }, (_, i) => ({ event: `rot.${i}` })));
+
+    expect(readAppLogFiles({ file: ROTATED, limit: 3 }).map((e) => e.event)).toEqual([
+      "rot.9",
+      "rot.8",
+      "rot.7",
+    ]);
+    expect(
+      readAppLogFiles({ file: ROTATED, limit: 3, oldestFirst: true }).map((e) => e.event),
+    ).toEqual(["rot.7", "rot.8", "rot.9"]);
+  });
+
+  test("越界文件名一律拒绝（不拼路径、不读了才判断），拒绝事件落进日志", () => {
+    clearAppLog();
+    writeRotated(ROTATED, [{ event: "rot.a" }]);
+
+    // `..` 穿越、绝对路径、数据目录里的别的文件、合法但不存在 —— 全部空手而归。
+    expect(resolveAppLogFile("../../omni-studio.db")).toBe(null);
+    expect(resolveAppLogFile("/etc/passwd")).toBe(null);
+    expect(resolveAppLogFile(join(dataDir, "omni-studio.db"))).toBe(null);
+    expect(resolveAppLogFile("app-2020-01-01T00-00-00-000Z.log")).toBe(null);
+    expect(resolveAppLogFile(ROTATED)).toBe(rotatedPath());
+
+    expect(readAppLogFiles({ file: "../../omni-studio.db" })).toEqual([]);
+    expect(readAppLogFiles({ file: "/etc/passwd" })).toEqual([]);
+    expect(readAppLogs({ file: join(dataDir, "omni-studio.db") })).toEqual([]);
+    // 正常那份仍然读得到（拒绝的是名字，不是整个查询）
+    expect(readAppLogs({ file: ROTATED }).map((e) => e.event)).toEqual(["rot.a"]);
+
+    const rejected = readAppLogsInMemory({ event: "app_log.file.rejected" });
+    expect(rejected.length).toBeGreaterThan(0);
+    expect(rejected.map((e) => e.message).join("\n")).toContain("omni-studio.db");
+  });
+
+  test("跟随轮询：since + memoryOnly 只回基线之后的条目，而且不看磁盘", async () => {
+    clearAppLog();
+    logEvent({ source: "app", event: "poll.before", message: "基线之前" });
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const baseline = logEvent({ source: "app", event: "poll.one", message: "1" });
+    logEvent({ source: "app", event: "poll.two", message: "2" });
+
+    const polled = readAppLogs({
+      since: baseline.ts,
+      memoryOnly: true,
+      oldestFirst: true,
+      limit: 100,
+    });
+    const events = polled.filter((e) => e.event.startsWith("poll.")).map((e) => e.event);
+    expect(events).toEqual(["poll.one", "poll.two"]); // 基线自身按 >= 语义带回来，界面按 pid:seq 去重
+    expect(events).not.toContain("poll.before");
+
+    // 只读内存 = 磁盘上「不属于本进程」的条目不会被翻出来（这正是轮询便宜的原因）。
+    appendFileSync(
+      appLogPath(),
+      `${JSON.stringify({
+        seq: 1,
+        ts: Date.now(),
+        level: "error",
+        source: "app",
+        event: "poll.fileonly",
+        message: "只在文件里",
+        pid: 1,
+      })}\n`,
+    );
+    expect(readAppLogFiles({ event: "poll.fileonly" })).toHaveLength(1);
+    expect(readAppLogs({ since: 0, memoryOnly: true, event: "poll.fileonly" })).toHaveLength(0);
+  });
+
+  test("应用启动前就写好的 app.log 也读得到（内存不够 limit 时补磁盘）", () => {
+    clearAppLog();
+    // 上次运行留下的 app.log：直接写盘、不进内存 —— 模拟「文件比进程老」。
+    writeFileSync(
+      appLogPath(),
+      `${JSON.stringify({
+        seq: 500,
+        ts: Date.now() - 60_000,
+        level: "info",
+        source: "app",
+        event: "prerun.entry",
+        message: "上次运行",
+        pid: 99,
+      })}\n`,
+    );
+    logEvent({ source: "app", event: "thisrun.entry", message: "本次运行" });
+
+    const all = readAppLogs({ limit: 100 }).filter((e) => e.event.endsWith("run.entry"));
+    expect(all.map((e) => e.event)).toEqual(["thisrun.entry", "prerun.entry"]);
+    expect(all.map((e) => e.pid)).toEqual([process.pid, 99]);
   });
 });

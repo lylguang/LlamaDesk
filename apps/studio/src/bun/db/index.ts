@@ -2,7 +2,7 @@ import { drizzle } from "drizzle-orm/bun-sqlite";
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { Database } from "bun:sqlite";
 import { join } from "path";
-import { appendFileSync, copyFileSync, mkdirSync, existsSync, readdirSync, renameSync, rmSync, statSync } from "fs";
+import { appendFileSync, copyFileSync, mkdirSync, existsSync, readFileSync, readdirSync, renameSync, rmSync, statSync } from "fs";
 import * as schema from "./schema";
 import { getDataDir } from "../paths";
 import { logEvent } from "../app-log";
@@ -103,6 +103,152 @@ function logMigrateFailure(error: unknown): void {
 }
 
 backupBeforeMigrate();
+
+/**
+ * 迁移前自愈：按 hash 把已应用迁移行的 created_at 对齐到归真后的 journal 时间戳。
+ *
+ * 历史问题：0029 之前的 journal `when` 是伪造的**未来**时间戳（递增整数序列，最大
+ * ≈2026-09-22），而 drizzle 迁移器判断「是否需要应用」只比较 `已应用行的最大
+ * created_at < 待应用迁移的 when`，从不校验 hash —— 0029 用真实时间戳（≈2026-09-14）
+ * 生成后小于库里的伪造值，每次启动都被判定「已应用过」而静默跳过，新列永远建不出
+ * （线上表现：新建知识库 INSERT 报 no such column，界面点击无响应）。
+ *
+ * journal 的 when 已随修复归真（见 _journal.json 与提交说明）；这里把既有库中已应用
+ * 行的 created_at 同步成归真值，让比较基准恢复真实时序。幂等：值一致的行不动；全新
+ * 库（表不存在）直接返回，交给 migrate 顺序应用。
+ */
+function normalizeMigrationTimestamps(): void {
+  try {
+    const hasTable = sqlite
+      .query("select 1 from sqlite_master where type='table' and name='__drizzle_migrations'")
+      .get();
+    if (!hasTable) return;
+    const journalPath = join(migrationsFolder, "meta", "_journal.json");
+    if (!existsSync(journalPath)) return;
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { tag: string; when: number }[];
+    };
+    const rows = sqlite
+      .query("SELECT hash, created_at FROM __drizzle_migrations")
+      .all() as { hash: string; created_at: number | string }[];
+    let fixed = 0;
+    for (const entry of journal.entries) {
+      const sqlPath = join(migrationsFolder, `${entry.tag}.sql`);
+      if (!existsSync(sqlPath)) continue;
+      const hash = new Bun.CryptoHasher("sha256").update(readFileSync(sqlPath)).digest("hex");
+      const row = rows.find((r) => r.hash === hash);
+      if (row && Number(row.created_at) !== entry.when) {
+        sqlite.run("UPDATE __drizzle_migrations SET created_at = ? WHERE hash = ?", [
+          entry.when,
+          hash,
+        ]);
+        fixed += 1;
+      }
+    }
+    if (fixed > 0) {
+      logEvent({
+        level: "warn",
+        source: "app",
+        event: "db.migrate.timestamps_normalized",
+        message: `已按归真后的 journal 修正 ${fixed} 条迁移记录时间戳（修复伪造时间戳导致新迁移被静默跳过的问题）`,
+      });
+    }
+  } catch (e) {
+    // 修正失败不阻断启动：迁移若真因时间戳错乱被跳过，后续功能报错会引导查日志。
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "db.migrate.normalize_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+/**
+ * 迁移前自愈的第二半：把「时间戳够不着」的迁移补上。
+ *
+ * drizzle 只拿库里**最大** created_at 当比较基准（`sqlite-core/dialect.js` 里读一次
+ * `ORDER BY created_at DESC LIMIT 1`，循环里不再更新），所以一条迁移只要 when 不高于
+ * 那一刻的最大值，就永远不会被应用。上面把伪造时间戳归真之后，**排在伪造值之后的
+ * 迁移反而变成够不着的那条**：
+ *
+ * 合并 main 时，本机 canary 库把三条音乐迁移按伪造时间戳（≈2026-09-22）应用过，而
+ * main 的多模态六列迁移 when 是真实时间（2026-09-15）—— 音乐迁移归真到 2026-09-16
+ * 之后，六列迁移的 when 仍低于库里的最大值，于是在这些库上被永久跳过（又回到
+ * 「知识库多模态报 no such column」）。这里按 hash 找出「when 不高于库内最大值、却
+ * 没有应用记录」的迁移，就地补跑它的 SQL 并记账 —— 等价于时间戳没骗过迁移器时它
+ * 本来会做的事，幂等：补过之后 hash 就在库里，下次启动不再命中。
+ *
+ * 只处理 idx > 12（与 migrations-smoke 同一条历史边界）：0006/0007 的 when 小于前一条
+ * 是历史遗留，且所有发布版本都按数组顺序应用过它们，不去碰那一段。
+ */
+const LEGACY_MAX_IDX = 12;
+
+function repairUnreachableMigrations(): void {
+  try {
+    const hasTable = sqlite
+      .query("select 1 from sqlite_master where type='table' and name='__drizzle_migrations'")
+      .get();
+    if (!hasTable) return;
+    const journalPath = join(migrationsFolder, "meta", "_journal.json");
+    if (!existsSync(journalPath)) return;
+    const journal = JSON.parse(readFileSync(journalPath, "utf8")) as {
+      entries: { idx: number; tag: string; when: number }[];
+    };
+    const rows = sqlite
+      .query("SELECT hash, created_at FROM __drizzle_migrations")
+      .all() as { hash: string; created_at: number | string }[];
+    if (rows.length === 0) return;
+    const maxApplied = Math.max(...rows.map((r) => Number(r.created_at)));
+    const applied = new Set(rows.map((r) => r.hash));
+
+    const unreachable: { tag: string; when: number; hash: string; sql: string[] }[] = [];
+    for (const entry of journal.entries) {
+      if (entry.idx <= LEGACY_MAX_IDX) continue;
+      if (entry.when > maxApplied) continue; // 正常升级路径：交给 migrate 顺序应用
+      const sqlPath = join(migrationsFolder, `${entry.tag}.sql`);
+      if (!existsSync(sqlPath)) continue;
+      const raw = readFileSync(sqlPath, "utf8");
+      const hash = new Bun.CryptoHasher("sha256").update(raw).digest("hex");
+      if (applied.has(hash)) continue;
+      unreachable.push({
+        tag: entry.tag,
+        when: entry.when,
+        hash,
+        sql: raw.split("--> statement-breakpoint").map((s) => s.trim()).filter(Boolean),
+      });
+    }
+    if (unreachable.length === 0) return;
+
+    sqlite.transaction(() => {
+      for (const m of unreachable) {
+        for (const stmt of m.sql) sqlite.run(stmt);
+        sqlite.run('INSERT INTO __drizzle_migrations ("hash", "created_at") VALUES (?, ?)', [
+          m.hash,
+          m.when,
+        ]);
+      }
+    })();
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "db.migrate.repaired",
+      message: `已补跑 ${unreachable.length} 条被时间戳挡在门外的迁移：${unreachable.map((m) => m.tag).join(", ")}`,
+      detail: { tags: unreachable.map((m) => m.tag), maxApplied },
+    });
+  } catch (e) {
+    // 补跑失败不阻断启动：与时间戳归真同一策略，功能真缺列时会引导查日志。
+    logEvent({
+      level: "warn",
+      source: "app",
+      event: "db.migrate.repair_failed",
+      message: e instanceof Error ? e.message : String(e),
+    });
+  }
+}
+
+normalizeMigrationTimestamps();
+repairUnreachableMigrations();
 try {
   migrate(db, { migrationsFolder });
 } catch (e) {

@@ -5,6 +5,7 @@ import {
   CheckIcon,
   ChevronRightIcon,
   CopyIcon,
+  NotebookPenIcon,
   FilesIcon,
   GitBranchIcon,
   Loader2Icon,
@@ -17,12 +18,14 @@ import { rpcClient } from "@lib/rpc";
 import { Markdown } from "@components/markdown";
 import { usePiContextMenu, actionMenuItems, type MessageActionItem } from "@components/pi-menu";
 import { MessageTokenStats, formatDuration, useTokenStatsView } from "@components/token-stats";
+import { noteDraftFromMessage } from "@/mainview/lib/note-draft";
 import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { AgentEventTimeline } from "./timeline";
 import { flushedTextChars } from "./timeline-model";
 import { RevertTurnDialog } from "./revert-dialog";
+import { ConversationRevertDialog } from "./conversation-revert-dialog";
 import { ARTIFACT_KIND_LABEL, artifactIcon, formatSize } from "./artifact-meta";
 import type { ArtifactItem } from "../../../bun/agent-artifacts";
 import type { AgentEventRow } from "../../../bun/agent";
@@ -239,6 +242,8 @@ function useMessageActions({
   const streaming = useChatStore((s) => s.streaming);
   const { copied, copy } = useCopyMessage(message.content);
   const [revertOpen, setRevertOpen] = useState(false);
+  const [conversationRevertOpen, setConversationRevertOpen] = useState(false);
+  const [noteSaved, setNoteSaved] = useState(false);
 
   const invalidate = () => {
     queryClient.invalidateQueries({ queryKey: ["conversations"] });
@@ -285,6 +290,36 @@ function useMessageActions({
     },
   });
 
+  /** 一键存进「笔记」小应用：草稿规则与聊天页同一份（`lib/note-draft.ts`）。 */
+  const handleSaveToNote = async () => {
+    const draft = noteDraftFromMessage(message.content, t("notes.tagAgent"));
+    if (!draft) return;
+    try {
+      const saved = await rpcClient.miniappNotesSave({
+        title: draft.title,
+        body: draft.body,
+        tags: draft.tags,
+        day: draft.day,
+      });
+      setNoteSaved(true);
+      window.setTimeout(() => setNoteSaved(false), 1500);
+      void rpcClient.miniappLog({
+        appId: "agent",
+        event: "note.saved",
+        message: saved?.note ? `note #${saved.note.id}` : "saved",
+        detail: { chars: draft.body.length, tag: draft.tags[0] },
+      });
+    } catch (e) {
+      // 失败不打断阅读（按钮不亮即已说明问题），但必须留下线索：
+      // 这是"点了没反应"里最难查的一类 —— 用户以为存进去了，其实没有。
+      void rpcClient.miniappLog({
+        appId: "agent",
+        event: "note.save_failed",
+        message: e instanceof Error ? e.message : String(e),
+      });
+    }
+  };
+
   const isAssistant = message.role === "assistant";
   // 生成中一律不可点：删到一半的消息、重新生成正在跑的那条都没有意义。
   const busy = streaming || isStreamingMessage;
@@ -302,6 +337,17 @@ function useMessageActions({
     },
     ...(isAssistant
       ? [
+          {
+            key: "save-to-note",
+            label: noteSaved ? t("chat.savedToNote") : t("chat.saveToNote"),
+            icon: noteSaved ? (
+              <CheckIcon size={14} style={{ color: "var(--ds-success)" }} />
+            ) : (
+              <NotebookPenIcon size={14} />
+            ),
+            onSelect: () => void handleSaveToNote(),
+            disabled: busy || !message.content,
+          },
           {
             key: "regenerate",
             label: t("chat.regenerate"),
@@ -324,8 +370,25 @@ function useMessageActions({
             onSelect: () => forkMutation.mutate(),
             disabled: busy,
           },
+          {
+            // 助手消息上的语义是「保留这条，砍掉后面的」：常见于"这个回答对了，后面几轮跑偏"。
+            key: "keep-here",
+            label: t("chat.keepHere"),
+            icon: <Undo2Icon size={14} />,
+            onSelect: () => setConversationRevertOpen(true),
+            disabled: busy,
+          },
         ]
-      : []),
+      : [
+          {
+            // 用户消息上则是「回到这条提问」：连它一起删，正文回填输入框。
+            key: "back-to-prompt",
+            label: t("chat.backToPrompt"),
+            icon: <Undo2Icon size={14} />,
+            onSelect: () => setConversationRevertOpen(true),
+            disabled: busy,
+          },
+        ]),
     ...(isAssistant && snapshot
       ? [
           {
@@ -363,7 +426,23 @@ function useMessageActions({
       />
     ) : null;
 
-  return { actions, revertDialog };
+  // 「回退对话到这里」：同样先确认再执行（它删的是历史，撤销不回来）。
+  const conversationRevertDialog = (
+    <ConversationRevertDialog
+      open={conversationRevertOpen}
+      onOpenChange={setConversationRevertOpen}
+      conversationId={conversationId}
+      messageId={message.id}
+      isUserMessage={!isAssistant}
+      onReverted={(prompt) => {
+        if (prompt) useChatStore.getState().setPendingPrompt(prompt);
+        queryClient.invalidateQueries({ queryKey: ["agent-session-messages", conversationId] });
+        invalidate();
+      }}
+    />
+  );
+
+  return { actions, revertDialog, conversationRevertDialog };
 }
 
 /** 操作条：复制 / 重新生成 / 分叉 / 撤销本轮 / 删除 + 用量胶囊（动作与右键菜单同源）。 */
@@ -373,6 +452,7 @@ function MessageActionBar({
   conversationId,
   isStreamingMessage,
   revertDialog,
+  conversationRevertDialog,
 }: {
   actions: MessageAction[];
   message: ChatMessage;
@@ -380,6 +460,7 @@ function MessageActionBar({
   isStreamingMessage: boolean;
   /** 「撤销本轮」的确认弹窗（每操作条渲染一次 —— Radix 弹窗不能挂两份）。 */
   revertDialog?: ReactNode;
+  conversationRevertDialog?: ReactNode;
 }) {
   return (
     <div className="msg-actions">
@@ -404,6 +485,7 @@ function MessageActionBar({
         className="ml-auto mr-1"
       />
       {revertDialog}
+      {conversationRevertDialog}
     </div>
   );
 }
@@ -503,7 +585,7 @@ export function AgentAssistantMessage({
   const liveStartedAt = useChatStore((s) => (streaming ? s.liveStats[message.id]?.startedAt : undefined));
   const runStartAt = liveStartedAt ?? events[0]?.createdAt ?? (streaming ? message.createdAt : undefined);
   // 操作条与右键菜单是同一批动作的两个入口（清单在 useMessageActions 里）。
-  const { actions, revertDialog } = useMessageActions({
+  const { actions, revertDialog, conversationRevertDialog } = useMessageActions({
     message,
     conversationId,
     isStreamingMessage: streaming,
@@ -619,6 +701,7 @@ export function AgentAssistantMessage({
           conversationId={conversationId}
           isStreamingMessage={streaming}
           revertDialog={revertDialog}
+          conversationRevertDialog={conversationRevertDialog}
         />
       </div>
       {menu.node}

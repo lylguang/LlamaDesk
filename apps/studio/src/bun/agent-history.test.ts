@@ -10,6 +10,8 @@ import {
   dropCurrentPrompt,
   MAX_HISTORY_TOOL_RESULT_CHARS,
   pairToolEvents,
+  planRegenerate,
+  planRevertToMessage,
 } from "./agent-history";
 
 const meta = { model: "test-model", provider: "llama-desk", api: "openai-completions" };
@@ -191,5 +193,93 @@ describe("建会话时的历史回填", () => {
     ];
     expect(dropCurrentPrompt(rows)).toHaveLength(2);
     expect(dropCurrentPrompt([])).toHaveLength(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 重新生成的上下文决策。
+//
+// 踩过的坑：这条路径忘了告诉 runAgentTurn「用户消息已经在库里」，于是每次重新生成都
+// 再插一条同样的 user 行 —— 界面上两个一样的用户气泡，模型历史里同一段任务出现两遍
+// （旧的 user 行 + prompt）。这条规则以前没有任何测试，因为 regenerateAgentMessage
+// 那一层要连模型才跑得起来。
+// ---------------------------------------------------------------------------
+describe("planRegenerate", () => {
+  const rows = [
+    { id: 1, role: "user", content: "帮我看看这个 bug" },
+    { id: 2, role: "assistant", content: "第一版回答" },
+    { id: 3, role: "user", content: "换个思路" },
+    { id: 4, role: "assistant", content: "第二版回答" },
+  ];
+
+  test("删掉目标回答及其之后的一切，prompt 取它前面那条用户消息", () => {
+    const plan = planRegenerate(rows, 4);
+    expect(plan).toEqual({ ok: true, deleteFromId: 4, prompt: "换个思路" });
+    // 4 号是最后一条：删除区间只有它自己
+    expect(rows.filter((m) => m.id >= 4).map((m) => m.id)).toEqual([4]);
+  });
+
+  test("目标是中间那条回答：它之后的问答一起删（重跑就是重开这一段）", () => {
+    const plan = planRegenerate(rows, 2);
+    expect(plan).toEqual({ ok: true, deleteFromId: 2, prompt: "帮我看看这个 bug" });
+    expect(rows.filter((m) => m.id >= 2).map((m) => m.id)).toEqual([2, 3, 4]);
+  });
+
+  test("被复用的用户消息**不在**删除区间内 —— 所以本轮不能再插一条 user 行", () => {
+    const plan = planRegenerate(rows, 4);
+    if (!plan.ok) throw new Error("应当能规划出方案");
+    const promptRowId = 3;
+    // 这条不变量就是那个 bug 的根：prompt 的来源行必须活着，调用方据此传
+    // insertUserMessage: false。
+    expect(promptRowId).toBeLessThan(plan.deleteFromId);
+    expect(rows.some((m) => m.id === promptRowId && m.content === plan.prompt)).toBe(true);
+  });
+
+  test("目标回答之前没有用户消息：明确报错，不瞎猜", () => {
+    expect(planRegenerate([{ id: 1, role: "assistant", content: "孤儿回答" }], 1)).toEqual({
+      ok: false,
+      error: "Nothing to regenerate",
+    });
+  });
+
+  test("同一段历史连跑两次结果一致（纯函数，不留状态）", () => {
+    expect(planRegenerate(rows, 4)).toEqual(planRegenerate(rows, 4));
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 「回退到这里」的删除边界（OW-12）
+//
+// 与 planRegenerate 同一类问题：边界错一次的代价在界面上看不出来 ——
+// 用户点「保留到这里」却发现那条回答也没了，或者点「回到这条提问」却发现
+// 那条提问还留在历史里（改一改再发，库里就有两遍）。
+// ---------------------------------------------------------------------------
+describe("planRevertToMessage", () => {
+  const rows = [
+    { id: 1, role: "user" },
+    { id: 2, role: "assistant" },
+    { id: 3, role: "user" },
+    { id: 4, role: "assistant" },
+    { id: 5, role: "user" },
+  ];
+
+  test("落在助手消息上：保留这条，删它后面的（keepTarget = true）", () => {
+    expect(planRevertToMessage(rows, 2)).toEqual({ doomed: [3, 4, 5], keepTarget: true });
+    expect(planRevertToMessage(rows, 4)).toEqual({ doomed: [5], keepTarget: true });
+  });
+
+  test("落在用户消息上：连它一起删（那条提问要回填输入框重打）", () => {
+    expect(planRevertToMessage(rows, 3)).toEqual({ doomed: [3, 4, 5], keepTarget: false });
+    expect(planRevertToMessage(rows, 1)).toEqual({ doomed: [1, 2, 3, 4, 5], keepTarget: false });
+  });
+
+  test("最后一条助手消息：没有可删的（调用方据此报「没什么可回退的」）", () => {
+    const last = [...rows, { id: 6, role: "assistant" }];
+    expect(planRevertToMessage(last, 6).doomed).toEqual([]);
+  });
+
+  test("角色写的是别的值（tool / 空）时按助手处理：保守地保留目标那条", () => {
+    const odd = [{ id: 1, role: "user" }, { id: 2, role: null }, { id: 3, role: "user" }];
+    expect(planRevertToMessage(odd, 2)).toEqual({ doomed: [3], keepTarget: true });
   });
 });

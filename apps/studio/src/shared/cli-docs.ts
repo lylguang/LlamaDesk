@@ -226,8 +226,8 @@ export const CLI_SECTIONS: CliSection[] = [
     entries: [
       {
         cmd: "omi models",
-        zh: "一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。",
-        en: "List installed local models (name, size, kind, active flag) together with cloud models.",
+        zh: "一次列出本地已装模型（名称 / 大小 / 类型 / 是否活动）与云端模型。云端段按厂商分组，列出**所有已启用**厂商的模型（不限默认那家），默认厂商带 `● 默认` 标记 —— 这些 id 都能直接喂给 `omi launch --model`。",
+        en: "List installed local models (name, size, kind, active flag) together with cloud models. The cloud section is grouped by provider and covers **every enabled** provider (not just the default one), with the default one marked — all of these ids work with `omi launch --model`.",
         examples: [{ cmd: "omi models", zh: "脚本里取模型名：与 omi model --list 等价。", en: "Same data as omi model --list, handy in scripts." }],
       },
       {
@@ -257,6 +257,41 @@ export const CLI_SECTIONS: CliSection[] = [
         zh: "在启动服务器 / 启动编码工具时直接指定模型：已装模型名、文件名、绝对路径或云端模型 id 都可以。省略时会自动选（只有一个模型）或弹出选择。",
         en: "Pin the model while starting a server or a coding tool: an installed name, file name, absolute path or cloud model id all work. Omitted, omi auto-selects when there is exactly one model, otherwise it asks.",
       },
+      {
+        cmd: "POST /v1/embeddings",
+        zh:
+          "嵌入服务（网关端点，应用在运行时可用）：OpenAI Embeddings 兼容，代理「运行中的嵌入实例」。" +
+          "先在模型页把嵌入类模型的类别设为「嵌入 Embedding」并启动，llama-server 会自动附加 --embeddings --pooling 以嵌入模式服务，监听嵌入端口段（EMBEDDING_PORT，默认 18190，段内顺延）。",
+        en:
+          "Embedding serving (a gateway endpoint, available while the app runs): OpenAI Embeddings compatible, proxying the running embedding instance. " +
+          "Set an installed model's category to Embedding in Models and start it; llama-server automatically adds --embeddings --pooling and listens on the embedding port segment (EMBEDDING_PORT, default 18190).",
+        notes: [
+          {
+            zh: "网关无运行实例时返回 503 与启动引导；经网关沿用网关 Key 与 Origin/Host 防线，直连实例无鉴权。",
+            en: "With no running instance the gateway returns 503 plus a startup hint; going through the gateway keeps its key and Origin/Host defenses, while the direct instance has no auth.",
+          },
+          {
+            zh: "llama-server 忽略请求里的 model 字段（只服务启动时加载的模型）；本地实例会忽略收到的 Authorization 头，无害。",
+            en: "llama-server ignores the request's model field (it only serves the model it was started with); the local instance also ignores any Authorization header, harmlessly.",
+          },
+          {
+            zh: "知识库「接口地址」留空时，嵌入 base 按 显式地址 > 运行中嵌入实例 > 云端 remote（VLLM_API_BASE）> 聊天活动端口 回退解析。",
+            en: "With the knowledge base URL left empty, the embedding base resolves by fallback: explicit URL > running embedding instance > cloud remote (VLLM_API_BASE) > active chat port.",
+          },
+        ],
+        examples: [
+          {
+            cmd: `curl http://127.0.0.1:10000/v1/embeddings -H "Content-Type: application/json" -d '{"input": ["第一条", "第二条"]}'`,
+            zh: "经网关向量化：无运行实例时返回 503；设了网关 Key 时加 -H \"Authorization: Bearer <key>\"。",
+            en: `Vectorize via the gateway: 503 when no instance runs; add -H "Authorization: Bearer <key>" when a gateway key is set.`,
+          },
+          {
+            cmd: `curl http://127.0.0.1:18190/v1/embeddings -H "Content-Type: application/json" -d '{"input": "要向量化的文本"}'`,
+            zh: "直连嵌入实例：实际端口以应用「服务器」页为准（段内被占会顺延）。",
+            en: "Vectorize against the instance directly; the actual port is shown on the app's Server page (it shifts within the segment when taken).",
+          },
+        ],
+      },
     ],
   },
   {
@@ -267,14 +302,29 @@ export const CLI_SECTIONS: CliSection[] = [
     descEn: "Run a throughput benchmark for the active model (or a cloud provider model); results land in the app's benchmark history.",
     entries: [
       {
-        cmd: "omi benchmark [model] [--contexts 1024,4096] [--gen 128] [--batch 1]",
-        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位，--gen / --batch 调生成长度与并发。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
-        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes, --gen / --batch tune generation length and concurrency. Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
+        cmd: "omi benchmark [model] [--contexts 1024,4096] [--batches 1,2,4] [--gen 128] [--cache cold,partial,warm]",
+        zh: "跑基准测速：默认测当前活动模型，给个模型名 / 服务名换目标；--contexts 选要测的上下文档位（128 ~ 1M，认 8k / 1m 这种后缀），--batches 一次扫多个并发档（--batch N 是单个的简写），--gen 调生成长度，--cache 选缓存场景（cold 冷启不命中 / partial 部分命中 / warm 完全命中，默认三种都测）。扫描按 档位 × 并发 × 缓存 全组合展开，末尾按并发分开给出数字（不同并发的吞吐不可比）。应用没运行时在本进程直接跑（结果写同一份库），Ctrl+C 取消本次测试。",
+        en: "Run a benchmark: the active model by default, or the given model / served name; --contexts picks the context sizes (128 to 1M, k / m suffixes accepted), --batches sweeps several concurrency levels at once (--batch N is the single-value shorthand), --gen tunes generation length, --cache picks the prompt-cache scenarios (cold miss / partial hit / warm hit; all three by default). The sweep expands every context × concurrency × cache combination, and the summary breaks the numbers down per concurrency level (throughput across levels is not comparable). Runs in-process when the app isn't running (same database); Ctrl+C cancels the current run.",
         examples: [
           {
             cmd: "omi benchmark --contexts 1024,4096,8192 --gen 128",
             zh: "只测 1K / 4K / 8K 三档，每次生成 128 token。",
             en: "Benchmark 1K / 4K / 8K only, generating 128 tokens per request.",
+          },
+          {
+            cmd: "omi benchmark --contexts 32k --batches 1,2,4,8 --cache cold",
+            zh: "并发扫描：同一档位下扫 ×1 / ×2 / ×4 / ×8，得到「单流变慢多少、聚合快多少」的曲线。",
+            en: "Concurrency sweep: measure ×1 / ×2 / ×4 / ×8 at one context size to see how much per-stream speed drops while aggregate throughput rises.",
+          },
+          {
+            cmd: "omi benchmark --contexts 8k,32k,128k,1m --gen 64",
+            zh: "长上下文扫描：一路测到 1M（档位越大单档越久，本地机器上 1M 档要几十分钟）；超出服务端窗口的档位会被拒绝，之后更大的档位自动跳过。",
+            en: "Long-context sweep up to 1M (later steps take far longer — a 1M step runs for tens of minutes locally). Steps beyond the server's window are rejected, and the remaining larger steps are then skipped.",
+          },
+          {
+            cmd: "omi benchmark --contexts 32k --cache cold,warm",
+            zh: "只比缓存：同一档位冷启与完全命中各测一遍，末尾给出倍数与服务端自报的复用比例（×1 附近 = 服务端根本没吃到前缀缓存）。",
+            en: "Cache comparison only: measure 32k cold and warm, then print the speedup and the server-reported reuse ratio (near ×1 means the server never hit its prefix cache).",
           },
         ],
       },
@@ -430,6 +480,16 @@ export const CLI_SECTIONS: CliSection[] = [
         notes: [
           { zh: "工具参数用 `--` 透传，例如 omi launch claude -- --resume。", en: "Pass tool arguments after `--`, e.g. omi launch claude -- --resume." },
           { zh: "本地模型走本地推理服务器，云端 id 走云端 API；网关负责 Anthropic ↔ OpenAI 协议翻译。", en: "Local models go to the local server, cloud ids to the cloud API; the gateway translates Anthropic ↔ OpenAI." },
+          {
+            zh:
+              "`--model` 的云端 id 按「设置 → 云端模型」里**所有已启用**厂商匹配（与 GUI 模型选择器同一份清单）。" +
+              "模型不属于当前默认厂商时，会自动把默认厂商切过去并打印一行提示 —— 网关只往默认厂商发云端请求；" +
+              "厂商没启用时直接指出是哪一家，而不是报一句「未找到模型」。",
+            en:
+              "A cloud id is matched against every **enabled** provider (the same list the GUI picker shows). " +
+              "When the model belongs to another provider, omi switches the default provider and says so — the gateway only sends cloud traffic to the default provider. " +
+              "A model on a disabled provider is named explicitly instead of a bare \"model not found\".",
+          },
         ],
         examples: [
           { cmd: "omi launch --list", zh: "列出支持的工具与各自的协议。", en: "List supported tools and their protocols." },
@@ -437,6 +497,11 @@ export const CLI_SECTIONS: CliSection[] = [
           { cmd: "omi launch claude --opus <模型> --haiku <模型>", zh: "Claude Code 三个档位分别指定模型。", en: "Give Claude Code's three tiers separate models." },
           { cmd: "omi launch codex --model qwen3-4b-q4_k_m", zh: "按服务名指定模型。", en: "Pick the model by served name." },
           { cmd: "omi launch opencode", zh: "opencode 走内联 provider 配置，不改用户的全局配置。", en: "opencode uses inline provider config, leaving global config untouched." },
+          {
+            cmd: "omi launch chatgpt  ·  omi launch chatgpt --restore",
+            zh: "把当前模型接进 ChatGPT 桌面端（Codex）并打开客户端；--restore 还原 ~/.codex。",
+            en: "Wire the current model into the ChatGPT desktop app (Codex) and open it; --restore puts ~/.codex back.",
+          },
         ],
       },
       {
@@ -449,8 +514,13 @@ export const CLI_SECTIONS: CliSection[] = [
           "opencode uses OPENCODE_CONFIG_CONTENT; openclaw writes ~/.openclaw/openclaw.json; hermes writes ~/.hermes/config.yaml; pi writes ~/.pi/agent/*.json; copilot uses environment variables.",
         notes: [
           {
-            zh: "chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml），然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。",
-            en: "chatgpt rewrites ~/.codex/config.toml (backed up to ~/.codex/backup-omni/config.toml on first write) and opens the desktop app; quit ChatGPT fully (⌘Q) so it re-reads the config.",
+            zh:
+              "chatgpt 会改写 ~/.codex/config.toml（首次改写前备份到 ~/.codex/backup-omni/config.toml）并写 models.json，" +
+              "然后打开桌面客户端；请先完全退出 ChatGPT（⌘Q）再让它重读配置。" +
+              "`omi launch chatgpt --restore` 还原到改写前。",
+            en:
+              "chatgpt rewrites ~/.codex/config.toml (backed up to ~/.codex/backup-omni/config.toml on first write) plus models.json, then opens the desktop app; " +
+              "quit ChatGPT fully (⌘Q) so it re-reads the config. `omi launch chatgpt --restore` puts the original config back.",
           },
           {
             zh: "每次启动的模型 / 端点记录在 ~/.omni/launcher/<工具>.json，方便排查。",

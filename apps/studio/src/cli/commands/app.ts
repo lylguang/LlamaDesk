@@ -28,8 +28,9 @@ export async function cmdStart(parsed: ParsedArgs) {
   console.log("LlamaDesk 已启动。");
 
   if (goCloud) {
-    await controlRequest("navigate", { path: "settings" });
-    console.log("已在应用里打开“设置 → 云端”配置页。");
+    // 设置 →「云端模型」：厂商与密钥都在那儿，别只说"设置"让人自己找。
+    await controlRequest("navigate", { path: "settings", tab: "cloud" });
+    console.log("已在应用里打开“设置 → 云端模型”配置页。");
   } else if (goModels) {
     await controlRequest("navigate", { path: "models" });
     console.log("已在应用里打开模型列表，请选择模型。");

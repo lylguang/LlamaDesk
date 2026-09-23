@@ -6,7 +6,7 @@ import { join } from "path";
 import type { CloudModelType, CloudProviderInfo } from "../shared/cloud-providers";
 import type { ModelCategory, ModelFileKind, ModelOrigin } from "../shared/modelscope";
 import type { ServerStatus } from "./runtimes/types";
-import { mockModulePartial } from "./test-mocks";
+import { installFetchRouter, mockModulePartial } from "./test-mocks";
 
 /**
  * 对话模型列表的三条硬要求（用户直接提的）：
@@ -146,6 +146,7 @@ type FakeProvider = {
 const asProviderInfo = (p: FakeProvider): CloudProviderInfo => ({
   vendor: "",
   videoApi: "",
+  musicApi: "",
   createdAt: 0,
   updatedAt: 0,
   enabled: false,
@@ -185,6 +186,8 @@ const repoDir = join(tmpDir, "repo");
 mkdirSync(repoDir, { recursive: true });
 
 const originalFetch = globalThis.fetch;
+/** 换掉全局 fetch 但**放行本机回环**：同批次别的文件正在用真 fetch 打本地假服务端。 */
+const setFetch = installFetchRouter();
 let fetchedUrls: string[] = [];
 
 beforeEach(async () => {
@@ -203,10 +206,10 @@ beforeEach(async () => {
   SETTINGS.SERVER_PORT = "18600";
   SETTINGS.VLLM_PORT = "18601";
   SETTINGS.VLLM_API_KEY = "EMPTY";
-  globalThis.fetch = mock(async (url: unknown) => {
+  setFetch(mock(async (url: unknown) => {
     fetchedUrls.push(String(url));
     return new Response(JSON.stringify({ data: [{ id: "live-model" }] }), { status: 200 });
-  }) as never;
+  }) as never);
 });
 
 afterAll(async () => {
@@ -402,6 +405,11 @@ describe("listChatModels 的云端条目", () => {
           { id: "doubao-seedance-1-0-lite-t2v-250428" },
           // 显式标了用途的以标注为准：名字像对话的生视频模型也不能进对话列表。
           { id: "omni-chat-video-edition", type: "video" },
+          // 实时语音（`*-realtime-*`）自动识别落在 other，而 other 是**保留**的：
+          // 它在对话页被选中后只会在发消息时被上游拒掉。实时语音在通话页选。
+          { id: "stepaudio-3-realtime-preview", type: "other" },
+          { id: "stepaudio-2.5-realtime" },
+          { id: "qwen-audio-3.0-realtime-plus" },
           // 反过来，明确标成对话的照常保留（自建 / 微调的模型名往往认不出来）。
           { id: "my-private-llm", type: "chat" },
           { id: "my-model-7b" },

@@ -19,6 +19,7 @@ import { db } from "./db";
 import { cloudProviders, usageRecords } from "./db/schema";
 import { getSetting } from "./db/settings";
 import { logEvent } from "./app-log";
+import { markServedActivity } from "./model-servers";
 import { ENGINE_SHORT_NAMES } from "../shared/engines";
 import type { InferenceEngine } from "../shared/modelscope";
 import {
@@ -77,6 +78,10 @@ export function recordUsageEvent(input: UsageRecordInput): void {
   if (requests <= 0) return;
   const inputTokens = nonNegative(input.inputTokens);
   const outputTokens = nonNegative(input.outputTokens);
+
+  // 顺手打一次活动点：本地推理的空闲卸载（PERF-01）靠它知道「这个实例刚被用过」。
+  // 挂在这里而不是每个调用方，是因为这条路径本来就收齐了应用内 + 网关的全部本地调用。
+  if (input.upstream === "local") markServedActivity(input.model || "");
 
   try {
     db.insert(usageRecords)

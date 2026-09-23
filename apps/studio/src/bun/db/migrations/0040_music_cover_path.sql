@@ -1,0 +1,1 @@
+ALTER TABLE `music_records` ADD `cover_path` text;

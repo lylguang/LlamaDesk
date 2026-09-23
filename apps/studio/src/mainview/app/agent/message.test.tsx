@@ -134,12 +134,19 @@ async function renderMessage({
 }
 
 const label = (container: HTMLElement) => container.querySelector(".tool-group-label")?.textContent ?? "";
-/** 标题里的秒数（「处理中 · 3.0 秒」→ 3.0）。 */
-function secondsOf(container: HTMLElement): number {
-  const match = /·\s*([\d.]+)\s*/.exec(label(container));
-  if (!match) throw new Error(`标题里没有秒数：${label(container)}`);
-  return Number(match[1]);
+/**
+ * 标题文本与其中的秒数（「处理中 · 3.0 秒」→ 3.0）**一次读出**。
+ *
+ * 分两次读（先取秒数、再取文本去比对）时，两次读取之间组件可能已经跳了一拍 ——
+ * 秒数每 100ms 就会变，比对的是上一拍的文本、拿到的是下一拍的秒数。
+ */
+function readDuration(container: HTMLElement): { text: string; seconds: number } {
+  const text = label(container);
+  const match = /·\s*([\d.]+)\s*/.exec(text);
+  if (!match) throw new Error(`标题里没有秒数：${text}`);
+  return { text, seconds: Number(match[1]) };
 }
+const secondsOf = (container: HTMLElement) => readDuration(container).seconds;
 
 test("跑动中标题报「处理中 · N 秒」，静默期里秒数自己往前走", async () => {
   const container = await renderMessage({
@@ -150,15 +157,23 @@ test("跑动中标题报「处理中 · N 秒」，静默期里秒数自己往�
     ],
   });
 
-  expect(label(container)).toContain(zh("chat.working.duration", { duration: "3.0 秒" }));
+  // 秒数是**实测**的（从事件 createdAt 算到渲染那一刻），所以这里只断措辞与量级：
+  // 钉死 "3.0 秒" 会让慢一点的 runner 渲染出 3.1 就红 —— 那是环境抖动、不是缺陷
+  // （这条断言在 CI 上真的因为 3.1 红过一次）。措辞从词典取，改文案不会漏。
+  const workingPrefix = zh("chat.working.duration", { duration: "\u0000" }).split("\u0000")[0]!;
+  const first = readDuration(container);
+  expect(first.text.startsWith(workingPrefix)).toBe(true);
+  expect(first.seconds).toBeGreaterThanOrEqual(3);
+  expect(first.seconds).toBeLessThan(5);
 
   // 什么都不发生（没有新事件、没有新正文）：秒数也得继续走 —— 等模型决定
   // 下一步的那几秒正是最像"卡死了"的时候。
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200));
   });
-  expect(secondsOf(container)).toBeGreaterThan(3);
-  expect(label(container)).toContain(zh("chat.working.duration", { duration: `${secondsOf(container).toFixed(1)} 秒` }));
+  const second = readDuration(container);
+  expect(second.seconds).toBeGreaterThan(first.seconds);
+  expect(second.text).toContain(zh("chat.working.duration", { duration: `${second.seconds.toFixed(1)} 秒` }));
 });
 
 test("没有工具在跑：轨迹末尾有一条「正在工作中」的转圈行", async () => {
@@ -186,13 +201,17 @@ test("回合刚开跑（无正文无事件）：也有「处理中 · N 秒」�
   const container = await renderMessage({ streaming: true });
 
   expect(container.querySelector(".run-status")).not.toBeNull();
-  expect(label(container)).toContain(zh("chat.working.duration", { duration: "3.0 秒" }));
+  // 秒数是实测（消息 createdAt = 3 秒前），只断量级：慢一点的 runner 会渲染成 3.1，
+  // 钉死 "3.0 秒" 会让这行断言在 CI 上凭空变红。
+  const first = secondsOf(container);
+  expect(first).toBeGreaterThanOrEqual(3);
+  expect(first).toBeLessThan(5);
   expect(container.querySelector(".working-indicator")).not.toBeNull();
 
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 1200));
   });
-  expect(secondsOf(container)).toBeGreaterThan(3);
+  expect(secondsOf(container)).toBeGreaterThan(first);
 });
 
 test("工具自己那行在转圈时，不再叠加一条（同一时刻只有一处动画）", async () => {

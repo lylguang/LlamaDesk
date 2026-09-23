@@ -51,17 +51,39 @@ export function extractDeadWorkerError(logs: string): string | null {
     : "MLX 的模型加载线程已退出，生成不可用（详见引擎日志）。";
 }
 
-export function extractStartupError(logs: string, fallback: string): string {
-  const lines = logs
-    .split("\n")
-    .map((line) => line.replace(ANSI_PATTERN, "").trim())
-    .filter(Boolean);
+/**
+ * 「点名了具体原因」的那一行 —— 架构不认识、缺依赖、显存 / 磁盘不够、端口占用…
+ *
+ * 引擎的失败日志是**级联**的：先打根因，再连着打好几行没有信息量的派生错误
+ * （`failed to load model` / `common_fit_params: ...`），最后以一句总结收尾。
+ * llama.cpp 的收尾句固定是 `llama_server: exiting due to model loading error`，
+ * 只取最后一行的话，用户看到的永远是「模型加载错误」，看不出到底哪儿不对：
+ * 架构不支持、文件没下完、显存不够长得一模一样。所以先从日志里找根因行，
+ * 找不到再退回「最后一条像错误的行」。
+ */
+const ROOT_CAUSE_LINE_PATTERN =
+  /unknown model architecture|not supported|unsupported|no module named|shared object file|no such file|out of memory|failed to allocate|no space left|address already in use|permission denied|bad magic|invalid magic/i;
+
+/** 从后往前找第一条命中 pattern 的日志行（跳过我们自己的注解与警告行）。 */
+function pickErrorLine(lines: string[], pattern: RegExp): string | undefined {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i];
     if (!line) continue;
     if (line.startsWith("[") || line.startsWith("$")) continue;
     if (WARNING_LINE_PATTERN.test(line)) continue;
-    if (ERROR_LINE_PATTERN.test(line)) return line.slice(0, 300);
+    if (pattern.test(line)) return line.slice(0, 300);
   }
-  return fallback;
+  return undefined;
+}
+
+export function extractStartupError(logs: string, fallback: string): string {
+  const lines = logs
+    .split("\n")
+    .map((line) => line.replace(ANSI_PATTERN, "").trim())
+    .filter(Boolean);
+  return (
+    pickErrorLine(lines, ROOT_CAUSE_LINE_PATTERN) ??
+    pickErrorLine(lines, ERROR_LINE_PATTERN) ??
+    fallback
+  );
 }

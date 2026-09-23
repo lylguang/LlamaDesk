@@ -315,6 +315,19 @@ function getBundledBinPath(): string {
   return path.join(getEngineBinDir(), "audiocpp_cli");
 }
 
+/** 托管目录 / 托管可执行文件 / 本平台有没有预编译包（引擎管理页探测用）。 */
+export function audioCppEngineDir(): string {
+  return getEnginesDir();
+}
+
+export function audioCppEngineBin(): string {
+  return getBundledBinPath();
+}
+
+export function audioCppSupported(): boolean {
+  return releaseAssetName() !== null;
+}
+
 function getSearchPath(): string {
   const home = process.env.HOME ?? "";
   const extra = [
@@ -426,9 +439,14 @@ function extractEngine(tgz: string, targetDir: string): string | null {
   return null;
 }
 
-/** 下载 audio.cpp 推理引擎二进制（GitHub Release，多链路回退）。 */
-export async function downloadTtsLocalEngine(): Promise<{ ok: boolean; error?: string }> {
-  const existing = await resolveBinary();
+/**
+ * 下载 audio.cpp 推理引擎二进制（GitHub Release，多链路回退）。
+ * `upgrade` = 已经有一份了也重新下载（版本是钉死的，这一步等于修复安装）。
+ */
+export async function downloadTtsLocalEngine(
+  options: { upgrade?: boolean } = {},
+): Promise<{ ok: boolean; error?: string }> {
+  const existing = options.upgrade ? null : await resolveBinary();
   if (existing) return { ok: true };
 
   const asset = releaseAssetName();
@@ -744,6 +762,31 @@ export function deleteTtsLocalModel(modelId: string): { ok: boolean } {
   }
   if (getSetting("TTS_LOCAL_MODEL") === modelId) {
     updateSettings({ TTS_LOCAL_MODEL: "" });
+  }
+  return { ok: true };
+}
+
+/**
+ * 卸载应用下载的 audio.cpp 引擎（PATH 上那份不碰），并把指向它的设置清干净 ——
+ * 留着 `TTS_LOCAL_ENGINE=audio.cpp` / `ASR_ENGINE=audiocpp` 的话，界面上会一直显示
+ * 「使用中」，直到下一次真的去转写才报"未找到 audiocpp_cli"。
+ * 已下载的音色 / 识别模型都保留（模型在语音页单独管理）。
+ */
+export function removeAudioCppEngine(): { ok: boolean; error?: string } {
+  try {
+    rmSync(getEnginesDir(), { recursive: true, force: true });
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+  try {
+    if (getSetting("TTS_LOCAL_ENGINE") === "audio.cpp") {
+      updateSettings({ TTS_LOCAL_ENGINE: "", TTS_LOCAL_MODEL: "" });
+    }
+    if (getSetting("ASR_ENGINE") === "audiocpp") {
+      updateSettings({ ASR_ENGINE: "whisper", ASR_AUDIOCPP_MODEL: "" });
+    }
+  } catch {
+    // 设置清理失败不影响引擎已被删除的事实
   }
   return { ok: true };
 }

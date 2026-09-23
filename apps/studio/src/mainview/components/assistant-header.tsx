@@ -1,4 +1,4 @@
-import { CpuIcon, SparklesIcon } from "lucide-react";
+import { CpuIcon } from "lucide-react";
 
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
@@ -14,36 +14,32 @@ export function formatMessageTime(ts: number): string {
 }
 
 /**
- * 助手消息的头部：头像 + 名称 + 这条用的模型 + 时间。
+ * 助手消息的身份行：名称 + 这条用的模型。
  *
  * 模型标签是这里的关键：一部会话里可能换过模型（本地 / 云端、不同尺寸的模型），
  * 而"这条回答是谁生成的"直接影响用户怎么读它 —— 只有头部能说清楚。
+ *
+ * 写成一段淡色文字而不是带边框的胶囊：它紧挨着正文，胶囊的边框会和正文里的
+ * 代码块、表格抢边框（一屏里出现四五种框，读者就分不出层级了）。时间不在这儿，
+ * 在消息底部的 meta 行 —— 那行本来就要放操作条与用量。
  */
 export function AssistantHeader({
   model,
-  createdAt,
   className,
 }: {
   model?: string;
-  createdAt?: number;
   className?: string;
 }) {
   const t = useT();
   return (
-    <div className={cn("flex items-center gap-2", className)}>
-      <span className="flex size-7 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <SparklesIcon className="size-3.5" />
+    <div className={cn("flex min-w-0 items-center gap-2", className)}>
+      <span className="shrink-0 text-sm leading-5 font-semibold">
+        {t("chat.assistantName")}
       </span>
-      <span className="shrink-0 text-xs font-semibold">{t("chat.assistantName")}</span>
       {model && (
-        <span className="inline-flex min-w-0 items-center gap-1 rounded-full border bg-muted/40 px-2 py-0.5 text-[10px] text-muted-foreground">
-          <CpuIcon className="size-2.5 shrink-0" />
+        <span className="flex min-w-0 items-center gap-1 text-xs leading-5 text-muted-foreground">
+          <CpuIcon className="size-3 shrink-0" aria-hidden="true" />
           <span className="truncate">{model}</span>
-        </span>
-      )}
-      {createdAt != null && (
-        <span className="shrink-0 text-[10px] tabular-nums text-muted-foreground/70">
-          {formatMessageTime(createdAt)}
         </span>
       )}
     </div>

@@ -331,12 +331,17 @@ async function installGitHubRelease(tmp: string, version: string): Promise<{ ok:
  * 一键安装 whisper.cpp 引擎（whisper-cli / whisper-server 均含）：
  * - macOS：conda-forge 预编译包（whisper.cpp + llvm-openmp + libcxx，多镜像回退）
  * - Linux / Windows：GitHub Release 资产（多镜像回退）
- * 已安装（应用内置或 PATH 已有）时直接返回成功。
+ * 已安装（应用内置或 PATH 已有）时直接返回成功；`upgrade` 时跳过这一步重装一遍
+ * （macOS 因此能拿到 conda-forge 上的新版本，其余平台等于修复一份被破坏的安装）。
  */
-export async function downloadWhisperEngine(): Promise<{ ok: boolean; error?: string; version?: string }> {
-  const installed = await resolveWhisperBinary("whisper-cli");
-  if (installed) {
-    return { ok: true, version: (await getWhisperEngineInfo()).version ?? undefined };
+export async function downloadWhisperEngine(
+  options: { upgrade?: boolean } = {},
+): Promise<{ ok: boolean; error?: string; version?: string }> {
+  if (!options.upgrade) {
+    const installed = await resolveWhisperBinary("whisper-cli");
+    if (installed) {
+      return { ok: true, version: (await getWhisperEngineInfo()).version ?? undefined };
+    }
   }
 
   if (process.platform === "darwin") {
@@ -368,7 +373,12 @@ export async function downloadWhisperEngine(): Promise<{ ok: boolean; error?: st
   return { ok: true, version: WHISPER_CPP_RELEASE_TAG };
 }
 
-/** 删除应用内置的引擎（PATH 上的不受影响）。 */
+/** 删除应用内置的引擎（PATH 上的不受影响）：整个 `<engines>/whispercpp` 一起删，暂存残留一并清掉。 */
 export function deleteWhisperEngine(): void {
-  rmSync(getEngineRoot(), { recursive: true, force: true });
+  rmSync(getEnginesDir(), { recursive: true, force: true });
+}
+
+/** 托管目录（引擎管理页展示「占用 / 路径」与卸载的目标）。 */
+export function whisperEngineDir(): string {
+  return getEnginesDir();
 }

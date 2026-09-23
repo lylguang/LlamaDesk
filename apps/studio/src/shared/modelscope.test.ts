@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 
 import {
+  classifyModel,
   classifyModelName,
   filterModelIds,
   isChatModelCategory,
   MODEL_CATEGORY_SETS,
   modelNameFromRef,
+  type MarketModel,
   type ModelCategory,
 } from "./modelscope";
 
@@ -73,6 +75,16 @@ describe("classifyModelName", () => {
     ["Wan-AI/Wan2.2-T2V-A14B", "video"],
     ["kling-v1", "video"],
     ["veo-3", "video"],
+    // 生音乐：云端两家的型号 + 常见开源系列。
+    // 判定排在视频 / 生图之前，音乐模型名与它们没有交集（见 classifyModelName 里的说明）。
+    ["stepaudio-3-music-preview", "music"],
+    ["music-3.0", "music"],
+    ["music-2.6", "music"],
+    ["music-cover", "music"],
+    ["facebook/musicgen-large", "music"],
+    ["ACE-Step/ACE-Step-v1-3.5B", "music"],
+    ["stabilityai/stable-audio-open-1.0", "music"],
+    ["ASLP-lab/DiffRhythm-1_2", "music"],
     // 认不出来 —— 保持 other（对话选择器仍然保留，不能藏掉）。
     // MiniMax 的对话模型（M1 / Text-01）就在这一类里：名字里没有可识别的对话特征，
     // 判成 other 才不会把它从对话选择器里误伤掉。
@@ -154,5 +166,47 @@ describe("modelNameFromRef", () => {
   test("空值回落到 fallback", () => {
     expect(modelNameFromRef("", "—")).toBe("—");
     expect(modelNameFromRef("   ", "—")).toBe("—");
+  });
+});
+
+/**
+ * classifyModel = 标签优先 + 名字兜底，唯一的例外是插桩点（image 检查之后、
+ * chat 检查之前）：名字判定为嵌入时压制其后的弱 chat 标签组。平台常给嵌入
+ * 仓库挂 conversational / text-generation 这类宽泛标签，弱标签压过嵌入模型名
+ * 会让模型从嵌入选择器里消失。
+ */
+describe("classifyModel", () => {
+  const base = {
+    name: "",
+    description: "",
+    downloads: 0,
+    likes: 0,
+    license: "",
+    tasks: [],
+    fileSize: 0,
+    params: 0,
+    createdAt: "",
+    lastModified: "",
+    source: "modelscope",
+    formats: [],
+    fileCount: 0,
+  } satisfies Omit<MarketModel, "id" | "tags">;
+
+  const model = (id: string, tags: string[]): MarketModel => ({ ...base, id, tags });
+
+  test("弱 chat 标签不压嵌入模型名：WeMM-Embedding-9B + conversational → embedding", () => {
+    expect(classifyModel(model("WeMM/WeMM-Embedding-9B", ["conversational"]))).toBe("embedding");
+  });
+
+  test("插桩点锁位：名含 Embedding + 强标签 text-to-image → image（强标签仍胜过名字）", () => {
+    expect(classifyModel(model("Qwen/Qwen3-Embedding-8B", ["text-to-image"]))).toBe("image");
+  });
+
+  test("原行为不回归：纯 chat 名 + conversational → chat", () => {
+    expect(classifyModel(model("Qwen/Qwen3.5-4B", ["conversational"]))).toBe("chat");
+  });
+
+  test("原 tags-first 路径不回归：名含 Embedding + feature-extraction → embedding", () => {
+    expect(classifyModel(model("BAAI/bge-m3", ["feature-extraction"]))).toBe("embedding");
   });
 });

@@ -4,6 +4,13 @@ import { getSetting, getActiveServerPort } from "./db/settings";
 import { dirModelKind, resolveRuntimeTarget } from "./model-scan";
 import { createRuntime, getActiveEngine, getRuntime, type InferenceEngine } from "./runtimes";
 import { extractStartupError } from "./runtimes/errors";
+import {
+  classifyStartupError,
+  isModelSideFailure,
+  type StartupErrorKind,
+} from "../shared/engine-errors";
+import { logEvent } from "./app-log";
+import { notify } from "./notifications";
 import * as Served from "./model-servers";
 
 export type ServerStatus = "stopped" | "starting" | "downloading" | "running" | "error";
@@ -53,6 +60,17 @@ export function getLastError(): string {
   if (!active) return "";
   // 优先从实时日志里挖出具体报错（比缓存的消息新）。
   return extractStartupError(getLogs(), Served.getServedModelError(active.id));
+}
+
+/**
+ * `getLastError()` 那条错误的类型。
+ *
+ * 这里**重新分类**而不是复用实例上记下的 `errorKind`：上面那行可能已经从实时日志里
+ * 挖出了比 `info.error` 更新的一条（实例上记的是启动那一刻的原因，这里是当前原因），
+ * 复用就会出现「文案是这条、建议是那条」的错位。分类是纯函数，重算没有代价。
+ */
+export function getLastErrorKind(): StartupErrorKind {
+  return classifyStartupError(getLastError());
 }
 
 export function clearLogs() {
@@ -110,19 +128,118 @@ export async function getLaunchCommand(modelOverride?: string): Promise<{ comman
  *
  * 调用方（安装向导 / 模型页 / OCR 面板）通常刚改过 LOCAL_MODEL_PATH，
  * 所以这里只认设置、不认当前活动实例；解析在 startServedModel 里做幂等。
+ *
+ * 配置的那个起不来时走**备选模型链**（PERF-03，见 `startWithFallback`）。
  */
-export async function startServer(): Promise<{ ok: boolean; error?: string }> {
+export async function startServer(): Promise<{
+  ok: boolean;
+  error?: string;
+  /** 实际用的是备选模型时给出它的目标（调用方据此提示用户，不静默换模型）。 */
+  fellBackTo?: string;
+}> {
   const configured = Served.resolveConfiguredTarget();
   if (!configured) return { ok: false, error: "No model configured" };
+  return startWithFallback(configured);
+}
 
-  const result = await Served.startServedModel({ model: configured.model, engine: configured.engine });
-  if (!result.ok) return { ok: false, error: result.error };
-  const model = result.model;
+/** 一次启动尝试的结果，带上失败类型 —— 回退链靠类型决定「换一个模型有没有用」。 */
+type StartAttempt = { ok: boolean; error?: string; kind?: StartupErrorKind };
+
+async function attemptStart(model: string, engine?: InferenceEngine): Promise<StartAttempt> {
+  const result = await Served.startServedModel(engine ? { model, engine } : { model });
+  if (!result.ok) {
+    // 失败时 startServedModel 也会带回条目，类型就在上面（主进程已经分过类）。
+    return { ok: false, error: result.error, kind: result.model?.errorKind };
+  }
+  const info = result.model;
   // 别人已经在拉这个模型：等它出结果，保持「await startServer 就绪」的语义。
-  if (model && (model.status === "starting" || model.status === "downloading")) {
-    return waitForSettled(model.id);
+  if (info && (info.status === "starting" || info.status === "downloading")) {
+    const settled = await waitForSettled(info.id);
+    if (!settled.ok) return { ok: false, error: settled.error, kind: Served.getServedModelErrorKind(info.id) };
   }
   return { ok: true };
+}
+
+/** 备选模型链：逗号或换行分隔的目标（本地路径 / HF repo id），与 MODEL_DIRS 同一种写法。 */
+export function fallbackModels(): string[] {
+  const raw = getSetting("SERVER_FALLBACK_MODELS") ?? "";
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const part of raw.split(/[\n,]/)) {
+    const value = part.trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+  }
+  return out;
+}
+
+/**
+ * 按「配置的模型 → 备选链」依次尝试，返回第一个跑起来的。
+ *
+ * 两条规矩：
+ *  1. **只有模型侧失败才回退**（架构不认识 / 权重没下完 / 显存不够，见
+ *     `isModelSideFailure`）。端口被占、缺依赖、权限不足换哪个模型都一样，
+ *     这时候回退只会把真正的失败原因盖住 —— 用户看到的是「备选也起不来」。
+ *  2. **回退不静默**：写 app.log、进通知中心（这是后台自动发生的模型变更，
+ *     用户必须能知道现在在用哪个模型）。
+ */
+async function startWithFallback(configured: {
+  model: string;
+  engine?: InferenceEngine;
+}): Promise<{ ok: boolean; error?: string; fellBackTo?: string }> {
+  const first = await attemptStart(configured.model, configured.engine);
+  if (first.ok) return { ok: true };
+
+  const reason = first.error ?? "Inference server failed to start";
+  const chain = fallbackModels().filter(
+    // 备选链里重复写了配置模型（或者它的另一种写法）没有意义，跳过。
+    (candidate) => candidate !== configured.model,
+  );
+  const kind = first.kind ?? classifyStartupError(reason);
+  if (!chain.length || !isModelSideFailure(kind)) {
+    if (chain.length) {
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "served_model.fallback.skipped",
+        message: `启动失败（${kind}）与模型无关，不回退到备选模型：${reason}`,
+        detail: { model: configured.model, kind },
+      });
+    }
+    return { ok: false, error: reason };
+  }
+
+  let lastError = reason;
+  for (const candidate of chain) {
+    const attempt = await attemptStart(candidate);
+    if (attempt.ok) {
+      const info = Served.getActiveServedModel();
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "served_model.fallback.used",
+        message: `${configured.model} 启动失败（${kind}），已回退到 ${candidate}`,
+        detail: { model: configured.model, fellBackTo: candidate, kind, reason },
+      });
+      notify({
+        kind: "error",
+        title: `默认模型没起来，已改用备选：${info?.label ?? candidate}`,
+        body: `${reason} · ${kind}`.slice(0, 200),
+      });
+      return { ok: true, fellBackTo: candidate };
+    }
+    lastError = attempt.error ?? lastError;
+  }
+
+  logEvent({
+    level: "error",
+    source: "server",
+    event: "served_model.fallback.exhausted",
+    message: `配置的模型与 ${chain.length} 个备选模型都启动失败`,
+    detail: { model: configured.model, chain, kind, reason, lastError },
+  });
+  return { ok: false, error: `${reason}（备选模型也起不来：${lastError}）` };
 }
 
 /** 等待一个正在启动的实例出结果（running / error），超时按启动失败处理。 */

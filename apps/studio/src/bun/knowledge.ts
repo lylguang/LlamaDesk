@@ -10,17 +10,27 @@
  */
 import { existsSync, mkdirSync, readdirSync, statSync, writeFileSync } from "fs";
 import path from "path";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, isNotNull, isNull, sql } from "drizzle-orm";
 
 import { db } from "./db";
 import { kbIngestJobs, knowledgeBases, knowledgeChunks, knowledgeDocs } from "./db/schema";
 import type { KnowledgeBaseRow, KnowledgeDocRow } from "./db/schema";
-import { callEmbeddings, embeddingHeaders, resolveEmbeddingBase, type EmbeddingConfig } from "./embeddings";
+import {
+  callEmbeddings,
+  embeddingHeaders,
+  globalEmbeddingDefaults,
+  resolveEmbeddingBase,
+  type EmbeddingConfig,
+} from "./embeddings";
+import { resolveEmbeddingBackend } from "./model-servers";
+import { resolveCloudProvider } from "./cloud-providers";
+import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "./secrets";
 import { getKbIndex, invalidateKbIndex, kbIndexStats, peekKbIndex, type KbSearchIndex } from "./kb-index";
 import {
   awaitKbIdle,
   docJobs,
   dropDocJob,
+  embeddingConfigOf,
   enqueueDoc,
   ingestQueueStats,
   onKbDataChanged,
@@ -32,6 +42,7 @@ import { splitIntoChunks, splitIntoChunksWithMeta } from "./kb-chunk";
 import { tokenJaccard, tokenSet, tokenize } from "./text-search";
 import { getDataDir } from "./paths";
 import { getSetting } from "./db/settings";
+import { logEvent } from "./app-log";
 import type {
   KbCitation,
   KbDocKind,
@@ -39,6 +50,13 @@ import type {
   KbHit,
   KbIndexStats,
   KbIngestJobView,
+  KbModality,
+} from "../shared/knowledge";
+import {
+  KB_AUDIO_EXT,
+  KB_IMAGE_EXT,
+  KB_TEXT_EXT,
+  KB_VIDEO_EXT,
 } from "../shared/knowledge";
 import {
   filterModelIds,
@@ -60,16 +78,23 @@ export type KbView = {
   embeddingModel: string;
   embeddingBase: string;
   embeddingApiKey: string;
+  /** 云服务商 id（非空时地址/密钥取自 cloud_providers）。 */
+  embeddingProviderId: string;
   embeddingDim: number | null;
   rerankModel: string;
   rerankBase: string;
   rerankApiKey: string;
+  rerankProviderId: string;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
   minScore: number;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明：勾选后该模态媒体文件走「媒体+OCR 文本联合嵌入」。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
   docCount: number;
   chunkCount: number;
   embeddedCount: number;
@@ -97,6 +122,8 @@ export type KbDocView = {
   updatedAt: number | null;
   /** 摄取队列里的状态（排队中 / 第几次重试 / 下次重试时间）。 */
   job: KbIngestJobView | null;
+  /** 首个图片块 id（文档列表行内缩略图入口）；读时派生不落库，无图片块为 null。 */
+  firstImageChunkId: number | null;
 };
 
 export type KbChunkView = {
@@ -109,6 +136,10 @@ export type KbChunkView = {
   /** 在来源正文中的字符偏移（引用可精确回位）。 */
   charStart: number | null;
   charEnd: number | null;
+  /** 媒体直嵌块：模态与原文件路径/单元序号（文本块为 null）。 */
+  modality: KbModality | null;
+  mediaPath: string | null;
+  mediaIndex: number | null;
 };
 
 export type KbUpdatePatch = Partial<{
@@ -117,20 +148,31 @@ export type KbUpdatePatch = Partial<{
   embeddingModel: string;
   embeddingBase: string;
   embeddingApiKey: string;
+  embeddingProviderId: string;
   rerankModel: string;
   rerankBase: string;
   rerankApiKey: string;
+  rerankProviderId: string;
   chunkSize: number;
   chunkOverlap: number;
   topK: number;
   minScore: number;
   expandNeighbors: boolean;
   mcpExposed: boolean;
+  /** 模态能力声明（模态勾选变更不触发向量重置；已入库媒体需重新导入才走新路径）。 */
+  embedImage: boolean;
+  embedAudio: boolean;
+  embedVideo: boolean;
 }>;
 
-/** 目录导入时接受的扩展名（文本 + PDF/图片）。 */
-const KB_FOLDER_FILE_RE =
-  /\.(txt|md|markdown|json|csv|tsv|log|xml|yml|yaml|html?|htm|pdf|png|jpg|jpeg|webp|tiff|bmp|heic|heif)$/i;
+/**
+ * 目录导入白名单：文本 + PDF/图片 + 音视频（扩展名单一来源 shared/knowledge.ts，
+ * 与文件选择器 accept 一致）。
+ */
+const KB_FOLDER_FILE_RE = new RegExp(
+  `\\.(?:${[...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join("|")})$`,
+  "i",
+);
 const KB_FOLDER_IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -213,11 +255,86 @@ function kbAgg(kbId: number): { docCount: number; chunkCount: number; embeddedCo
   };
 }
 
+/**
+ * 知识库的两列密钥（嵌入 / 重排）和云端厂商的 Key 一样落盘加密。
+ *
+ * 读的一侧统一在这里解密：`getKb` 与 `listKnowledgeBases` 是这一行数据仅有的两个出口，
+ * 收在这两个函数里，下游（向量化 / 重排 / 界面）拿到的就都是明文，不必各自记得解一次。
+ * 解不开（换了机器 / 换了数据目录）按未配置处理 —— 与厂商 Key 同一条约定，
+ * 否则一个解不开的密文会被当成密钥原样发到上游，换回 401 而看不出原因。
+ */
+function decryptKbRow(row: KnowledgeBaseRow): KnowledgeBaseRow {
+  return {
+    ...row,
+    embeddingApiKey: readKbKey(row.id, "embedding", row.embeddingApiKey),
+    rerankApiKey: readKbKey(row.id, "rerank", row.rerankApiKey),
+  };
+}
+
+/**
+ * 老库里的明文密钥：读到就顺手加密写回（写穿）。
+ *
+ * 没做成「启动时扫一遍」是因为那需要一张「跑过没跑过」的标志，而标志一旦为真，
+ * 之后新增的明文行就再也轮不到被加密 —— 逐行判断反而更结实：密文行一次写都不发生，
+ * 明文行只会被写一次。知识库是个位数量级，这个判断的成本可以忽略。
+ */
+function encryptPlaintextKbKeys(row: KnowledgeBaseRow): void {
+  const patch: Record<string, string> = {};
+  if (row.embeddingApiKey && !isEncryptedSecret(row.embeddingApiKey)) {
+    patch.embeddingApiKey = encryptSecret(row.embeddingApiKey);
+  }
+  if (row.rerankApiKey && !isEncryptedSecret(row.rerankApiKey)) {
+    patch.rerankApiKey = encryptSecret(row.rerankApiKey);
+  }
+  if (Object.keys(patch).length === 0) return;
+  try {
+    db.update(knowledgeBases).set(patch).where(eq(knowledgeBases.id, row.id)).run();
+  } catch (e) {
+    // 加密写回失败不影响这次读取（读取侧对明文是透传的），下次读到再试。
+    logEvent({
+      level: "warn",
+      source: "kb",
+      event: "kb.api_key.encrypt_failed",
+      message: `知识库 ${row.id} 的明文密钥加密写回失败，本次按明文继续`,
+      detail: { kbId: row.id, error: e },
+    });
+  }
+}
+
+const kbKeyWarned = new Set<string>();
+
+/** 写的一侧：空值保持空（不制造密文），其余加密。 */
+function encryptKbKey(value: string): string {
+  const trimmed = value.trim();
+  return trimmed ? encryptSecret(trimmed) : trimmed;
+}
+
+function readKbKey(kbId: number, slot: "embedding" | "rerank", value: string): string {
+  if (!value) return value;
+  const result = tryDecryptSecret(value);
+  if (result.ok) return result.value;
+  const marker = `${kbId}:${slot}`;
+  if (!kbKeyWarned.has(marker)) {
+    kbKeyWarned.add(marker);
+    logEvent({
+      level: "warn",
+      source: "kb",
+      event: "kb.api_key.decrypt.failed",
+      message: `知识库 ${kbId} 的${slot === "embedding" ? "嵌入" : "重排"} Key 在本机解不开，已按未配置处理`,
+      detail: { kbId, slot, reason: result.error.slice(0, 200) },
+    });
+  }
+  return "";
+}
+
 function kbToView(row: KnowledgeBaseRow): KbView {
   return {
     ...row,
     expandNeighbors: row.expandNeighbors !== 0,
     mcpExposed: row.mcpExposed !== 0,
+    embedImage: row.embedImage !== 0,
+    embedAudio: row.embedAudio !== 0,
+    embedVideo: row.embedVideo !== 0,
     ...kbAgg(row.id),
   };
 }
@@ -228,30 +345,53 @@ export function listKnowledgeBases(): KbView[] {
     .from(knowledgeBases)
     .orderBy(desc(knowledgeBases.updatedAt))
     .all()
-    .map(kbToView);
+    .map((row) => {
+      encryptPlaintextKbKeys(row);
+      return kbToView(decryptKbRow(row));
+    });
 }
 
 export function getKb(id: number): KnowledgeBaseRow | null {
-  return db.select().from(knowledgeBases).where(eq(knowledgeBases.id, id)).get() ?? null;
+  const row = db.select().from(knowledgeBases).where(eq(knowledgeBases.id, id)).get();
+  if (!row) return null;
+  encryptPlaintextKbKeys(row);
+  return decryptKbRow(row);
 }
 
 export function createKb(input: {
   name: string;
   description?: string;
-  /** 嵌入模型（空 = 纯关键词检索）。 */
+  /** 嵌入模型（空 = 纯关键词检索，除非全局默认非空）。 */
   embeddingModel?: string;
   /** 重排模型（空 = 不重排）。 */
   rerankModel?: string;
+  /** 模态能力声明（显式传入，缺省 false；不从全局默认继承）。 */
+  embedImage?: boolean;
+  embedAudio?: boolean;
+  embedVideo?: boolean;
+  /** 嵌入/重排云服务商 id（可选，选了就不再需要手填地址与密钥）。 */
+  embeddingProviderId?: string;
+  rerankProviderId?: string;
   actor?: string;
 }): KbView {
   const name = input.name.trim() || "未命名知识库";
+  // 全局默认（设置 → 默认模型 → 向量嵌入）在**建库时**快照进 KB 行：此后这个库纯行驱动，
+  // 改全局默认不会再动它（既有 KB 的端点与维度零漂移）。显式传入的模型优先，缺省才用快照。
+  const defaults = globalEmbeddingDefaults();
   const row = db
     .insert(knowledgeBases)
     .values({
       name,
       description: input.description?.trim() || null,
-      embeddingModel: input.embeddingModel?.trim() ?? "",
-      rerankModel: input.rerankModel?.trim() ?? "",
+      embeddingModel: input.embeddingModel?.trim() || defaults.model,
+      embeddingBase: defaults.base,
+      embeddingApiKey: defaults.apiKey,
+      rerankModel: input.rerankModel?.trim() || "",
+      embedImage: input.embedImage ? 1 : 0,
+      embedAudio: input.embedAudio ? 1 : 0,
+      embedVideo: input.embedVideo ? 1 : 0,
+      embeddingProviderId: input.embeddingProviderId?.trim() ?? "",
+      rerankProviderId: input.rerankProviderId?.trim() ?? "",
     })
     .returning()
     .get();
@@ -272,20 +412,28 @@ export function updateKb(id: number, patch: KbUpdatePatch): { kb: KbView; embedd
   if (patch.description !== undefined) set.description = patch.description.trim() || null;
   if (patch.embeddingModel !== undefined) set.embeddingModel = patch.embeddingModel.trim();
   if (patch.embeddingBase !== undefined) set.embeddingBase = patch.embeddingBase.trim();
-  if (patch.embeddingApiKey !== undefined) set.embeddingApiKey = patch.embeddingApiKey.trim();
+  if (patch.embeddingApiKey !== undefined) set.embeddingApiKey = encryptKbKey(patch.embeddingApiKey);
+  if (patch.embeddingProviderId !== undefined) set.embeddingProviderId = patch.embeddingProviderId.trim();
   if (patch.rerankModel !== undefined) set.rerankModel = patch.rerankModel.trim();
   if (patch.rerankBase !== undefined) set.rerankBase = patch.rerankBase.trim();
-  if (patch.rerankApiKey !== undefined) set.rerankApiKey = patch.rerankApiKey.trim();
+  if (patch.rerankApiKey !== undefined) set.rerankApiKey = encryptKbKey(patch.rerankApiKey);
+  if (patch.rerankProviderId !== undefined) set.rerankProviderId = patch.rerankProviderId.trim();
   if (patch.chunkSize !== undefined) set.chunkSize = clampInt(patch.chunkSize, 200, 4000, 800);
   if (patch.chunkOverlap !== undefined) set.chunkOverlap = clampInt(patch.chunkOverlap, 0, 1000, 120);
   if (patch.topK !== undefined) set.topK = clampInt(patch.topK, 1, 30, 6);
   if (patch.minScore !== undefined) set.minScore = clamp01(patch.minScore, 0);
   if (patch.expandNeighbors !== undefined) set.expandNeighbors = patch.expandNeighbors ? 1 : 0;
   if (patch.mcpExposed !== undefined) set.mcpExposed = patch.mcpExposed ? 1 : 0;
+  // 模态勾选不是嵌入模型：改勾选不动向量（已入库媒体需手动重导入才走新路径）
+  if (patch.embedImage !== undefined) set.embedImage = patch.embedImage ? 1 : 0;
+  if (patch.embedAudio !== undefined) set.embedAudio = patch.embedAudio ? 1 : 0;
+  if (patch.embedVideo !== undefined) set.embedVideo = patch.embedVideo ? 1 : 0;
 
   const embeddingChanged =
     (patch.embeddingModel !== undefined && patch.embeddingModel.trim() !== kb.embeddingModel) ||
-    (patch.embeddingBase !== undefined && patch.embeddingBase.trim() !== kb.embeddingBase);
+    (patch.embeddingBase !== undefined && patch.embeddingBase.trim() !== kb.embeddingBase) ||
+    (patch.embeddingProviderId !== undefined &&
+      patch.embeddingProviderId.trim() !== kb.embeddingProviderId);
   if (embeddingChanged) set.embeddingDim = null;
 
   db.update(knowledgeBases).set(set).where(eq(knowledgeBases.id, id)).run();
@@ -321,8 +469,15 @@ export function deleteKb(id: number): void {
 // 数据源
 // ---------------------------------------------------------------------------
 
-/** 文档行 → 视图（剔除笔记正文等大字段）。 */
-function toDocView(row: KnowledgeDocRow, job: KbIngestJobView | null = null): KbDocView {
+/**
+ * 文档行 → 视图（剔除笔记正文等大字段）。firstImageChunkId 仅 listDocs 列表路径
+ * 传真实值；其余生产点（单条返回的写入路径）缺省 null，行内缩略图入口不误报。
+ */
+function toDocView(
+  row: KnowledgeDocRow,
+  job: KbIngestJobView | null = null,
+  firstImageChunkId: number | null = null,
+): KbDocView {
   return {
     id: row.id,
     kbId: row.kbId,
@@ -341,6 +496,7 @@ function toDocView(row: KnowledgeDocRow, job: KbIngestJobView | null = null): Kb
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
     job,
+    firstImageChunkId,
   };
 }
 
@@ -430,7 +586,7 @@ export function addFolderDocs(kbId: number, dirPath: string): { docs: KbDocView[
   walk(dirPath, 0);
 
   if (files.length === 0) {
-    throw new Error("目录里没有可导入的文件（支持文本 / Markdown / PDF / 图片）");
+    throw new Error("目录里没有可导入的文件（支持文本 / Markdown / PDF / 图片 / 音频 / 视频）");
   }
   const before = files.length;
   const docs = addFileDocs(kbId, files);
@@ -514,19 +670,57 @@ export function deleteDoc(id: number): void {
   notifyKb(doc.kbId, id);
 }
 
-export function listDocs(kbId: number): KbDocView[] {
+export function listDocs(kbId: number): { docs: KbDocView[]; total: number } {
   const jobs = docJobs(kbId);
-  return db
+  // 行内缩略图入口：一条分组聚合出本库每个文档的首个图片块 id（读时派生不落库）。
+  // 必须带 kb_id = ? 过滤（走 kbIdx 索引，避免全库扫描）；modality='image' 保证
+  // 纯音视频块文档不会被误选。
+  const firstImageChunk = new Map(
+    db
+      .select({
+        docId: knowledgeChunks.docId,
+        firstId: sql<number>`min(${knowledgeChunks.id})`,
+      })
+      .from(knowledgeChunks)
+      .where(and(eq(knowledgeChunks.kbId, kbId), eq(knowledgeChunks.modality, "image")))
+      .groupBy(knowledgeChunks.docId)
+      .all()
+      .map((r) => [r.docId, Number(r.firstId)] as const),
+  );
+  const total =
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(knowledgeDocs)
+      .where(eq(knowledgeDocs.kbId, kbId))
+      .get()?.n ?? 0;
+  const docs = db
     .select()
     .from(knowledgeDocs)
     .where(eq(knowledgeDocs.kbId, kbId))
     .orderBy(desc(knowledgeDocs.updatedAt))
+    .limit(KB_DOC_LIST_MAX)
     .all()
-    .map((row) => toDocView(row, jobs.get(row.id) ?? null));
+    .map((row) => toDocView(row, jobs.get(row.id) ?? null, firstImageChunk.get(row.id) ?? null));
+  return { docs, total: Number(total) };
 }
 
-export function listChunks(docId: number): KbChunkView[] {
-  return db
+/**
+ * 文档列表单次返回上限。
+ *
+ * 目录导入一次可入库 300 文件、多轮可累积到几千条，此前 `listDocs` 全量返回并
+ * 在每次状态推送后重取，条目越多越拖。这里给一个上限并把总数一并返回，
+ * 界面在超过上限时明确提示（不是静默截断）。
+ */
+export const KB_DOC_LIST_MAX = 1000;
+
+export function listChunks(docId: number): { chunks: KbChunkView[]; total: number } {
+  const total =
+    db
+      .select({ n: sql<number>`count(*)` })
+      .from(knowledgeChunks)
+      .where(eq(knowledgeChunks.docId, docId))
+      .get()?.n ?? 0;
+  const chunks = db
     .select({
       id: knowledgeChunks.id,
       seq: knowledgeChunks.seq,
@@ -536,9 +730,13 @@ export function listChunks(docId: number): KbChunkView[] {
       headingPath: knowledgeChunks.headingPath,
       charStart: knowledgeChunks.charStart,
       charEnd: knowledgeChunks.charEnd,
+      modality: knowledgeChunks.modality,
+      mediaPath: knowledgeChunks.mediaPath,
+      mediaIndex: knowledgeChunks.mediaIndex,
     })
     .from(knowledgeChunks)
     .where(eq(knowledgeChunks.docId, docId))
+    .limit(KB_CHUNK_LIST_MAX)
     .all()
     .map((r) => ({
       id: r.id,
@@ -549,8 +747,15 @@ export function listChunks(docId: number): KbChunkView[] {
       headingPath: r.headingPath,
       charStart: r.charStart,
       charEnd: r.charEnd,
+      modality: r.modality,
+      mediaPath: r.mediaPath,
+      mediaIndex: r.mediaIndex,
     }));
+  return { chunks, total: Number(total) };
 }
+
+/** 单个文档分块列表的返回上限（与文档列表同理，避免一屏拉回上万条）。 */
+export const KB_CHUNK_LIST_MAX = 2000;
 
 // ---------------------------------------------------------------------------
 // 向量化：补齐缺失向量（走同一个作业队列，避免与自动摄取并发抢同一文档）
@@ -602,17 +807,19 @@ export async function embedMissing(kbId: number): Promise<{
   return { ok: true, embedded: before - remaining };
 }
 
-/** 测试嵌入配置可用性：嵌入 "ping" 并返回维度。 */
+/** 测试嵌入配置可用性：嵌入 "ping" 并返回维度。传 providerId 时地址/密钥取自云服务商行。 */
 export async function testEmbedding(input: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
   model: string;
 }): Promise<{ ok: boolean; dim?: number; error?: string }> {
   try {
+    const provider = resolveCloudProvider(input.providerId);
     const cfg: EmbeddingConfig = {
       embeddingModel: input.model,
-      embeddingBase: input.base ?? "",
-      embeddingApiKey: input.apiKey ?? "",
+      embeddingBase: provider?.baseUrl ?? input.base ?? "",
+      embeddingApiKey: provider?.apiKey ?? input.apiKey ?? "",
       embeddingDim: null,
     };
     const [vec] = await callEmbeddings(cfg, ["ping"]);
@@ -620,6 +827,22 @@ export async function testEmbedding(input: {
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+/**
+ * 探测全局默认嵌入配置当前是否真的可用（新建知识库弹窗的预填门控）：
+ * 未配置 → configured:false（与今天一致，弹窗不显示探活提示）；已配置则走与建库后
+ * 真实嵌入**同一条解析链**（testEmbedding → callEmbeddings → resolveEmbeddingBase）
+ * 真实嵌入一次。地址怎么解析是 bun 侧的事，webview 只消费 configured/reachable 结论。
+ */
+export async function probeDefaultEmbedding(): Promise<
+  | { configured: false }
+  | { configured: true; reachable: boolean; model: string; dim?: number; error?: string }
+> {
+  const defaults = globalEmbeddingDefaults();
+  if (!defaults.model) return { configured: false };
+  const r = await testEmbedding({ base: defaults.base, apiKey: defaults.apiKey, model: defaults.model });
+  return { configured: true, reachable: r.ok, model: defaults.model, dim: r.dim, error: r.error };
 }
 
 /**
@@ -635,6 +858,11 @@ export type KbModelCandidates = {
   service: { base: string; kind: "local" | "remote" | "custom" };
   /** 服务端返回的模型里一个都没认出该分类、已回退成全量时为 true。 */
   relaxed: boolean;
+  /**
+   * 界面引导（i18n key）：嵌入选择器本地模式没有运行中的嵌入服务时给出
+   * 「先去启动嵌入模型」的空态说明，其余情况不带。
+   */
+  hint?: string;
 };
 
 /** 设置里显式配置的云端模型（CLOUD_MODELS，支持字符串或 {id} 两种写法）。 */
@@ -679,21 +907,46 @@ async function fetchServedModels(base: string, apiKey: string): Promise<string[]
 
 /** 嵌入 / 重排共用的模型候选收集（地址解析规则与真实请求一致）。 */
 export async function suggestModelCandidates(
-  input?: { base?: string; apiKey?: string },
+  input?: { base?: string; apiKey?: string; providerId?: string },
   /** 该选择器要哪几类模型：嵌入选择器只给嵌入、重排选择器只给重排。 */
   want: readonly ModelCategory[] = ["embedding"],
 ): Promise<KbModelCandidates> {
-  const custom = Boolean(input?.base?.trim());
-  const base = resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
-  const kind: KbModelCandidates["service"]["kind"] = custom
-    ? "custom"
-    : getSetting("SERVER_MODE") === "remote"
-      ? "remote"
-      : "local";
-  const served = await fetchServedModels(base, input?.apiKey ?? "");
-  const cloud = cloudModelIds();
-  const localRaw = kind === "local" ? served : [];
-  const remoteRaw = kind === "local" ? cloud : [...new Set([...served, ...cloud])].sort();
+  // 云服务商槽位优先：地址/密钥/模型都从 cloud_providers 行取，页面不落盘密钥。
+  const provider = resolveCloudProvider(input?.providerId);
+  const custom = !provider && Boolean(input?.base?.trim());
+  // 嵌入候选（want 只含 embedding）且没有云槽位 / 手填地址时，本地组只认「运行中的
+  // 嵌入实例」（resolveEmbeddingBackend）：resolveEmbeddingBase 的兜底链在没有嵌入
+  // 实例时会落到聊天活动端口 —— 把聊天服务列出来的 chat 模型混进嵌入候选只会
+  // 误导（③-C3）。重排候选沿用原链路（rerank 服务独立部署）。
+  const embeddingOnly = want.length === 1 && want[0] === "embedding";
+  const embedBackend = embeddingOnly && !custom && !provider ? resolveEmbeddingBackend() : null;
+  const base =
+    provider?.baseUrl ?? embedBackend ?? resolveEmbeddingBase({ embeddingBase: input?.base ?? "" });
+  const kind: KbModelCandidates["service"]["kind"] = provider
+    ? "remote"
+    : custom
+      ? "custom"
+      : getSetting("SERVER_MODE") === "remote"
+        ? "remote"
+        : "local";
+  const isLocal = kind === "local";
+  // 嵌入选择器本地模式且没有嵌入实例：不再去拉聊天活动端口的 /v1/models，
+  // 本地组直接置空，service.base 也如实留空，引导文案由界面按 hint 呈现。
+  const noEmbedServer = embeddingOnly && isLocal && embedBackend == null;
+  const served = noEmbedServer
+    ? []
+    : await fetchServedModels(base, provider?.apiKey ?? input?.apiKey ?? "");
+  // 云服务商槽位：优先用 /v1/models 实时结果；拉不到就退回本地记录的模型清单，离线也能选。
+  const cloud = provider ? provider.models.map((m) => m.id) : cloudModelIds();
+  const localRaw = isLocal && !noEmbedServer ? served : [];
+  const remoteRaw =
+    kind === "local"
+      ? cloud
+      : provider
+        ? served.length > 0
+          ? served
+          : cloud
+        : [...new Set([...served, ...cloud])].sort();
   // 一个服务商的 /v1/models 会把对话 / 语音 / 生图模型一起返回：按分类挑干净，
   // 挑不出任何一类（服务端命名认不出来）就保留全量并标记 relaxed，由界面说明。
   const local = filterModelIds(localRaw, want, { relax: true });
@@ -701,8 +954,9 @@ export async function suggestModelCandidates(
   return {
     local: local.ids,
     remote: remote.ids,
-    service: { base, kind },
+    service: { base: noEmbedServer ? "" : base, kind },
     relaxed: local.relaxed || remote.relaxed,
+    hint: noEmbedServer ? "kb.settings.noEmbeddingServer" : undefined,
   };
 }
 
@@ -710,6 +964,7 @@ export async function suggestModelCandidates(
 export async function suggestEmbeddingModels(input?: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
 }): Promise<KbModelCandidates> {
   return suggestModelCandidates(input, MODEL_CATEGORY_SETS.embedding);
 }
@@ -718,13 +973,37 @@ export async function suggestEmbeddingModels(input?: {
 // 重排：Jina / SiliconFlow / Cohere 兼容的 /v1/rerank 二次排序
 // ---------------------------------------------------------------------------
 
-type RerankConfig = Pick<KnowledgeBaseRow, "rerankModel" | "rerankBase" | "rerankApiKey" | "embeddingBase">;
+type RerankConfig = Pick<
+  KnowledgeBaseRow,
+  | "rerankModel"
+  | "rerankBase"
+  | "rerankApiKey"
+  | "rerankProviderId"
+  | "embeddingBase"
+  | "embeddingProviderId"
+>;
 
-/** 重排服务 base：显式配置 > 嵌入服务地址（常见同厂商）> 云服务商槽位 / 本地推理。 */
+/**
+ * 重排服务 base：重排云服务商 > 显式配置 > 嵌入云服务商 > 嵌入服务地址（常见同厂商）
+ * > 云服务商槽位 / 本地推理。
+ */
 function resolveRerankBase(cfg: RerankConfig): string {
   const trimBase = (v: string) => v.trim().replace(/\/+$/, "").replace(/\/v1$/, "");
+  const provider = resolveCloudProvider(cfg.rerankProviderId);
+  if (provider?.baseUrl) return trimBase(provider.baseUrl);
   if (cfg.rerankBase.trim()) return trimBase(cfg.rerankBase);
+  const embedProvider = resolveCloudProvider(cfg.embeddingProviderId);
+  if (embedProvider?.baseUrl) return trimBase(embedProvider.baseUrl);
   return resolveEmbeddingBase({ embeddingBase: cfg.embeddingBase });
+}
+
+/** 重排请求密钥：重排服务商 > 嵌入服务商 > 手填（留空则由 embeddingHeaders 回落到全局密钥）。 */
+function resolveRerankKey(cfg: RerankConfig): string {
+  return (
+    resolveCloudProvider(cfg.rerankProviderId)?.apiKey ||
+    resolveCloudProvider(cfg.embeddingProviderId)?.apiKey ||
+    cfg.rerankApiKey
+  );
 }
 
 /**
@@ -744,7 +1023,7 @@ async function callRerank(
 
   const res = await fetch(`${base}/v1/rerank`, {
     method: "POST",
-    headers: embeddingHeaders(cfg.rerankApiKey),
+    headers: embeddingHeaders(resolveRerankKey(cfg)),
     body: JSON.stringify({
       model,
       query,
@@ -779,6 +1058,7 @@ async function callRerank(
 export async function testRerank(input: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
   model: string;
 }): Promise<{ ok: boolean; error?: string }> {
   try {
@@ -786,7 +1066,9 @@ export async function testRerank(input: {
       rerankModel: input.model,
       rerankBase: input.base ?? "",
       rerankApiKey: input.apiKey ?? "",
+      rerankProviderId: input.providerId ?? "",
       embeddingBase: "",
+      embeddingProviderId: "",
     };
     const scores = await callRerank(
       cfg,
@@ -812,6 +1094,7 @@ export async function testRerank(input: {
 export async function suggestRerankModels(input?: {
   base?: string;
   apiKey?: string;
+  providerId?: string;
 }): Promise<KbModelCandidates> {
   return suggestModelCandidates(input, MODEL_CATEGORY_SETS.rerank);
 }
@@ -862,6 +1145,8 @@ function mergeNeighbors(hits: KbHit[], budgetChars: number): KbHit[] {
   const groups: Group[] = [];
   for (const hit of hits) {
     const target = groups.find((g) => {
+      // 媒体块单块成组：一图/一音视频就是一条命中，不与相邻文本块拼接正文
+      if (g.head.modality || hit.modality) return false;
       if (g.head.docId !== hit.docId) return false;
       const seqs = g.parts.map((p) => p.seq);
       const adjacent = seqs.includes(hit.seq - 1) || seqs.includes(hit.seq + 1);
@@ -920,16 +1205,21 @@ async function recallKb(
 
   if (kb.embeddingModel && index.vectorCount > 0) {
     try {
-      const cfg: EmbeddingConfig = {
-        embeddingModel: kb.embeddingModel,
-        embeddingBase: kb.embeddingBase,
-        embeddingApiKey: kb.embeddingApiKey,
-        embeddingDim: kb.embeddingDim,
-      };
+      // 地址/密钥：云服务商槽位优先，否则手填 base/key，最后跟随本地推理服务。
+      const cfg = embeddingConfigOf(kb);
       const [queryVec] = await callEmbeddings(cfg, [query]);
       if (queryVec) vectorRank = index.vectorRank(queryVec, CANDIDATE_POOL);
     } catch (e) {
-      notes.push(`向量检索失败（${e instanceof Error ? e.message : String(e)}），已退化为关键词检索`);
+      const message = e instanceof Error ? e.message : String(e);
+      notes.push(`向量检索失败（${message}），已退化为关键词检索`);
+      // 检索会默默退化成关键词：界面上的 notes 会显示，但统计/排障需要统一日志。
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.retrieve.vector_failed",
+        message,
+        detail: { kbId: kb.id, model: kb.embeddingModel },
+      });
     }
   }
 
@@ -963,7 +1253,15 @@ async function recallKb(
         notes.push("重排服务未返回有效结果，已沿用融合排序");
       }
     } catch (e) {
-      notes.push(`重排失败（${e instanceof Error ? e.message : String(e)}），已沿用融合排序`);
+      const message = e instanceof Error ? e.message : String(e);
+      notes.push(`重排失败（${message}），已沿用融合排序`);
+      logEvent({
+        level: "warn",
+        source: "kb",
+        event: "kb.rerank.failed",
+        message,
+        detail: { kbId: kb.id, model: kb.rerankModel },
+      });
     }
   }
   if (rerankApplied && finalOrder.length === 0) return { hits: [], notes };
@@ -992,6 +1290,7 @@ async function recallKb(
       headingPath: row.headingPath,
       charStart: row.charStart,
       charEnd: row.charEnd,
+      modality: row.modality,
     });
   }
 
@@ -1001,7 +1300,7 @@ async function recallKb(
   return { hits: thresholded.slice(0, kb.topK), notes };
 }
 
-/** 按 chunkId 批量取正文与溯源字段。 */
+/** 按 chunkId 批量取正文与溯源字段（含媒体直嵌块的模态标记）。 */
 function chunkRows(ids: number[]): Map<
   number,
   {
@@ -1010,6 +1309,7 @@ function chunkRows(ids: number[]): Map<
     headingPath: string | null;
     charStart: number | null;
     charEnd: number | null;
+    modality: KbModality | null;
   }
 > {
   if (ids.length === 0) return new Map();
@@ -1022,13 +1322,14 @@ function chunkRows(ids: number[]): Map<
         headingPath: knowledgeChunks.headingPath,
         charStart: knowledgeChunks.charStart,
         charEnd: knowledgeChunks.charEnd,
+        modality: knowledgeChunks.modality,
       })
       .from(knowledgeChunks)
       .where(inArray(knowledgeChunks.id, ids))
       .all()
       .map((r) => [
         r.id,
-        { content: r.content, charCount: r.charCount, headingPath: r.headingPath, charStart: r.charStart, charEnd: r.charEnd },
+        { content: r.content, charCount: r.charCount, headingPath: r.headingPath, charStart: r.charStart, charEnd: r.charEnd, modality: r.modality },
       ]),
   );
 }
@@ -1091,12 +1392,17 @@ export async function buildChatContext(
     docId: h.docId,
     docName: h.docName,
     seq: h.seq,
+    chunkId: h.chunkId,
+    modality: h.modality ?? null,
     snippet: h.content.replace(/\s+/g, " ").slice(0, 120),
   }));
   const body = hits
     .map((h, i) => {
       const loc = h.headingPath ? `${h.docName} › ${h.headingPath}` : h.docName;
-      return `[${i + 1}] 来源：${loc}（分块 ${h.seq}）\n${h.content}`;
+      // 纯媒体块（content 为空）不注入正文：保留编号引用行即可 —— 媒体内容已参与
+      // 向量化，模型经由 [n] 编号感知该资料，空正文不灌进上下文。
+      const text = h.content ? `\n${h.content}` : "";
+      return `[${i + 1}] 来源：${loc}（分块 ${h.seq}）${text}`;
     })
     .join("\n\n");
   const system =
@@ -1131,7 +1437,7 @@ export function kbIndexStatsAll(): KbIndexStats[] {
 
 /** 导出载荷版本：字段演进时按 version 决定兼容策略。 */
 export const KB_EXPORT_FORMAT = "omnistudio.kb";
-export const KB_EXPORT_VERSION = 1;
+export const KB_EXPORT_VERSION = 2;
 
 export type KbExportPayload = {
   format: string;
@@ -1149,6 +1455,10 @@ export type KbExportPayload = {
     topK: number;
     minScore: number;
     expandNeighbors: boolean;
+    /** 模态能力声明（v2 载荷；旧载荷缺省按 false）。 */
+    embedImage?: boolean;
+    embedAudio?: boolean;
+    embedVideo?: boolean;
   };
   docs: {
     name: string;
@@ -1169,6 +1479,10 @@ export type KbExportPayload = {
     headingPath: string | null;
     charStart: number | null;
     charEnd: number | null;
+    /** 媒体直嵌块三列（v2 载荷；旧载荷缺省按 null）。 */
+    modality?: KbModality | null;
+    mediaPath?: string | null;
+    mediaIndex?: number | null;
     contentHash: string | null;
     /** 向量（Float32 base64），includeEmbeddings 时才有。 */
     embedding?: string;
@@ -1210,6 +1524,9 @@ export function exportKb(kbId: number, opts: { includeEmbeddings?: boolean } = {
       topK: kb.topK,
       minScore: kb.minScore,
       expandNeighbors: kb.expandNeighbors !== 0,
+      embedImage: kb.embedImage !== 0,
+      embedAudio: kb.embedAudio !== 0,
+      embedVideo: kb.embedVideo !== 0,
     },
     docs: docs.map((d) => ({
       name: d.name,
@@ -1229,6 +1546,9 @@ export function exportKb(kbId: number, opts: { includeEmbeddings?: boolean } = {
       headingPath: c.headingPath,
       charStart: c.charStart,
       charEnd: c.charEnd,
+      modality: c.modality ?? null,
+      mediaPath: c.mediaPath ?? null,
+      mediaIndex: c.mediaIndex ?? null,
       contentHash: c.contentHash,
       ...(opts.includeEmbeddings && c.embedding ? { embedding: c.embedding } : {}),
     })),
@@ -1289,8 +1609,14 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
   const kbId = kb.id;
   db.update(knowledgeBases)
     .set({
-      embeddingModel: src.embeddingModel ?? "",
-      embeddingBase: src.embeddingBase ?? "",
+      // createKb 已按全局默认快照预填了 model/base/key（导入也是「建库」）。这里只在导出
+      // 文件**带了**嵌入配置时覆盖：显式导入参数优先，缺省（老导出文件 / 关键词库）保留
+      // 快照 —— 否则刚预填的默认会被 `?? ""` 抹成空，与新建 KB 的行为分叉。
+      // 唯 embeddingApiKey 反其道置空：导出文件不携带密钥，若继承全局 key，配上载荷里
+      // 攻击者指定的 embeddingBase 等于把凭据送到第三方 —— 导入一律要求重新填 key。
+      embeddingModel: src.embeddingModel || kb.embeddingModel,
+      embeddingBase: src.embeddingBase || kb.embeddingBase,
+      embeddingApiKey: "",
       embeddingDim: src.embeddingDim ?? null,
       rerankModel: src.rerankModel ?? "",
       chunkSize: src.chunkSize ?? 800,
@@ -1298,6 +1624,9 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       topK: src.topK ?? 6,
       minScore: src.minScore ?? 0,
       expandNeighbors: src.expandNeighbors === false ? 0 : 1,
+      embedImage: src.embedImage === true ? 1 : 0,
+      embedAudio: src.embedAudio === true ? 1 : 0,
+      embedVideo: src.embedVideo === true ? 1 : 0,
     })
     .where(eq(knowledgeBases.id, kbId))
     .run();
@@ -1346,6 +1675,10 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
         headingPath: c.headingPath ?? null,
         charStart: c.charStart ?? null,
         charEnd: c.charEnd ?? null,
+        // modality 白名单：恶意/损坏载荷的乱值落 null（按文本块处理），防下游 UI 崩
+        modality: c.modality === "image" || c.modality === "audio" || c.modality === "video" ? c.modality : null,
+        mediaPath: c.mediaPath ?? null,
+        mediaIndex: c.mediaIndex ?? null,
         contentHash: c.contentHash ?? null,
         embedding: typeof c.embedding === "string" ? c.embedding : null,
       }));
@@ -1361,7 +1694,11 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       .run();
   }
 
-  // 没有随导出带向量的文档，排队重新向量化（有嵌入模型时）
+  // 没有随导出带向量的文档，排队重新向量化（有嵌入模型时）。
+  // 安全契约：含缺向量媒体块的 doc **一律不自动入队** —— 恶意导出文件可让 mediaPath 指向
+  // 受害者本机任意文件，自动补向量会把该文件原始字节发到载荷指定的 embeddingBase。
+  // 三列照常落库（往返无损），由用户在设置页手动「补齐向量」；届时媒体文件缺失会在
+  // 嵌入阶段可见失败，导入路径不再预检文件存在性。
   for (const docId of docIds) {
     const row = db
       .select({ chunkCount: knowledgeDocs.chunkCount, embeddedCount: knowledgeDocs.embeddedCount })
@@ -1370,6 +1707,27 @@ export function importKb(payload: unknown, opts: { name?: string } = {}): {
       .get();
     if (!row) continue;
     if (row.chunkCount > 0 && row.embeddedCount === row.chunkCount) continue;
+
+    const hasPendingMedia = db
+      .select({ c: sql<number>`count(*)` })
+      .from(knowledgeChunks)
+      .where(
+        and(
+          eq(knowledgeChunks.docId, docId),
+          isNotNull(knowledgeChunks.modality),
+          isNull(knowledgeChunks.embedding),
+        ),
+      )
+      .get();
+    if (Number(hasPendingMedia?.c ?? 0) > 0) {
+      // 温和提示落 doc.error（status 保持 ready）：导入的媒体块不自动重嵌，等用户手动触发
+      db.update(knowledgeDocs)
+        .set({ error: "导入的媒体块需在设置页手动补齐向量" })
+        .where(eq(knowledgeDocs.id, docId))
+        .run();
+      continue;
+    }
+
     enqueueDoc(docId, { kind: row.chunkCount > 0 ? "embed" : "ingest" });
   }
 

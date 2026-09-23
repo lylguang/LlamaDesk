@@ -112,3 +112,32 @@ export async function waitExit(proc: { exited: Promise<number> }, timeoutMs: num
     Bun.sleep(timeoutMs).then(() => false),
   ]);
 }
+
+/**
+ * 跑一条探测命令，**退出码为 0** 才算通过（超时算不通过）。
+ *
+ * 别拿 `waitExit` 当这个用：它回答的是"进程退出了吗"（分级 SIGTERM → SIGKILL 用的），
+ * 一条立刻报错的命令在它眼里同样是"退出了" —— vLLM / SGLang 的 `checkBinary` 因此
+ * 在任何装了 python3 的机器上都报"已安装"（`python3 -m vllm --help` 退出码 1），
+ * 引导页与引擎页于是把一个跑不起来的引擎显示成就绪。
+ */
+export async function probeCommand(cmd: string[], timeoutMs = 5_000): Promise<boolean> {
+  try {
+    const proc = Bun.spawn(cmd, { stdout: "pipe", stderr: "pipe" });
+    const timer = setTimeout(() => {
+      try {
+        proc.kill();
+      } catch {
+        // 已经退出了
+      }
+    }, timeoutMs);
+    try {
+      const code = await proc.exited;
+      return code === 0;
+    } finally {
+      clearTimeout(timer);
+    }
+  } catch {
+    return false;
+  }
+}

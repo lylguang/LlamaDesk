@@ -25,6 +25,7 @@ import {
   getBenchmarkRun,
   cancelBenchmark,
   listBenchmarkRecords,
+  type BenchmarkParams,
 } from "./benchmark";
 
 /**
@@ -67,9 +68,12 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     case "navigate": {
       const path = String(payload.path ?? "");
       if (!path) return { ok: false, error: "缺少 path" };
+      // tab / sub 是可选的二级落点（设置页里的标签与子页签），长度封一下 —— 它们来自命令行。
+      const tab = payload.tab == null ? undefined : String(payload.tab).slice(0, 40);
+      const sub = payload.sub == null ? undefined : String(payload.sub).slice(0, 40);
       win()?.show();
       try {
-        win().webview.rpc?.send.navigate({ path });
+        win().webview.rpc?.send.navigate({ path, tab, sub });
       } catch (err) {
         return { ok: false, error: String(err) };
       }
@@ -289,13 +293,23 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
       const contexts = Array.isArray(payload.contexts)
         ? payload.contexts.map(Number).filter((n) => Number.isFinite(n))
         : undefined;
+      // 缓存场景：这里按白名单重建参数，漏一个键就等于 CLI 的开关静默失效。
+      const cacheModes = Array.isArray(payload.cacheModes)
+        ? (payload.cacheModes.filter((m) => typeof m === "string") as BenchmarkParams["cacheModes"])
+        : undefined;
+      // 并发档列表同理：`--batches 1,2,4` 发的是列表，`--batch 4` 是单值简写。
+      const batchSizes = Array.isArray(payload.batchSizes)
+        ? payload.batchSizes.map(Number).filter((n) => Number.isFinite(n))
+        : undefined;
       const result = startBenchmark({
         model: typeof payload.model === "string" ? payload.model : "",
         providerId: typeof payload.providerId === "string" ? payload.providerId : undefined,
         genLength: Number(payload.genLength) || undefined,
         batchSize: Number(payload.batchSize) || undefined,
+        batchSizes,
         temperature: Number.isFinite(Number(payload.temperature)) ? Number(payload.temperature) : undefined,
         contexts,
+        cacheModes,
       });
       if ("error" in result) return { ok: false, error: result.error };
       return { ok: true, data: { runId: result.runId } };
@@ -312,6 +326,15 @@ async function handle(req: ControlRequest): Promise<ControlResponse> {
     // --cloud 服务商解析用：完整 cloud_providers 表（"models" 只回激活槽位）。
     case "cloudProviders": {
       return { ok: true, data: CloudProviders.listCloudProviders() };
+    }
+
+    // `omi launch --model <云模型>` 用：模型属于已启用但非默认的厂商时先切过去，
+    // 否则网关（只往激活厂商发）会拿着这个模型去问另一家。
+    case "cloudProviderActivate": {
+      const id = String(payload.id ?? "").trim();
+      if (!id) return { ok: false, error: "缺少 id" };
+      const r = CloudProviders.activateCloudProvider(id);
+      return r.ok ? { ok: true, data: { id } } : { ok: false, error: r.error ?? "切换默认云厂商失败" };
     }
 
     case "models": {

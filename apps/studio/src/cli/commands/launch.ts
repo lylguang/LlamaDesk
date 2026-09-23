@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
-import { homedir } from "os";
+import { homedir, tmpdir } from "os";
 import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
 import type { ParsedArgs } from "../args";
 import { optBool, optString } from "../args";
 import { controlRequest, ensureAppRunning } from "../client";
 import {
+  activateCloudProviderFallback,
   getAllSettingsFallback,
   servedNameForModelPathFallback,
   setActiveModelFallback,
@@ -13,8 +14,10 @@ import {
 } from "../db";
 import { formatBytes } from "../format";
 import { pickNumbered } from "../tui";
-import { getInstalledModels } from "./models";
+import { getCloudModelRefs, getInstalledModels, type CloudModelRef } from "./models";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { serverContextWindow } from "../../shared/benchmark";
+import type { InferenceEngine } from "../../shared/engines";
 import { resolveDataDir } from "../data-dir";
 
 type ToolKind = "anthropic" | "openai" | "generic";
@@ -120,16 +123,24 @@ export async function cmdLaunch(parsed: ParsedArgs) {
     fail(`未知工具「${tool}」。可用：${Object.keys(TOOL_SPECS).join(" / ")}`);
   }
 
+  // chatgpt --restore：把 ~/.codex 还原到改写前。纯本地操作，不需要应用在运行。
+  if (tool === "chatgpt" && optBool(parsed.options, "restore")) {
+    restoreChatgpt();
+    return;
+  }
+
   // 1. 确保应用在运行（读配置 / 起服务器都要走控制通道）。
   const connected = await ensureAppRunning({ appPath: optString(parsed.options, "app-path") });
 
-  // 2. 读取设置（网关地址 / 鉴权）。
+  // 2. 选模型（可能改活动模型 → 变更会触发本地服务器重启；选了别的云厂商的模型
+  //    还要把默认厂商切过去）。
+  const model = await resolveModel(parsed, connected);
+
+  // 3. 读取设置（网关地址 / 鉴权）。必须在上一步之后读：切换默认云厂商会重写
+  //    VLLM_API_BASE / VLLM_API_KEY，先读会拿着上一家的地址和密钥去配工具。
   const settings = connected
     ? (await controlRequest("getSettings", undefined, 15_000)).data ?? {}
     : await getAllSettingsFallback();
-
-  // 3. 选模型（可能改活动模型 → 变更会触发本地服务器重启）。
-  const model = await resolveModel(parsed, connected);
 
   // 端点由「选中的模型」决定而不是 SERVER_MODE：本地模型 → 本地推理服务器，
   // 云端模型 ID → 云端 API。集成页选的就是模型名，本地模型绝不该发到云端。
@@ -140,6 +151,14 @@ export async function cmdLaunch(parsed: ParsedArgs) {
     : cloudBase;
   const apiKey = modelIsLocal ? "EMPTY" : (settings.VLLM_API_KEY || "EMPTY");
   if (!modelIsLocal && !cloudBase) fail("云端模型需要先配置云端 API：`omi cloud --set ...`");
+
+  // ChatGPT / Codex 的模型目录要声明上下文窗口，它据此决定何时自动压缩：本地模型取推理
+  // 服务器真实的单请求窗口（llama.cpp 的 SERVER_CTX_SIZE 是 KV 总量，按 --parallel 均分），
+  // 拿不到就退回保守默认值 —— 报大了长会话会在服务端硬报错。
+  const contextWindow = modelIsLocal
+    ? serverContextWindow((settings.INFERENCE_ENGINE ?? "llama.cpp") as InferenceEngine, settings) ??
+      CHATGPT_FALLBACK_CONTEXT_WINDOW
+    : CHATGPT_FALLBACK_CONTEXT_WINDOW;
 
   // 统一走本地 API 网关：网关负责协议翻译（Anthropic ↔ OpenAI）并按模型 ID 路由本地/云端。
   // 网关可能因配置端口被占用而回退到下一个空闲端口（如 10000 被其它程序占用 → 10001），
@@ -213,14 +232,15 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   // ChatGPT：把配置写进 Codex 共用的 ~/.codex（ChatGPT 桌面端与 codex CLI 都读），
   // 然后打开桌面客户端。不走下面“找 CLI 二进制 + 前台接管”的通用路径。
   if (tool === "chatgpt") {
-    configureChatgpt(`${gatewayBase}/v1`, agentKey, model.name);
+    configureChatgpt(`${gatewayBase}/v1`, agentKey, model.name, contextWindow);
     const appPath = CHATGPT_APP_PATHS.find((p) => existsSync(p));
     if (!appPath) {
       fail("未找到 ChatGPT 桌面端。请先安装：https://chatgpt.com/download");
     }
     console.log(
-      `已写入 ~/.codex/config.toml 与 ~/.codex/models.json（模型：${model.name}）。\n` +
-        `若 ChatGPT 正在运行，请完全退出（macOS 按 ⌘Q，仅关窗口不算）后重新打开，配置才会生效。`,
+      `已写入 ~/.codex/config.toml 与 ~/.codex/models.json（模型：${model.name}，上下文 ${contextWindow}）。\n` +
+        `若 ChatGPT 正在运行，请完全退出（macOS 按 ⌘Q，仅关窗口不算）后重新打开，配置才会生效。\n` +
+        `还原：omi launch chatgpt --restore`,
     );
     console.log("正在启动 ChatGPT…");
     Bun.spawn(["open", appPath], { stdio: ["ignore", "ignore", "ignore"] });
@@ -435,10 +455,8 @@ async function configureHermesProvider(
 const CODEX_DIR = join(homedir(), ".codex");
 const CODEX_PROFILE_NAME = "omni-launch";
 
-function configureCodex(baseURL: string, model: string, memoryOn: boolean): void {
-  mkdirSync(CODEX_DIR, { recursive: true });
-
-  const catalogPath = join(CODEX_DIR, "model.json");
+/** `omi launch codex`（codex CLI）用的模型目录，独立于桌面端那份 models.json。 */
+export function codexCatalogJson(model: string): string {
   const catalog = {
     models: [
       {
@@ -460,9 +478,16 @@ function configureCodex(baseURL: string, model: string, memoryOn: boolean): void
       },
     ],
   };
-  writeFileSync(catalogPath, JSON.stringify(catalog, null, 2));
+  return JSON.stringify(catalog, null, 2);
+}
 
-  const profilePath = join(CODEX_DIR, `${CODEX_PROFILE_NAME}.config.toml`);
+/** `omi launch codex` 的 profile 文件：模型 + provider + 目录 + 可选 omni-memory MCP。 */
+export function codexProfileToml(
+  baseURL: string,
+  model: string,
+  catalogPath: string,
+  memoryOn: boolean,
+): string {
   const textLines = [
     `model = ${JSON.stringify(model)}`,
     `model_provider = ${JSON.stringify(CODEX_PROFILE_NAME)}`,
@@ -472,6 +497,9 @@ function configureCodex(baseURL: string, model: string, memoryOn: boolean): void
     `name = ${JSON.stringify("LlamaDesk")}`,
     `base_url = ${JSON.stringify(baseURL)}`,
     `wire_api = "responses"`,
+    // Codex 只对内置 openai provider 自动读 OPENAI_API_KEY；自定义 provider 必须声明
+    // env_key，否则请求一个 Authorization 头都不带（网关配了密钥时就是 401）。
+    `env_key = "OPENAI_API_KEY"`,
     "",
   ];
   if (memoryOn) {
@@ -483,7 +511,15 @@ function configureCodex(baseURL: string, model: string, memoryOn: boolean): void
       "",
     );
   }
-  writeFileSync(profilePath, textLines.join("\n"));
+  return textLines.join("\n");
+}
+
+export function configureCodex(baseURL: string, model: string, memoryOn: boolean): void {
+  mkdirSync(CODEX_DIR, { recursive: true });
+  const catalogPath = join(CODEX_DIR, "model.json");
+  writeFileSync(catalogPath, codexCatalogJson(model));
+  const profilePath = join(CODEX_DIR, `${CODEX_PROFILE_NAME}.config.toml`);
+  writeFileSync(profilePath, codexProfileToml(baseURL, model, catalogPath, memoryOn));
 }
 
 /** opencode：内联 provider 配置走 OPENCODE_CONFIG_CONTENT，模型注册进状态文件（照搬 Ollama）。 */
@@ -569,6 +605,84 @@ const CHATGPT_APP_PATHS = [
 ];
 const CHATGPT_PROVIDER = "omni";
 const CODEX_MODELS_CATALOG = join(CODEX_DIR, "models.json");
+const CHATGPT_BACKUP_DIR = join(CODEX_DIR, "backup-omni");
+const CHATGPT_CONFIG_BACKUP = join(CHATGPT_BACKUP_DIR, "config.toml");
+const CHATGPT_MANIFEST = join(CHATGPT_BACKUP_DIR, "manifest.json");
+
+/** 读不到真实上下文窗口时声明给 Codex 的保守值（云端模型走这个）。 */
+const CHATGPT_FALLBACK_CONTEXT_WINDOW = 128_000;
+
+/** 客户端自带目录读不到时的兜底提示词（见 readCodexInstructions）。 */
+const FALLBACK_CODEX_INSTRUCTIONS = [
+  "You are Codex, a coding agent working with the user in a shared workspace.",
+  "Work until the user's goal is genuinely handled, using the tools given in each request.",
+  "Read before you write, run the checks you can run, and report what you actually did.",
+  "Match the user's language.",
+].join("\n");
+
+/** 随 ChatGPT 桌面端一起安装的 codex 二进制 —— 自带模型目录（含提示词）从它这里取。 */
+const CHATGPT_CODEX_BIN_PATHS = CHATGPT_APP_PATHS.map((p) =>
+  join(p, "Contents", "Resources", "codex"),
+);
+
+/**
+ * 从 `codex debug models` 的输出里挑一份可复用的提示词（第一份非空 instructions_template）。
+ * 纯函数，便于钉住"客户端换了目录形状"时的取值行为。
+ */
+export function pickInstructionsTemplate(catalogJson: string): string | null {
+  try {
+    const parsed = JSON.parse(catalogJson) as {
+      models?: {
+        base_instructions?: string;
+        model_messages?: { instructions_template?: string };
+      }[];
+    };
+    for (const m of parsed.models ?? []) {
+      // instructions_template 可能是空串（合法但有等于没有），此时退回 base_instructions
+      const text = [m.model_messages?.instructions_template, m.base_instructions].find(
+        (t): t is string => typeof t === "string" && !!t.trim(),
+      );
+      if (text) return text;
+    }
+  } catch {
+    // 解析失败按「拿不到」处理，调用方用兜底提示词
+  }
+  return null;
+}
+
+/**
+ * Codex 的工具协议提示词。向已安装的客户端要它自带的那一份，而不是在仓库里抄一份
+ * 别人的提示词 —— 客户端一升级就自动跟着升级（`debug models` 在本机约 20ms）。
+ *
+ * 用**空 CODEX_HOME** 跑：拿的是客户端内置目录，不会被我们自己的 config.toml /
+ * 尚未生成的 models.json 干扰（首次运行时 config 已经指向那个还不存在的文件）。
+ */
+function readCodexInstructions(): string {
+  const candidates = [...CHATGPT_CODEX_BIN_PATHS, Bun.which("codex") ?? ""];
+  let scratch: string | undefined;
+  try {
+    for (const bin of candidates) {
+      if (!bin || !existsSync(bin)) continue;
+      try {
+        scratch ??= mkdtempSync(join(tmpdir(), "omni-codex-catalog-"));
+        const proc = Bun.spawnSync([bin, "debug", "models"], {
+          stdout: "pipe",
+          stderr: "ignore",
+          timeout: 20_000,
+          env: { ...process.env, CODEX_HOME: scratch },
+        });
+        if (proc.exitCode !== 0) continue;
+        const text = pickInstructionsTemplate(new TextDecoder().decode(proc.stdout));
+        if (text) return text;
+      } catch {
+        // 换下一个候选；全都失败就用兜底提示词
+      }
+    }
+  } finally {
+    if (scratch) rmSync(scratch, { recursive: true, force: true });
+  }
+  return FALLBACK_CODEX_INSTRUCTIONS;
+}
 
 // config.toml 顶部会整体替换的键；值由所选模型 / 网关端点决定。
 const CHATGPT_TARGET_KEYS = [
@@ -658,7 +772,7 @@ function tomlKey(line: string): string {
  * 精细改写 ~/.codex/config.toml：只替换顶部目标键、删掉旧 omni provider 区块并重建，
  * 其余区块（mcp_servers / plugins / marketplaces …）逐字保留。
  */
-function patchCodexConfig(
+export function patchCodexConfig(
   original: string,
   values: Record<string, string>,
   providerBlock: string,
@@ -668,6 +782,9 @@ function patchCodexConfig(
   const seen = new Set<string>();
   const state = { depth: 0, ml: "" };
   let inLeading = true;
+  // 命中旧 omni provider 区块时整段丢弃（含正文）：只丢节头会把 name / base_url /
+  // experimental_bearer_token 留在上一个区块里 —— 上一轮写的密钥就这么留在了 [desktop] 下。
+  let dropping = false;
 
   for (const raw of lines) {
     const line = raw.replace(/\r$/, "");
@@ -676,6 +793,7 @@ function patchCodexConfig(
     const isHeader = state.depth === 0 && !state.ml && trimmed.startsWith("[");
 
     if (isHeader) {
+      dropping = false;
       const close = trimmed.indexOf("]");
       const section =
         close > 0 ? trimmed.slice(1, close).trim().replace(/^"(.*)"$/, "$1") : "";
@@ -684,6 +802,7 @@ function patchCodexConfig(
         section.startsWith(`model_providers.${CHATGPT_PROVIDER}.`)
       ) {
         // 旧 omni provider 区块整段丢弃，稍后用新值重建
+        dropping = true;
         tomlScan(state, line);
         continue;
       }
@@ -700,6 +819,11 @@ function patchCodexConfig(
         inLeading = false;
       }
       out.push(line);
+      tomlScan(state, line);
+      continue;
+    }
+
+    if (dropping) {
       tomlScan(state, line);
       continue;
     }
@@ -739,33 +863,124 @@ function patchCodexConfig(
   return `${body}${body ? "\n\n" : ""}${providerBlock}`;
 }
 
-/** models.json 模型目录：ChatGPT 桌面端模型选择器读它，缺失会显示 "Unknown model"。 */
-function chatgptModelsJson(model: string): string {
+/**
+ * 摘掉本工具写进 config.toml 的内容：omni provider 区块 + 顶部目标键，其余原样保留。
+ * 只在「安装前没有 config.toml、因而不存在备份」时用于还原。
+ */
+export function stripChatgptConfig(original: string): string {
+  const lines = original.split("\n");
+  const out: string[] = [];
+  const state = { depth: 0, ml: "" };
+  let inLeading = true;
+  let dropping = false;
+
+  for (const raw of lines) {
+    const line = raw.replace(/\r$/, "");
+    const trimmed = line.trim();
+    const isHeader = state.depth === 0 && !state.ml && trimmed.startsWith("[");
+
+    if (isHeader) {
+      dropping = false;
+      const close = trimmed.indexOf("]");
+      const section =
+        close > 0 ? trimmed.slice(1, close).trim().replace(/^"(.*)"$/, "$1") : "";
+      inLeading = false;
+      if (
+        section === `model_providers.${CHATGPT_PROVIDER}` ||
+        section.startsWith(`model_providers.${CHATGPT_PROVIDER}.`)
+      ) {
+        dropping = true;
+        tomlScan(state, line);
+        continue;
+      }
+      out.push(line);
+      tomlScan(state, line);
+      continue;
+    }
+
+    if (dropping) {
+      tomlScan(state, line);
+      continue;
+    }
+
+    if (inLeading && !state.ml && state.depth === 0) {
+      const k = tomlKey(line);
+      if (k && CHATGPT_TARGET_KEYS.includes(k)) {
+        tomlScan(state, line);
+        continue;
+      }
+    }
+    out.push(line);
+    tomlScan(state, line);
+  }
+
+  const body = out.join("\n").trimEnd();
+  return body ? `${body}\n` : "";
+}
+
+/**
+ * models.json 模型目录：ChatGPT 桌面端的模型选择器读它，字段照抄它自带目录的形状
+ * （缺字段会退回 "fallback model metadata"，模型名显示 Unknown model）。
+ *
+ * 四个字段决定一条目录项能不能用：
+ *   - `base_instructions` / `model_messages.instructions_template`  Codex 的工具协议说明。
+ *     **两个都缺会让整份 config.toml 解析失败**：
+ *       failed to parse model_catalog_json …: model `X` is missing both
+ *       base_instructions and model_messages.instructions_template
+ *     —— 提示词写空串能过校验，但那样模型拿不到工具协议，等于没有 Codex 的能力。
+ *   - `visibility: "list"`  选择器里可见（缺失等于隐藏）
+ *   - `context_window`      自动压缩的基准；报大了长会话会在服务端硬报错
+ *   - `supported_reasoning_levels` 与 config.toml 的 model_reasoning_effort 必须对得上
+ */
+export function chatgptModelsJson(
+  model: string,
+  contextWindow: number,
+  instructions: string,
+): string {
   return JSON.stringify(
     {
       models: [
         {
           slug: model,
           display_name: model,
+          description: "Served by OmniStudio (local gateway).",
           prefer_websockets: false,
           support_verbosity: true,
           default_verbosity: "low",
           apply_patch_tool_type: "freeform",
           web_search_tool_type: "text",
           input_modalities: ["text"],
+          supports_image_detail_original: false,
           truncation_policy: { mode: "tokens", limit: 10000 },
           supports_parallel_tool_calls: true,
+          tool_mode: null,
           multi_agent_version: "v2",
           use_responses_lite: false,
           include_skills_usage_instructions: false,
-          context_window: 128_000,
-          max_context_window: 128_000,
+          context_window: contextWindow,
+          max_context_window: contextWindow,
+          effective_context_window_percent: 95,
+          auto_compact_token_limit: null,
+          reasoning_summary_format: "experimental",
+          // 思考摘要：本地模型经网关只回正文，声明不支持比声明支持安全
+          //（声明支持会等一段永远不会来的摘要）。
+          supports_reasoning_summaries: false,
           default_reasoning_summary: "none",
           default_reasoning_level: "high",
           supported_reasoning_levels: [
             { effort: "low", description: "Fast responses with lighter reasoning" },
             { effort: "high", description: "Extra high reasoning depth for complex problems" },
           ],
+          shell_type: "shell_command",
+          visibility: "list",
+          minimal_client_version: "0.144.0",
+          supported_in_api: true,
+          priority: 1,
+          experimental_supported_tools: [],
+          supports_search_tool: false,
+          default_service_tier: null,
+          base_instructions: instructions,
+          model_messages: { instructions_template: instructions },
         },
       ],
     },
@@ -774,21 +989,13 @@ function chatgptModelsJson(model: string): string {
   );
 }
 
-/** 把所选模型 + 网关端点写进 ChatGPT 桌面端共用的 Codex 配置（config.toml + models.json）。 */
-function configureChatgpt(baseURL: string, apiKey: string, model: string): void {
-  mkdirSync(CODEX_DIR, { recursive: true });
-
-  const cfgPath = join(CODEX_DIR, "config.toml");
-  const original = existsSync(cfgPath) ? readFileSync(cfgPath, "utf8") : "";
-
-  // 首次改写前备份一份原始 config.toml，方便手工还原。
-  const backupDir = join(CODEX_DIR, "backup-omni");
-  const backupCfg = join(backupDir, "config.toml");
-  if (original && !existsSync(backupCfg)) {
-    mkdirSync(backupDir, { recursive: true });
-    writeFileSync(backupCfg, original);
-  }
-
+/** config.toml 的改写结果（纯函数，方便钉住 TOML 手术的边界情况）。 */
+export function chatgptConfigText(
+  original: string,
+  baseURL: string,
+  apiKey: string,
+  model: string,
+): string {
   const esc = (s: string) => s.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
   const values: Record<string, string> = {
     model: `"${model}"`,
@@ -806,9 +1013,67 @@ function configureChatgpt(baseURL: string, apiKey: string, model: string): void 
     `wire_api = "responses"`,
     `experimental_bearer_token = "${esc(apiKey)}"`,
   ].join("\n");
+  return patchCodexConfig(original, values, providerBlock);
+}
 
-  writeFileSync(cfgPath, patchCodexConfig(original, values, providerBlock));
-  writeFileSync(CODEX_MODELS_CATALOG, chatgptModelsJson(model));
+/** 把所选模型 + 网关端点写进 ChatGPT 桌面端共用的 Codex 配置（config.toml + models.json）。 */
+export function configureChatgpt(
+  baseURL: string,
+  apiKey: string,
+  model: string,
+  contextWindow: number,
+): void {
+  mkdirSync(CODEX_DIR, { recursive: true });
+
+  const cfgPath = join(CODEX_DIR, "config.toml");
+  const original = existsSync(cfgPath) ? readFileSync(cfgPath, "utf8") : "";
+
+  // 首次改写前备份一份原始 config.toml（并用 manifest 记下它当时是否存在），
+  // --restore 靠这两样精确还原。
+  if (!existsSync(CHATGPT_MANIFEST)) {
+    mkdirSync(CHATGPT_BACKUP_DIR, { recursive: true });
+    if (original) writeFileSync(CHATGPT_CONFIG_BACKUP, original);
+    writeFileSync(
+      CHATGPT_MANIFEST,
+      JSON.stringify({ originalExisted: !!original, createdAt: new Date().toISOString() }, null, 2),
+    );
+  }
+
+  writeFileSync(cfgPath, chatgptConfigText(original, baseURL, apiKey, model));
+  writeFileSync(
+    CODEX_MODELS_CATALOG,
+    chatgptModelsJson(model, contextWindow, readCodexInstructions()),
+  );
+}
+
+/**
+ * 还原 ~/.codex：有备份就整份换回，没有（安装前 config.toml 不存在）就只摘掉本工具写进去的
+ * 键与 provider 区块 —— 桌面端自己也会往 config.toml 里加 plugins / marketplaces，
+ * 整份删掉会把它的设置一起带走。
+ */
+export function restoreChatgpt(): void {
+  const cfgPath = join(CODEX_DIR, "config.toml");
+  const manifest = readJSONFile<{ originalExisted?: boolean }>(CHATGPT_MANIFEST);
+
+  if (existsSync(CHATGPT_CONFIG_BACKUP)) {
+    writeFileSync(cfgPath, readFileSync(CHATGPT_CONFIG_BACKUP, "utf8"));
+    console.log("已用备份还原 ~/.codex/config.toml。");
+  } else if (existsSync(cfgPath)) {
+    if (manifest?.originalExisted) {
+      fail(
+        `备份缺失（${CHATGPT_CONFIG_BACKUP}），无法精确还原。\n` +
+          `请手工删掉 config.toml 里的 [model_providers.${CHATGPT_PROVIDER}] 区块与 model / model_provider 等顶部键。`,
+      );
+    }
+    writeFileSync(cfgPath, stripChatgptConfig(readFileSync(cfgPath, "utf8")));
+    console.log("安装前没有 config.toml，已摘掉本工具写入的键与 provider 区块（其余保留）。");
+  }
+  if (existsSync(CODEX_MODELS_CATALOG)) {
+    rmSync(CODEX_MODELS_CATALOG);
+    console.log("已删除 ~/.codex/models.json。");
+  }
+  rmSync(CHATGPT_BACKUP_DIR, { recursive: true, force: true });
+  console.log("提示：完全退出 ChatGPT（⌘Q）后重新打开，配置才会生效。");
 }
 
 async function resolveModel(
@@ -838,10 +1103,21 @@ async function resolveModel(
         changed: !match.isActive,
       };
     }
-    // 云端模型 ID 透传
-    const cloud = await cloudModelIds();
-    if (cloud.includes(flag)) return { name: flag, changed: false };
-    fail(`未找到模型「${flag}」。运行 \`omi models\` 查看已装模型。`);
+    // 云端模型 ID：按「所有已启用厂商」匹配，不只激活那一家（见 getCloudModelRefs 注释）。
+    const picked = pickCloudModelFor(await getCloudModelRefs(), flag);
+    if (picked.hit) {
+      await ensureCloudProviderActive(picked.hit);
+      return { name: flag, changed: false };
+    }
+    if (picked.disabled) {
+      fail(
+        `模型「${flag}」属于云服务商「${picked.disabled.providerName}」，但它还没有启用。\n` +
+          `去「设置 → 云端模型」里启动它（启动时会校验密钥），或用 \`omi models\` 看有哪些可用。`,
+      );
+    }
+    fail(
+      `未找到模型「${flag}」。本地模型看 \`omi models\`；云端模型要先在「设置 → 云端模型」里启用对应厂商。`,
+    );
   }
 
   // 只有一个模型时自动选中
@@ -887,16 +1163,36 @@ async function setActive(connected: boolean, path: string): Promise<void> {
   if (!fb.ok) fail(fb.error ?? "设置活动模型失败");
 }
 
-async function cloudModelIds(): Promise<string[]> {
-  const r = await controlRequest("models", undefined, 15_000);
-  if (r.connected && r.ok && Array.isArray(r.data?.cloud)) {
-    return r.data.cloud.map((m: { id?: unknown }) => (typeof m?.id === "string" ? m.id : ""));
+/**
+ * 挑出 `--model` 指定的云模型：默认厂商优先，然后是已启用厂商，最后才考虑已停用的
+ * （留给报错时告诉用户"模型在，但厂商没启用"）。纯函数，便于钉住决策表。
+ */
+export function pickCloudModelFor(
+  refs: CloudModelRef[],
+  wanted: string,
+): { hit?: CloudModelRef; disabled?: CloudModelRef } {
+  const same = refs.filter((m) => m.id === wanted);
+  const hit = same.find((m) => m.active) ?? same.find((m) => m.enabled);
+  return { hit, disabled: hit ? undefined : same[0] };
+}
+
+/**
+ * 网关只把云端请求发往**默认（激活）厂商**，所以模型不属于它时得先切过去 ——
+ * 否则请求会拿着这个模型去问另一家，回来的是一句莫名其妙的「模型不存在」。
+ * GUI 的模型选择器做的是同一件事（chat-model.ts 的 selectChatModel）。
+ */
+async function ensureCloudProviderActive(ref: CloudModelRef): Promise<void> {
+  if (ref.active) return;
+  // 首选让应用自己切（顺带刷新界面状态）。控制通道不通就退回直接写库：应用没跑、
+  // 应用还是改动前的旧实例（"unknown command: …"）、或这条命令在应用侧抛了错 ——
+  // 三种情况都用同一份 SQLite，而 activateCloudProvider 本身幂等，重复执行无害。
+  const r = await controlRequest("cloudProviderActivate", { id: ref.providerId }, 15_000);
+  if (!r.ok) {
+    const fb = await activateCloudProviderFallback(ref.providerId);
+    if (!fb.ok) fail(fb.error ?? r.error ?? `切换默认云厂商「${ref.providerName}」失败`);
   }
-  const settings = await getAllSettingsFallback().catch(() => ({} as Record<string, string>));
-  try {
-    const raw = JSON.parse(settings.CLOUD_MODELS ?? "[]");
-    return Array.isArray(raw) ? raw.map((m: { id?: unknown }) => String((m as { id?: unknown })?.id ?? "")) : [];
-  } catch {
-    return [];
+  console.log(`「${ref.id}」属于云服务商「${ref.providerName}」，已把它切为默认厂商。`);
+  if (!ref.hasKey) {
+    console.log(`提示：该服务商还没配 API Key，去「设置 → 云端模型」补齐后再发起请求。`);
   }
 }

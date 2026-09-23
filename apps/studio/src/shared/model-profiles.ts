@@ -8,6 +8,7 @@ export type ServerArgs = {
   parallel: number;
   temp: number;
   topP: number;
+  topK: number;
   repeatPenalty: number;
   repeatLastN: number;
   noMmprojOffload: boolean;
@@ -21,6 +22,8 @@ const DEFAULT_SERVER_ARGS: ServerArgs = {
   parallel: 1,
   temp: 0.2,
   topP: 0.9,
+  // llama.cpp 自己的 top-k 默认值就是 40，写在这里是为了让设置页显示的数和实际生效的一致。
+  topK: 40,
   repeatPenalty: 1.12,
   repeatLastN: 256,
   noMmprojOffload: true,

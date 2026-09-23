@@ -5,6 +5,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earen
 
 import { applyPatch } from "./apply-patch";
 import { isInsideWorkspace } from "./permissions";
+import { resolveCommandShell } from "./shell";
 import {
   explainSandboxDenial,
   logSandboxDegraded,
@@ -774,7 +775,9 @@ function createBash(ctx: ToolContext): BuiltTool {
           "Shell access is disabled. Enable it in the Agent workspace settings to allow commands.",
         );
       }
-      const shell = process.env.SHELL || "/bin/zsh";
+      // shell 由平台决定（Windows 上没有 /bin/zsh：以前这里硬兜底成它，
+      // spawn 直接 ENOENT，agent 一条命令都跑不了 —— issue #15）。
+      const shell = resolveCommandShell();
       // 执行过的每条命令都入库留痕：模型可能被注入内容诱导执行破坏性命令，
       // 出事后要能查到"谁在什么时候跑了什么"。
       audit("agent_shell", `${ctx.workspace}: ${params.command}`);
@@ -783,7 +786,8 @@ function createBash(ctx: ToolContext): BuiltTool {
       // 「写到工作区外」与「读凭据目录」由内核拦下，而不是靠命令黑名单。
       const wrapped = wrapShellCommand(params.command, {
         workspace: ctx.workspace,
-        shell,
+        shell: shell.file,
+        shellArgs: shell.commandArgs,
         authorizedFolders: authorizedFoldersOf(ctx),
       });
       if (wrapped.degradedReason) logSandboxDegraded(wrapped.degradedReason);
@@ -845,7 +849,7 @@ function createBash(ctx: ToolContext): BuiltTool {
               : null;
             if (escalation === null && ctx.escalateSandbox) {
               audit("agent_shell", `${ctx.workspace}: [跳过沙箱重试] ${params.command}`);
-              const retried = Bun.spawn([shell, "-c", params.command], {
+              const retried = Bun.spawn(shell.commandArgs(params.command), {
                 cwd: ctx.workspace,
                 stdout: "pipe",
                 stderr: "pipe",
@@ -1012,7 +1016,12 @@ function createKnowledgeSearch(): BuiltTool {
         const formatted = hits
           .map(
             (h, i) =>
-              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n${h.content}`,
+              `[${i + 1}] 《${h.docName}》分块 ${h.seq}（${h.kbName}，相关度 ${h.score.toFixed(2)}）\n` +
+              (h.modality
+                ? // 与 kb-mcp.ts 的 mediaHitTag 同款：防空正文媒体命中呈现为空行
+                  `[${h.modality === "image" ? "图片" : h.modality === "audio" ? "音频" : "视频"}] ${h.docName}` +
+                  (h.content ? `\n${h.content}` : "")
+                : h.content),
           )
           .join("\n\n");
         return textResult(`找到 ${hits.length} 条相关片段：\n\n${formatted}`);

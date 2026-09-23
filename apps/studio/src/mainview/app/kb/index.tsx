@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   FileTextIcon,
   LayersIcon,
@@ -12,145 +12,23 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { Button } from "@ui/button";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@ui/dialog";
-import { Input } from "@ui/input";
-import { Label } from "@ui/label";
-import { Textarea } from "@ui/textarea";
 import { useKbStore, type KbTab } from "@stores/kb";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { StatCard } from "@components/stat-card";
 import type { KbView } from "@/bun/knowledge";
 import { KbDocsTab } from "./docs-tab";
 import { KbRecallTab } from "./recall-tab";
 import { KbSettingsTab } from "./settings-tab";
 import { KbGovernanceTab } from "./governance-tab";
 import { KbAccessTab } from "./access-tab";
-import { KbModelSelect, useKbModelCandidates } from "./model-select";
+// 新建弹窗已拆到 ./create-dialog；这里再导出，保持侧栏与测试的导入路径不变。
+import { KbCreateDialog } from "./create-dialog";
+export { KbCreateDialog };
 
 /** 知识库列表（侧栏 / 主页 / 聊天选择器共用）。 */
 export function useKbListQuery() {
   return useQuery({ queryKey: ["kb-list"], queryFn: () => rpcClient.kbList(undefined) });
-}
-
-/** 新建知识库弹窗（侧栏「新建」与主页空状态共用，开关在 kb store）。
- *  嵌入/重排模型可创建时就选（默认「不使用」），候选来自本地推理服务与云端配置。 */
-export function KbCreateDialog() {
-  const t = useT();
-  const queryClient = useQueryClient();
-  const open = useKbStore((s) => s.createOpen);
-  const setOpen = useKbStore((s) => s.setCreateOpen);
-  const [name, setName] = useState("");
-  const [description, setDescription] = useState("");
-  const [embeddingModel, setEmbeddingModel] = useState("");
-  const [rerankModel, setRerankModel] = useState("");
-
-  // 弹窗打开时才拉模型候选（本地推理服务的 /v1/models + 设置里的云端模型）。
-  const embedCandidates = useKbModelCandidates("embedding", "", "", open);
-  const rerankCandidates = useKbModelCandidates("rerank", "", "", open);
-
-  const createMutation = useMutation({
-    mutationFn: () =>
-      rpcClient.kbCreate({
-        name,
-        description,
-        embeddingModel: embeddingModel || undefined,
-        rerankModel: rerankModel || undefined,
-      }),
-    onSuccess: (data) => {
-      queryClient.invalidateQueries({ queryKey: ["kb-list"] });
-      useKbStore.getState().setSelectedKbId(data.kb.id);
-      setOpen(false);
-    },
-  });
-
-  return (
-    <Dialog
-      open={open}
-      onOpenChange={(next) => {
-        if (!next) setOpen(false);
-      }}
-    >
-      <DialogContent className="max-w-sm">
-        <DialogHeader>
-          <DialogTitle>{t("kb.create.title")}</DialogTitle>
-          <DialogDescription>{t("kb.create.desc")}</DialogDescription>
-        </DialogHeader>
-        <div className="flex flex-col gap-4 py-1">
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="kb-name">{t("kb.create.name")}</Label>
-            <Input
-              id="kb-name"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder={t("kb.create.namePlaceholder")}
-              autoFocus
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="kb-desc">{t("kb.create.descLabel")}</Label>
-            <Textarea
-              id="kb-desc"
-              value={description}
-              onChange={(e) => setDescription(e.target.value)}
-              placeholder={t("kb.create.descPlaceholder")}
-              rows={2}
-              className="resize-none"
-            />
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="kb-embed-select">{t("kb.create.embedding")}</Label>
-            <KbModelSelect
-              id="kb-embed-select"
-              value={embeddingModel}
-              onChange={setEmbeddingModel}
-              candidates={embedCandidates.data}
-              loading={embedCandidates.isLoading}
-            />
-            <p className="text-[10px] leading-4 text-muted-foreground/80">
-              {t("kb.create.embeddingHint")}
-            </p>
-          </div>
-          <div className="flex flex-col gap-1.5">
-            <Label htmlFor="kb-rerank-select">{t("kb.create.rerank")}</Label>
-            <KbModelSelect
-              id="kb-rerank-select"
-              value={rerankModel}
-              onChange={setRerankModel}
-              candidates={rerankCandidates.data}
-              loading={rerankCandidates.isLoading}
-            />
-            <p className="text-[10px] leading-4 text-muted-foreground/80">
-              {t("kb.create.rerankHint")}
-            </p>
-          </div>
-        </div>
-        <DialogFooter>
-          <Button variant="outline" size="sm" onClick={() => setOpen(false)}>
-            {t("common.cancel")}
-          </Button>
-          <Button
-            size="sm"
-            disabled={!name.trim() || createMutation.isPending}
-            onClick={() => createMutation.mutate()}
-          >
-            {createMutation.isPending ? (
-              <Loader2Icon className="size-3.5 animate-spin" />
-            ) : (
-              <PlusIcon className="size-3.5" />
-            )}
-            {t("kb.create.submit")}
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
-  );
 }
 
 const TABS: { key: KbTab; labelKey: string }[] = [
@@ -160,33 +38,6 @@ const TABS: { key: KbTab; labelKey: string }[] = [
   { key: "governance", labelKey: "kb.tab.governance" },
   { key: "access", labelKey: "kb.tab.access" },
 ];
-
-function StatCard({
-  icon,
-  value,
-  label,
-  caption,
-}: {
-  icon: React.ReactNode;
-  value: string;
-  label: string;
-  caption?: string;
-}) {
-  return (
-    <div className="flex min-w-0 flex-1 items-center gap-2.5 rounded-xl border bg-card px-3 py-2">
-      <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted text-muted-foreground">
-        {icon}
-      </span>
-      <span className="min-w-0">
-        <span className="block truncate text-sm font-semibold tabular-nums leading-tight">{value}</span>
-        <span className="block truncate text-[10px] leading-tight text-muted-foreground">
-          {label}
-          {caption ? ` · ${caption}` : ""}
-        </span>
-      </span>
-    </div>
-  );
-}
 
 /** 库详情头部：名称/描述 + 四格统计带 + 标签栏。 */
 function KbHeader({ kb }: { kb: KbView }) {
@@ -213,22 +64,26 @@ function KbHeader({ kb }: { kb: KbView }) {
 
       <div className="flex flex-wrap gap-2">
         <StatCard
+          variant="rowCompact"
           icon={<FileTextIcon className="size-4" />}
           value={String(kb.docCount)}
           label={t("kb.stats.docs")}
         />
         <StatCard
+          variant="rowCompact"
           icon={<LayersIcon className="size-4" />}
           value={String(kb.chunkCount)}
           label={t("kb.stats.chunks")}
         />
         <StatCard
+          variant="rowCompact"
           icon={<SparklesIcon className="size-4" />}
           value={kb.embeddingModel ? `${kb.embeddedCount}/${kb.chunkCount}` : "—"}
           label={t("kb.stats.vectors")}
           caption={kb.embeddingModel ? `${vectorPct}%` : undefined}
         />
         <StatCard
+          variant="rowCompact"
           icon={<SearchIcon className="size-4" />}
           value={kb.embeddingModel ? t("kb.stats.mixed") : t("kb.stats.keyword")}
           label={t("kb.stats.retrieval")}

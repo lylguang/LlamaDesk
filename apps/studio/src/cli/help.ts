@@ -215,7 +215,8 @@ export const CMD_HELP: Record<string, string> = {
   --list             列出最近的基准记录（最多 20 条）后退出
   --cloud [provider] 直接测云端服务商（不带值则用当前配置的服务商）
   --gen <n>          每次请求生成多少 token
-  --batch <n>        并发批大小
+  --batches <a,b>    要扫的并发档位，逗号分隔（如 1,2,4；上限 64）
+  --batch <n>        单个并发档的简写（等价于 --batches n）
   --contexts <a,b>   要测的上下文档位，逗号分隔（如 1024,4096,8192）
   --json             以 JSON 输出结果
   --open             跑完后在应用里打开基准测试页
@@ -243,8 +244,8 @@ Agent 等子系统的失败与关键事件都记在同一份 app.log 里。
 选项：
   --limit <n>       显示最近 n 条（默认 50）
   --level <l>       只看该级别及以上：debug | info | warn | error
-  --source <s>      只看某个子系统：image | video | tts | asr | ocr | server |
-                    agent | download | gateway | media-server | client | app ...
+  --source <s>      只看某个子系统：image | video | music | tts | asr | ocr |
+                    server | agent | download | gateway | media-server | client | app ...
   --search <text>   消息 / 事件名 / 上下文包含该文本（报错原文、builtin…）
   --event <name>    事件名包含该子串（如 generate.failed）
   --verbose         额外打印结构化上下文（detail）；注意 -v 是全局的 --version
@@ -519,13 +520,19 @@ const LAUNCH_TOOL_WIRING: Record<string, { protocol: string; how: string; extra?
   chatgpt: {
     protocol: "OpenAI 兼容（responses）",
     how: "改写 ~/.codex/config.toml（首次先备份到 ~/.codex/backup-omni/）并写 models.json，然后打开桌面端",
-    extra: "若 ChatGPT 正在运行，请完全退出（⌘Q）后重新打开",
+    extra:
+      "若 ChatGPT 正在运行，请完全退出（⌘Q）后重新打开；--restore 可把 ~/.codex 还原到改写前",
   },
 };
 
 export function launchToolHelp(tool: string): string | undefined {
   const wiring = LAUNCH_TOOL_WIRING[tool];
   if (!wiring) return undefined;
+  const restore =
+    tool === "chatgpt"
+      ? "\n还原：omi launch chatgpt --restore —— 从 ~/.codex/backup-omni/ 换回原 config.toml 并删掉\n" +
+        "  models.json；安装前没有 config.toml 时只摘掉本工具写入的键，桌面端自己的区块保留。\n"
+      : "";
   return `omi launch ${tool} — ${wiring.protocol}
 
 用法：omi launch ${tool} [--model <名称|路径|云端 id>] [-- 工具参数...]
@@ -535,7 +542,7 @@ export function launchToolHelp(tool: string): string | undefined {
 
 启动流程：确保应用在运行 → 选模型 → 必要时启动/重启本地推理服务器 →
   确保 API 网关在线 → 写配置 → 注入共享记忆 → 前台拉起 ${tool}。
-
+${restore}
 每次启动记录：~/.omni/launcher/${tool}.json（模型 / 端点 / 时间）
 
 示例：

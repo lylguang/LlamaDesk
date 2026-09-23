@@ -6,8 +6,8 @@
 
 <p align="center">
   <b>本地大模型一体化桌面工作台</b><br/>
-  管理模型、运行推理服务，内置对话 / 语音 / 图片 / 视频 / OCR / 翻译应用，<br/>
-  以及本地知识库、共享记忆与 Skills 管理，全程本地优先。
+  管理模型、运行推理服务，内置对话 / 语音 / 图片 / 视频 / 音乐 / OCR / 翻译应用，<br/>
+  外加提示词广场、小应用、本地知识库、共享记忆与 Skills 管理，全程本地优先。
 </p>
 
 <p align="center">
@@ -28,6 +28,67 @@
 ---
 
 ## 📸 界面预览
+
+一套工作台走完本地 AI 的整条链路：最左图标栏切换应用，应用内左栏选后端、填参数，右侧直接看结果 —— 所有页面共用同一套布局。
+
+### 🎨 AI 生图 · 🎬 AI 视频
+
+<table>
+  <tr>
+    <th align="center">AI 生图 · 云端 API / 本地 MLX / ComfyUI</th>
+    <th align="center">AI 视频 · MiniMax H3 / Seedance / ComfyUI</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-image-gen.png" alt="AI 生图" width="100%"/></td>
+    <td><img src="docs/images/screenshot-video.png" alt="AI 视频" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>同一页切换云端生图、Apple Silicon 本地 MLX（mflux）与 ComfyUI 三种后端，比例 / 宽度 / 高度 / 数量随手调；出图即进历史区，可回看、下载，右侧最近生成一排缩略图随手翻。</td>
+    <td>三种后端统一为「提交任务 + 轮询」：MiniMax H3 支持首帧图生视频，时长 / 宽高比 / 分辨率 / 首帧图都在左栏，成片进历史库可直接播放、下载或删除。</td>
+  </tr>
+</table>
+
+### 🧰 提示词广场 · 🧩 小应用
+
+<table>
+  <tr>
+    <th align="center">提示词广场 · 内置 2,733 条可复制题库</th>
+    <th align="center">小应用 · 一次做一件事的沙箱工具</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-prompt-plaza.png" alt="提示词广场" width="100%"/></td>
+    <td><img src="docs/images/screenshot-mini-apps.png" alt="小应用" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>生图 638 / 视频 2,060 / 大模型 35 条提示词，按 APP、运营、海报、插画、IP、艺术等分类，可搜索、可按来源筛选；「复制」拿原文，「去试试」按类型跳到生图 / 视频 / 对话并带入，「加入我的提示词」收进自己的库。</td>
+    <td>七个自包含小页面：抠图换底、证件照、马赛克、形象照、会议纪要、文案助手、笔记；卡片上标明各自需要的能力（本地抠图 / 对话模型 / 语音识别 / 生图），缺哪项点「去配置」补齐，其余照常可用。</td>
+  </tr>
+</table>
+
+### 📚 知识库 · 🧠 记忆
+
+<table>
+  <tr>
+    <th align="center">知识库 · 本地 RAG（混合检索 + 引用溯源）</th>
+    <th align="center">记忆 · 全 Agent 共享的长期记忆</th>
+  </tr>
+  <tr>
+    <td><img src="docs/images/screenshot-knowledge-base.png" alt="知识库" width="100%"/></td>
+    <td><img src="docs/images/screenshot-memory.png" alt="记忆" width="100%"/></td>
+  </tr>
+  <tr>
+    <td>添加文件 / 导入目录 / 添加笔记 / 添加网页四种数据源，切片与向量化状态逐条可见；对话里挂上知识库即带 <code>[n]</code> 引用，同一份库还能经网关 <code>/mcp</code> 开放给任意 MCP 客户端。</td>
+    <td>记忆总览（总量 / 置顶 / Agent 写入 / 检索命中率 / 合并写入 / 敏感内容拦截）+ 全库列表，置顶记忆常驻系统提示；「启用记忆」与「写入需确认」两个开关决定 Agent 能不能写、要不要你放行。</td>
+  </tr>
+</table>
+
+### 📊 基准测试
+
+<img src="docs/images/screenshot-benchmark.png" alt="基准测试" width="100%"/>
+
+一次跑完上下文长度（1K–1M）× 并发档位 × 缓存场景（冷启 / 部分命中 / 完全命中）的矩阵：TTFT、TPOT、TPS、聚合吞吐、Prefill 逐档列出，「缓存命中对比」把冷启与命中的倍数差直接算给你看（×1 附近说明服务端根本没吃到缓存），结果落库并可导出 HTML。
+
+### 更多界面
 
 <table>
   <tr>
@@ -68,7 +129,7 @@
 ### 模型服务
 
 - **首次引导** — 内置 Qwen3.5 4B / 9B / 35B-A3B 与 Qwen3.6 27B 一键模型，选中后自动下载并部署，选完即用；也支持手动输入 HuggingFace GGUF 自定义模型。
-- **云端模型服务** — 内置 20 家主流 OpenAI 兼容厂商预设（OmniLabs、DeepSeek、通义千问、智谱 GLM、Kimi、豆包、文心一言、腾讯混元、MiniMax、讯飞星火、零一万物、阶跃星辰、硅基流动、OpenRouter、OpenAI、Anthropic、Gemini 等）；配置以「厂商列表 / 配置详情 / 模型」三栏呈现，多厂商并存、单一点击激活，激活厂商自动写回网关与 `omi` CLI 读取的槽位；支持连通检测与在线拉取模型列表，「默认模型」页集中指定各用途的默认模型。
+- **云端模型服务** — 内置 20 家主流 OpenAI 兼容厂商预设（OmniLabs、DeepSeek、通义千问、智谱 GLM、Kimi、豆包、文心一言、腾讯混元、MiniMax、讯飞星火、零一万物、阶跃星辰、硅基流动、OpenRouter、OpenAI、Anthropic、Gemini 等）；配置以「厂商列表 / 配置详情 / 模型」三栏呈现，多厂商并存、单一点击激活，激活厂商自动写回网关与 `omi` CLI 读取的槽位；支持连通检测与在线拉取模型列表；「设置 → 云端模型」里集中指定各用途的默认模型。
 - **三引擎统一运行时** — llama.cpp（默认：GGUF 本地文件或 HuggingFace，GPU 卸载、KV 缓存量化、多模态 mmproj）、vLLM、SGLang 统一抽象、热切换；也可直连任意 OpenAI 兼容端点（远程模式）。
 - **统一网关** — 本地单一端点按模型名路由到本地推理服务或云端 API，同时提供 Chat Completions / Responses / Anthropic Messages 三套协议（含双向工具调用）；可选 API Key 鉴权，内置交互式 OpenAPI 文档，端点 `/v1`、`/health`、`/metrics` 设置页一键复制；另提供 `/mcp` 与 `/v1/memories` 对外暴露知识库与共享记忆。
 
@@ -78,12 +139,15 @@
 
 - **对话** — 流式回复 + 推理过程展示、图片多模态输入、联网检索（Bing / DuckDuckGo / Tavily，结果注入上下文并标注来源）、文本附件；可挂载本地知识库提问并给出 `[n]` 引用溯源；自动标题、按应用隔离会话、用量统计。
 - **语音** — TTS 多来源（audio.cpp 本地引擎、Edge-TTS、OpenAI 兼容 TTS）+ 声音克隆库 + 多引擎 ASR（whisper.cpp / audio.cpp / OpenAI 兼容转写）；实时聆听对话（云端 / 本地），记录库内嵌播放器。
-- **图片** — 经云端 OpenAI 兼容 API、ComfyUI 或 Apple Silicon 上的本地 MLX（mflux）引擎生图；MLX 权重生成前预下载并实时显示进度。
+- **图片** — 经云端 OpenAI 兼容 API、ComfyUI 或 Apple Silicon 上的本地 MLX（mflux）引擎生图；MLX 权重生成前预下载并实时显示进度；提示词广场的「去试试」会带着提示词直接落到这一页。
 - **视频** — 三种后端统一为「提交任务 + 轮询」：MiniMax（H3，云端，支持首帧图生视频）、Seedance（火山方舟内容生成任务 API）、ComfyUI（本地工作流）；提示词 / 负向提示词 / 分辨率 / 时长 / 种子 / 宽高比 / 水印开关与首帧图上传，成片进历史库可直接播放、下载或删除。
 - **OCR 文档识别** — 三引擎：本地 Tesseract（一键安装、多语言 LSTM 语言包、词级 / 行级包围盒）、PaddleOCR（PP-OCRv6 本地常驻 worker，medium 档约 140MB）与 VLM（Chandra / GLM-OCR / LightOnOCR）；识别记录入库；上传 PDF / 图片输出结构化 Markdown（GFM 表格、KaTeX 公式、代码块、图注、按包围盒裁剪的图片区域），带文档队列与检索。
 - **翻译** — 引擎可切：当前对话模型（本地 / OpenAI 兼容）或 Google 免费接口，22 种语言互译，支持源语言自动检测、语言交换与一键复制；「同传翻译」打开麦克风实时转写（复用 whisper.cpp / audio.cpp / API 三套 ASR 引擎）并同步输出多种目标语言译文。
+- **音乐** — StepFun / MiniMax 双协议生成歌曲、翻唱与干声（本地引擎接口已预留）：异步协议提交后轮询、同步协议丢后台任务回填，两种都落进同一张记录表。左栏是歌单库、右侧是曲目页、底部常驻播放条，新曲自动进默认歌单，封面按曲目确定性生成，歌单封面取前四首拼成 2×2。
+- **提示词广场** — 「提示词广场 / 我的提示词」双标签，内置 2,733 条提示词（生图 638 条，按 APP / 运营 / 海报 / 插画 / IP / 其他 / 艺术分类；视频 2,060 条；大模型 35 条），带来源筛选（Image2Hub / GPT-Image-2 / H3 Cases / MiniMax …）与全文搜索；「复制」取原文，「去试试」按类型跳到生图 / 视频 / 对话并带入；「加入我的提示词」把广场条目收进个人库（按来源键去重），个人库可自建分类、新建 / 编辑 / 删除。题库随安装包内置、幂等入库，首屏示例图按需下载到本地并走系统代理。
+- **小应用** — 八个「一次做一件事」的沙箱工具，首页卡片按能力徽章提示还缺哪项配置，点开即用：**抠图换底**（本地 ONNX 引擎，不上传、约 1 秒，可换底色并擦除修补）、**证件照**（本地抠人像，一寸 / 二寸 / 签证等 20 种规格换底，可排 A4 打印）、**马赛克**（涂抹式打码、批量导出，全程本机）、**形象照**（按风格预设生成职业形象照 / 角色头像）、**会议纪要**（导入或录制音频 → 转写 → 议题 / 结论 / 待办）、**文案助手**（按用途与语气批量出标题 / 卖点 / 口播稿）、**笔记**（日历与标签双视图、图片附件，正文存本机数据库，可选择性对 Agent 只读开放）、**动态表情包**（一张照片 → 16 张统一画风的静态表情，挑一张再转成循环动图 GIF；模型在页面里自选，云端用照片当参考、本地按描述作画）。每个小应用是一份自包含 HTML，跑在不含 `allow-same-origin` 的沙箱 iframe 里，能力由宿主逐个下发。
 - **知识库（本地 RAG）** — 导入本地文件（文本直读，PDF / 图片走 VLM OCR）、手写笔记与网页；Markdown 感知切片（标题分节 + 段落贪心打包 + 超长硬切带重叠）+ 可选向量化（OpenAI 兼容 `/v1/embeddings`）+ BM25 与向量的 RRF 混合检索 + 可选重排序（Jina / SiliconFlow / Cohere 兼容 `/v1/rerank`）；召回测试 / 文档 / 访问 / 设置四个标签页；不依赖外部向量库或 FTS 扩展。
-- **记忆** — 全 Agent 共享的长期记忆：Agent 经 `memory_search` / `memory_save` / `memory_list` 工具沉淀事实、偏好与经验，置顶与高热记忆注入系统提示；同一份库可经网关 REST `/v1/memories`、MCP 工具或 `omi memory` 命令行读写。
+- **记忆** — 全 Agent 共享的长期记忆：Agent 经 `memory_search` / `memory_save` / `memory_list` 工具沉淀事实、偏好与经验，置顶与高热记忆注入系统提示；同一份库可经网关 REST `/v1/memories`、MCP 工具或 `omi memory` 命令行读写。记忆页给出总量 / 置顶 / Agent 写入 / 近 7 天更新 / 检索命中率 / 合并写入 / 累计归档 / 拦截敏感内容等总览指标，并提供「启用记忆」与「写入需确认」两个开关（后者让 Agent / CLI / MCP 的写入先进待确认区）。
 - **Skills 管理** — 中央技能库（默认 `~/.agents/skills`）统一管理并同步到各编码工具，53 个内置工具适配器、symlink / copy 两种同步模式；六区界面：技能市场（skillssh 榜单）、我的技能、预设、项目、工具、备份（Git 远端 + 快照 + 自动备份）。
 
 ### 智能体与协议
@@ -96,10 +160,10 @@
 ### 运维与遥测
 
 - **实时仪表盘** — 吞吐 / 速度（tok/s）、请求数、活跃模型、内存 / CPU 负载、运行时长与模型磁盘占用（数据目录所在卷的可用 / 总容量），每 2 秒轮询。
-- **基准测试** — 上下文长度扫描（1K–200K），记录 TTFT / TPOT / TPS，以表格与图表呈现，支持本地或远程服务。
+- **基准测试** — 上下文长度（1K–1M）× 并发档位 × 缓存场景（冷启 / 部分命中 / 完全命中）三种维度组合扫描，逐档记录 TTFT / TPOT / TPS / 聚合吞吐 / Prefill，并用「缓存命中对比」给出冷启与命中的倍数差（llama.cpp 还会自报服务端复用比例，×1 附近即提示服务端没吃到缓存）；支持本地或远程服务，结果落库、可导出 HTML，`omi benchmark --contexts 32k --cache cold,warm` 在命令行跑同一套矩阵。
 - **日志查看** — 实时滚动、ANSI 着色、自动滚动与截断保护、复制 / 清空。
 - **编码工具集成** — 为 Claude Code（本地 / 云端，Opus–Sonnet–Haiku 三档映射）、Codex、OpenCode、OpenClaw、Hermes、Pi、Copilot CLI 一键生成启动命令并绑定默认模型，并自动接入共享记忆。
-- **更新与多语言** — 稳定 / 测试更新通道与应用内更新、自动 / 手动更新检查（关于页可查最新 Release 并跳转下载）、浅色 / 深色 / 跟随系统主题、安装引导向导、中英界面、SQLite 会话持久化。
+- **更新与多语言** — 稳定 / 测试更新通道与应用内更新、自动 / 手动更新检查（关于页可查最新 Release 并跳转下载）、浅色 / 深色 / 跟随系统主题、**左侧一级菜单可自定义**（设置 → 外观：拖动排序、逐条显示 / 隐藏，配置的顺序就是菜单顺序）、安装引导向导、中英界面、SQLite 会话持久化。
 
 ## 🚀 快速开始
 
@@ -177,7 +241,7 @@ apps/
 │       │   ├── db/         #   Drizzle schema, migrations, settings 数据库
 │       │   ├── skills/     #   Skills manager: central repo, sync, presets, backup 技能管理
 │       │   ├── control-server.ts  #   `omi` CLI ↔ 应用控制通道（Unix socket）
-│       │   └── ...         #   chat / voice / image / video / OCR / translation / knowledge (RAG) /
+│       │   └── ...         #   chat / voice / image / video / music / OCR / translation / knowledge (RAG) /
 │       │                   #   memory / MCP (client + server) / model hub / downloads / stats / updates
 │       │                   #   对话、语音、图片、视频、OCR、翻译、知识库、记忆、MCP、模型市集、下载、统计、更新
 │       ├── cli/            # `omi` 命令行（bin/omi.ts 入口，复用 bun 数据层与运行时）
@@ -210,9 +274,12 @@ omi status / omi models / omi stop / omi serve --port 8090
 - [x] Image generation loop for the Image app 图片应用生图闭环
 - [x] `omi` CLI: launch app / server / cloud, model picking, launcher tools, status & logs 命令行 omi（启动应用/服务器/云端、选模型、拉起编码工具、状态与日志）
 - [x] AI video generation (MiniMax / Seedance / ComfyUI) with task polling and history AI 视频生成（三后端 + 任务轮询 + 历史库）
+- [x] AI music generation (StepFun / MiniMax, local engine reserved) — song / cover / vocal scoring AI 音乐生成（StepFun / MiniMax 双协议，本地引擎已预留：歌曲 / 翻唱 / 干声配乐）
 - [x] Local RAG knowledge base (hybrid BM25 + vector recall) with chat citations 本地知识库（混合检索 + 对话引用溯源）
 - [x] Shared memory across agents (built-in tools, gateway REST / MCP, `omi memory`) 跨 Agent 共享记忆（内置工具 / 网关 / CLI 三通道）
 - [x] Skills manager: central repo, 53 tool adapters, presets, Git backup Skills 管理与中央库同步
+- [x] Prompt library: 2,733 bundled prompts (image / video / LLM) with try-it routing + personal list 提示词广场（内置 2,733 条 + 我的提示词）
+- [x] Mini apps: 8 sandboxed single-page tools with per-capability gating 小应用（8 个沙箱单页工具 + 能力门禁）
 - [x] MCP both ways: client for external MCP servers + gateway `/mcp` server with playground MCP 客户端与服务端（含调试工作台）
 - [ ] Linux and Windows support Linux 与 Windows 支持
 - [ ] More document formats (PowerPoint, Word, Excel, etc.) 更多文档格式

@@ -3,7 +3,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "os";
 import path from "path";
 
-import { downloadWithResume, partialBytesFor, removePartialFiles } from "./downloader";
+import { downloadWithResume, hasUnfinishedDownload, hasUnfinishedDownloadAt, partCountFor, partsBudgetFor, partialBytesFor, removePartialFiles } from "./downloader";
 
 /**
  * 下载内核的离线测试：假服务器支持 Range / 返回 503 / 卡死 / 忽略 Range /
@@ -150,6 +150,46 @@ afterEach(async () => {
 
 /** 8 MiB 起步：并行模式的门槛（PARALLEL_MIN_TOTAL = 4 MiB，每片 8 MiB）。 */
 const BIG = 20 * 1024 * 1024;
+
+describe("并发连接预算", () => {
+  // 分片数此前只在「单个文件」这一层被压到 4，但管理器同时跑 2 个文件，
+  // 对站点的实际并发就是 8 —— 正是 ModelScope 会偶发 500 的档位，用户侧表现为
+  // 「小文件一个个 Download failed: 500」。总量必须恒定，不随并发文件数放大。
+  test("按同时在下的文件数分摊，总连接数不超过全局预算", () => {
+    const one = partsBudgetFor(1);
+    expect(one * 1).toBeLessThanOrEqual(4);
+    const two = partsBudgetFor(2);
+    expect(two * 2).toBeLessThanOrEqual(4);
+    // 两个文件同时下时，每个文件拿到的分片数必须比独占时少。
+    expect(two).toBeLessThan(one);
+    // 真下大文件时的实际分片数也受这份预算约束。
+    expect(partCountFor(BIG, partsBudgetFor(2))).toBe(two);
+  });
+
+  test("无论多少文件并发，每文件至少 1 条连接且总量不超预算", () => {
+    // 预算内的并发：分摊后总量严格不超过全局预算（4）。这就是止住 ModelScope
+    // 500 的那条约束 —— 2 个文件同时下时每个只能拿 2 片，不是各自 4 片。
+    for (const files of [1, 2, 3, 4]) {
+      const parts = partsBudgetFor(files);
+      expect(parts).toBeGreaterThanOrEqual(1);
+      expect(parts * files).toBeLessThanOrEqual(4);
+    }
+    // 极端并发：预算摊薄到 1，不能退化成 0（0 会让文件永远下不动）。
+    expect(partsBudgetFor(100)).toBe(1);
+    // 退化输入（0 个文件）不该把预算放大。
+    expect(partsBudgetFor(0)).toBeLessThanOrEqual(4);
+  });
+
+  test("环境变量能把预算调大", () => {
+    process.env.OMNI_DOWNLOAD_CONNECTIONS = "12";
+    try {
+      expect(partsBudgetFor(2)).toBe(6);
+    } finally {
+      delete process.env.OMNI_DOWNLOAD_CONNECTIONS;
+    }
+    expect(partsBudgetFor(2)).toBe(2);
+  });
+});
 
 describe("多路并发 + 断点续传", () => {
   test("大文件走多分片并发，各请求不同区间，最终文件逐字节正确", async () => {
@@ -398,10 +438,81 @@ describe("远端变化与旧格式", () => {
   }, 30_000);
 });
 
+describe("已下完的文件不再重下", () => {
+  /**
+   * ModelScope 对「起点已到文件末尾」的 Range 请求回 500（实测 73 字节的文件也如此），
+   * 而小文件走单流路径、续传请求正是 `Range: bytes=<本地长度>-` —— 于是"文件其实早就下好、
+   * 任务却挂着失败"会一直复发（每次重下都再失败一次）。本地体积与已知目标一致时直接当完成。
+   */
+  test("本地已是完整文件：一个请求都不发（越界 Range 会被服务端判 500）", async () => {
+    const size = 64 * 1024;
+    const data = makeData(size);
+    const { server, requests } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "config.json");
+    writeFileSync(dest, data);
+
+    const progress: number[] = [];
+    const res = await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: size,
+      onProgress: (p) => progress.push(p.percent ?? -1),
+    });
+
+    expect(requests.total).toBe(0);
+    expect(res.size).toBe(size);
+    expect(progress).toEqual([100]);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  });
+
+  test("本地文件比目标小：照常续传，不会被当成已完成", async () => {
+    const size = 64 * 1024;
+    const data = makeData(size);
+    const { server, requests } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "half.json");
+    writeFileSync(dest, data.slice(0, 1024));
+
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: size });
+    expect(requests.total).toBeGreaterThan(0);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  });
+
+  test("下到一半的多分片文件不走这条捷径（预分配过，体积就会等于目标）", async () => {
+    const data = makeData(BIG);
+    const { server, requests } = startServer({ data, chunkDelayMs: 5 });
+    servers.push(server);
+    const dest = path.join(dir, "big.safetensors");
+
+    const ac = new AbortController();
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: BIG,
+      signal: ac.signal,
+      onProgress: (p) => {
+        if (p.received > 0) ac.abort();
+      },
+    }).catch(() => undefined);
+
+    // 关键陷阱：分片路径会把最终文件预分配到目标大小，光看体积"已经下完了"。
+    expect(statSync(dest).size).toBe(BIG);
+    expect(readdirSync(dir).some((n) => n.includes(".part"))).toBe(true);
+
+    const before = requests.total;
+    expect(before).toBeGreaterThan(0);
+
+    // 续传必须真发请求（否则拿一个预分配的零文件当"已下完"），并且逐字节正确。
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: BIG });
+    expect(requests.total).toBeGreaterThan(before);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  }, 20_000);
+});
+
 describe("旁路数据管理", () => {
   test("removePartialFiles 清掉最终文件、分片与 sidecar", async () => {
     const data = makeData(BIG);
-    const { server } = startServer({ data });
+    // 分片之间留间隔（同「暂停后重启」那条）：回环上这份文件可能在取消生效前就下完，
+    // 那时前缀分片已被搬走并删掉，`.part*` 一个都不剩、「至少留了一个分片」的断言随机失败。
+    // 实测这条在全套里偶发（12 次 1 次）。
+    const { server } = startServer({ data, chunkDelayMs: 5 });
     servers.push(server);
     const dest = path.join(dir, "cleanup.bin");
 
@@ -418,6 +529,107 @@ describe("旁路数据管理", () => {
     removePartialFiles(dest);
     expect(readdirSync(dir)).toEqual([]);
     expect(partialBytesFor(dest, BIG)).toBe(0);
+  }, 20_000);
+
+  test("中断后最终文件的长度就等于完整大小 —— 光看字节数看不出没下完（issue #16 的坑）", async () => {
+    const data = makeData(BIG);
+    const { server } = startServer({ data, chunkDelayMs: 5 });
+    servers.push(server);
+    const dest = path.join(dir, "halfsize.gguf");
+
+    const ac = new AbortController();
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, {
+      total: BIG,
+      signal: ac.signal,
+      onProgress: (p) => {
+        if (p.received > BIG * 0.35) ac.abort();
+      },
+    }).catch(() => undefined);
+
+    // 分片路径一上来就把最终文件预分配到完整长度（定位写不留空洞的前提），
+    // 所以「下到一半」的文件在资源管理器里看**尺寸是完全正确的** ——
+    // 这正是报告者说「模型大小没有问题」却加载失败的原因：尺寸不是完成判据。
+    expect(statSync(dest).size).toBe(BIG);
+    // 真实进度只有旁路数据（sidecar + 分片）知道
+    expect(partialBytesFor(dest, BIG)).toBeLessThan(BIG);
+    expect(hasUnfinishedDownload(dest)).toBe(true);
+
+    // 续传下完之后：尺寸没变，但不再是半成品，内容逐字节正确
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: BIG });
+    expect(statSync(dest).size).toBe(BIG);
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+    expect(Buffer.compare(readFileSync(dest), Buffer.from(data))).toBe(0);
+  }, 30_000);
+
+  test("下完的文件不是半成品（没有旁路数据）", async () => {
+    const size = 512 * 1024;
+    const data = makeData(size);
+    const { server } = startServer({ data });
+    servers.push(server);
+    const dest = path.join(dir, "done.bin");
+
+    await downloadWithResume(`http://127.0.0.1:${server.port}/f`, dest, { total: size });
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+    // 不存在的路径当然也不算「没下完」
+    expect(hasUnfinishedDownload(path.join(dir, "nope.bin"))).toBe(false);
+  });
+
+  test("崩溃残留的陈旧 sidecar（字节其实齐了）不算半成品 —— 不能因此把好模型藏起来", () => {
+    const dest = path.join(dir, "stale.gguf");
+    const total = 4096;
+    writeFileSync(dest, Buffer.alloc(total, 7));
+    // 下完那一刻：所有分片都满了、前缀也搬完了，但 sidecar 还没来得及删。
+    writeFileSync(
+      `${dest}.download.json`,
+      JSON.stringify({
+        url: "http://example/f",
+        total,
+        etag: null,
+        flushed: total,
+        parts: [{ index: 0, start: 0, end: total, have: total }],
+      }),
+    );
+    expect(hasUnfinishedDownload(dest)).toBe(false);
+  });
+
+  test("目标给的是目录：子目录里的半成品也算（市场里的权重可以是 BF16/xxx.gguf 这种子路径）", () => {
+    const repoDir = path.join(dir, "repo");
+    const nested = path.join(repoDir, "BF16");
+    const { mkdirSync } = require("fs") as typeof import("fs");
+    mkdirSync(nested, { recursive: true });
+    // 仓库自带的两个文件（其中 config.json 先下完了）
+    writeFileSync(path.join(repoDir, "config.json"), "{}");
+    // 子目录里的权重：预分配到完整长度 + 侧车说只下了 1/4
+    const weight = path.join(nested, "model.safetensors");
+    writeFileSync(weight, Buffer.alloc(4096));
+    writeFileSync(
+      `${weight}.download.json`,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 0,
+        parts: [{ index: 0, start: 0, end: 4096, have: 1024 }],
+      }),
+    );
+
+    expect(hasUnfinishedDownloadAt(repoDir)).toBe(true);
+    // 收口反向：把那半成品补齐后就不该再报
+    writeFileSync(
+      `${weight}.download.json`,
+      JSON.stringify({
+        url: "https://example.invalid/f",
+        total: 4096,
+        etag: null,
+        flushed: 4096,
+        parts: [{ index: 0, start: 0, end: 4096, have: 4096 }],
+      }),
+    );
+    expect(hasUnfinishedDownloadAt(repoDir)).toBe(false);
+    // 文件路径照旧走文件判据（同一个入口）
+    expect(hasUnfinishedDownloadAt(path.join(repoDir, "config.json"))).toBe(false);
+    // 不存在的目标不报
+    expect(hasUnfinishedDownloadAt(path.join(dir, "nope"))).toBe(false);
   }, 20_000);
 
   test("小文件走单流也能断点续传", async () => {

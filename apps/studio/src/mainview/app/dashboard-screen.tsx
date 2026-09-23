@@ -21,6 +21,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { ServedModelsPanel } from "@components/served-models-panel";
+import { PageShell } from "@components/setting-ui";
 import { useRouter } from "@stores/router";
 import { Badge } from "@ui/badge";
 import { Button } from "@ui/button";
@@ -31,8 +32,11 @@ import { useServedStore } from "@stores/served";
 import { useServerStore } from "@stores/server";
 import type { ServerStatus } from "../../bun/server-manager";
 import type { ServerStats } from "../../bun/stats";
+import type { GpuSample } from "@/shared/gpu-stats";
 import { ENGINE_PORT_KEYS, modelNameFromRef, type InferenceEngine } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
+import { formatBytes as formatBytesSi } from "@lib/format";
+import { StatCard as StatCardBase } from "@components/stat-card";
 
 function formatTokens(n: number): string {
   if (!Number.isFinite(n) || n <= 0) return "0";
@@ -42,11 +46,9 @@ function formatTokens(n: number): string {
   return String(Math.round(n));
 }
 
+/** 概览页沿用「0 B」占位与 1 位 GB 小数，口径集中到 @lib/format。 */
 function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
-  if (bytes >= 1e9) return `${(bytes / 1e9).toFixed(1)} GB`;
-  if (bytes >= 1e6) return `${(bytes / 1e6).toFixed(0)} MB`;
-  return `${Math.round(bytes / 1e3)} KB`;
+  return formatBytesSi(bytes, { zero: "0 B", gbDecimals: 1 });
 }
 
 function formatRate(tokPerSec: number): string {
@@ -123,25 +125,65 @@ function UsageBar({ label, icon, used, total }: { label: string; icon: React.Rea
   );
 }
 
-function StatCard({
-  icon,
-  label,
-  value,
-  hint,
-}: {
-  icon: React.ReactNode;
-  label: string;
-  value: string;
-  hint?: string;
-}) {
+/** 概览页统计卡：竖排大卡，外观由共享 StatCard 的 stack 变体负责。 */
+function StatCard({ icon, label, value, hint }: { icon: React.ReactNode; label: string; value: string; hint?: string }) {
+  return <StatCardBase variant="stack" icon={icon} label={label} value={value} hint={hint} />;
+}
+
+/** 显存占用条：与 UsageBar 同形，但显存「总数读不到」是常态（统一内存 / 非 N 卡）。 */
+function VramBar({ used, total }: { used: number | null; total: number | null }) {
+  const pct = total && total > 0 && used !== null ? (used / total) * 100 : null;
+  return (
+    <>
+      <p className="mt-1.5 text-sm font-semibold tabular-nums">
+        {used !== null && total ? (
+          <>
+            {formatBytes(used)}
+            <span className="font-normal text-muted-foreground"> / {formatBytes(total)}</span>
+          </>
+        ) : used !== null ? (
+          formatBytes(used)
+        ) : (
+          "—"
+        )}
+      </p>
+      <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-muted">
+        {pct !== null && (
+          <div
+            className={cn(
+              "h-full rounded-full transition-[width] duration-500",
+              pct > 90 ? "bg-destructive" : pct > 75 ? "bg-amber-500" : "bg-primary",
+            )}
+            style={{ width: `${Math.min(pct, 100)}%` }}
+          />
+        )}
+      </div>
+    </>
+  );
+}
+
+/** 一张卡的采样卡：显存条 + 利用率 / 温度 / 功耗（读不到的字段显示「—」）。 */
+function GpuCard({ sample, label }: { sample: GpuSample; label: string }) {
+  const t = useT();
+  const metric = (name: string, value: string) => (
+    <span className="whitespace-nowrap">
+      <span className="text-muted-foreground">{name}</span> {value}
+    </span>
+  );
   return (
     <div className="rounded-xl border bg-card p-4">
       <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-        {icon}
-        {label}
+        <GaugeIcon className="size-3.5" />
+        <span className="truncate" title={sample.name}>
+          {label || t("dashboard.gpu")} · {sample.name}
+        </span>
       </div>
-      <p className="mt-1.5 text-2xl font-semibold tracking-tight tabular-nums">{value}</p>
-      {hint && <p className="mt-0.5 text-[11px] text-muted-foreground">{hint}</p>}
+      <VramBar used={sample.memoryUsedBytes} total={sample.memoryTotalBytes} />
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-[10px] tabular-nums">
+        {metric(t("dashboard.gpuUtil"), sample.utilizationPct !== null ? `${sample.utilizationPct}%` : "—")}
+        {metric(t("dashboard.gpuTemp"), sample.temperatureC !== null ? `${sample.temperatureC}°C` : "—")}
+        {metric(t("dashboard.gpuPower"), sample.powerWatts !== null ? `${sample.powerWatts} W` : "—")}
+      </div>
     </div>
   );
 }
@@ -310,7 +352,7 @@ export function DashboardScreen() {
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto">
-      <div className="mx-auto flex w-full max-w-3xl flex-col gap-4 px-6 py-6">
+      <PageShell>
         {/* Header */}
         <div className="flex items-center gap-2">
           <span className="flex size-6 items-center justify-center rounded-md bg-primary/10 text-primary">
@@ -468,7 +510,17 @@ export function DashboardScreen() {
               </p>
               <p className="mt-2 text-[10px] text-muted-foreground">1 / 5 / 15 min</p>
             </div>
+            {stats.gpu.available
+              ? stats.gpu.gpus.map((sample) => (
+                  <GpuCard key={sample.index} sample={sample} label={t("dashboard.gpu")} />
+                ))
+              : null}
           </div>
+          {stats.gpu.available ? null : (
+            <p className="mt-2 text-[11px] text-muted-foreground">
+              {t(`dashboard.gpu.reason.${stats.gpu.reason}`)}
+            </p>
+          )}
         </div>
 
         {/* Basic configuration */}
@@ -555,7 +607,49 @@ export function DashboardScreen() {
             </div>
           )}
         </div>
-      </div>
+        {/* Running instances: per-model weights + measured VRAM (OPS-05) */}
+        <div className="rounded-xl border bg-card p-4">
+          <h3 className="mb-3 flex items-center gap-1.5 text-sm font-medium">
+            <ServerIcon className="size-4 text-muted-foreground" />
+            {t("stats.instances")}
+          </h3>
+          {stats.instances.length === 0 ? (
+            <p className="py-4 text-center text-xs text-muted-foreground">{t("stats.noInstances")}</p>
+          ) : (
+            <div className="flex flex-col gap-2">
+              {stats.instances.map((m) => (
+                <div
+                  key={m.id}
+                  className="flex flex-wrap items-center justify-between gap-x-3 gap-y-1 rounded-lg border px-3 py-2"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-mono text-xs" title={m.modelRef}>
+                      {m.label}
+                    </p>
+                    <p className="text-[10px] text-muted-foreground">
+                      {m.engine} · :{m.port} · {m.purpose} · {m.status}
+                    </p>
+                  </div>
+                  <div className="flex shrink-0 items-center gap-2 text-[10px] tabular-nums">
+                    {m.weightsBytes !== null && (
+                      <span className="text-muted-foreground">
+                        {t("stats.instanceWeights")} {formatBytes(m.weightsBytes)}
+                      </span>
+                    )}
+                    <Badge
+                      variant={m.vramBytes !== null ? "default" : "secondary"}
+                      className="text-[10px]"
+                      title={m.vramBytes !== null ? undefined : t("stats.vramUnmeasured")}
+                    >
+                      {t("stats.instanceVram")} {m.vramBytes !== null ? formatBytes(m.vramBytes) : "—"}
+                    </Badge>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </PageShell>
     </div>
   );
 }

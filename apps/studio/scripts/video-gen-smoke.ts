@@ -37,30 +37,37 @@ const seen: Record<string, unknown> = {};
 
 const minimax = Bun.serve({
   port: 0,
-  async fetch(req) {
+  async fetch(req: Request): Promise<Response> {
     const url = new URL(req.url);
+    // MiniMax v2 契约：task_id 在顶层，任务状态包在 task 里（status + content.url）
     if (req.method === "POST" && url.pathname === "/v2/video_generation") {
       seen.minimaxSubmit = await req.json();
       minimaxQueries.posts++;
       // 第二次提交返回会失败的任务，走轮询的失败分支。
       const taskId = minimaxQueries.posts === 2 ? "mm-fail" : "mm-1";
-      return Response.json({ task_id: taskId, status: "Created", model: "MiniMax-H3" });
+      return Response.json({ task_id: taskId });
     }
-    if (url.pathname === "/v2/query/video_generation/mm-1") {
-      minimaxQueries.minimax++;
-      if (minimaxQueries.minimax >= 2) {
+    if (url.pathname.startsWith("/v2/query/video_generation/")) {
+      const taskId = decodeURIComponent(url.pathname.slice("/v2/query/video_generation/".length));
+      if (taskId === "mm-fail") {
         return Response.json({
-          status: "Success",
-          progress: 1,
-          content: { url: "/v2/files/mm-1.mp4" },
+          task: { id: taskId, status: "failed", error: { code: 1026, message: "内容审核未通过" } },
         });
       }
-      return Response.json({ status: "Processing", progress: 0.3 });
+      minimaxQueries.minimax++;
+      if (minimaxQueries.minimax >= 2) {
+        // 成片地址随状态一起给（v2 没有 file_id 换链那一步）
+        return Response.json({
+          task: {
+            id: taskId,
+            status: "succeeded",
+            content: { url: `http://localhost:${minimax.port}/mm-1.mp4` },
+          },
+        });
+      }
+      return Response.json({ task: { id: taskId, status: "running" } });
     }
-    if (url.pathname === "/v2/files/mm-1.mp4") return new Response(FAKE_MP4);
-    if (url.pathname === "/v2/query/video_generation/mm-fail") {
-      return Response.json({ status: "Fail", fail_reason: "内容审核未通过" });
-    }
+    if (url.pathname === "/mm-1.mp4") return new Response(FAKE_MP4);
     return new Response("not found", { status: 404 });
   },
 });
@@ -209,16 +216,29 @@ async function main() {
   {
     const r = await VideoGen.submitVideoGeneration({
       prompt: "一只海豚跃出海面，慢镜头",
-      duration: 2, // 低于下限 4，应被钳到 4
+      duration: 2, // 低于 H3 的 4 秒下限，应被收敛到 4
       ratio: "16:9",
       resolution: "768P",
     });
     check("提交成功并返回 processing 记录", !!r.record && r.record.status === "processing", r.error);
-    const submit = seen.minimaxSubmit as { model: string; content: { type: string; text?: string }[]; duration: number; ratio: string; resolution: string; aigc_watermark: boolean };
+    const submit = seen.minimaxSubmit as {
+      model: string;
+      prompt?: string;
+      content?: { type: string; text?: string }[];
+      duration?: number;
+      resolution?: string;
+      ratio?: string;
+    };
     check("请求体 model=MiniMax-H3", submit.model === "MiniMax-H3");
-    check("请求体 content 文本", submit.content[0]?.text === "一只海豚跃出海面，慢镜头");
-    check("duration 钳到 4", submit.duration === 4, String(submit.duration));
-    check("ratio/resolution 透传", submit.ratio === "16:9" && submit.resolution === "768P");
+    check(
+      "请求体是 v2 的 content 数组（不是 v1 的 prompt 字符串）",
+      submit.content?.[0]?.type === "text" &&
+        submit.content[0]?.text === "一只海豚跃出海面，慢镜头" &&
+        submit.prompt === undefined,
+    );
+    check("duration 收敛到 4（H3 下限）", submit.duration === 4, String(submit.duration));
+    check("resolution 透传", submit.resolution === "768P", String(submit.resolution));
+    check("ratio 透传", submit.ratio === "16:9", String(submit.ratio));
     const row = await pollUntilDone(VideoGen, r.record!.id);
     assertFileOk(row, "MiniMax");
   }

@@ -116,7 +116,7 @@ test("「返回模型页」既清掉错误状态又切路由 —— 不是停在
   await new Promise((resolve) => setTimeout(resolve, 50));
 
   // 状态清空 → 边界重新渲染 children（这里 children 仍会抛，但路由已经切走）
-  expect(useRouter.getState().route).toEqual({ path: "settings", tab: "store" });
+  expect(useRouter.getState().route).toEqual({ path: "settings", tab: "library" });
 
   root.unmount();
 });

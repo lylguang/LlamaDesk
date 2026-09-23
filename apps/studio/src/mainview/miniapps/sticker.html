@@ -1,0 +1,1804 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>动态表情包</title>
+<!--
+  小应用：动态表情包（一张照片 → 一整套能用的表情 → 循环动图）。
+
+  两条链路，一条比一条远：
+    A. 静态：一张照片（或一段角色描述）→ N 张统一画风的表情（默认 16 张）。
+    B. 动态：某一张静态表情 → 2 个动作关键帧 → 合成 GIF，走 `omni.gif.make`。
+       合成在宿主里做（页面里没有编码器），页面只负责排帧序与选速度。
+
+  **模型在页面里自己选**（`omni.image.models` 发来目录）：云端 → 厂商 + 模型，
+  本地 → 引擎 + 模型。选中的值随每次生成请求发回去，由宿主按目录再校验一遍；
+  页面不改写用户在生图页保存的配置。云端支持参考图（照片 → 同一套表情），
+  本地引擎只能文生图 —— 于是页面走的提示词也不一样：
+    · 参考图模式：以照片为参考，"把这个人的表情改成 X"；
+    · 文字模式：没有照片可参考，改为"按这段角色描述画一个角色"，靠同一段描述
+      维持一整套/一整套动作帧的一致性。
+  这个差别由目录里的 `supportsReference` 决定（宿主说了算，页面不按后端名去猜）。
+
+  几处刻意的取舍：
+    - **照片只上传一次**：一键 16 张都改同一张照片，宿主按 (应用, 路径) 缓存暂存结果，
+      所以每张只是一次改图调用，不会在数据目录里留下 16 份同样的源图副本。
+    - **键帧只生成 2 张**：循环里的第一帧直接用源表情本身（不花调用），另两张是
+      "动作中段 / 动作顶点"，播放顺序排成 A-B-C-B —— 首尾同源，循环点看不出跳变，
+      而且人物永远是同一个（每张都以源图为参考，不做链式改图，避免越改越不像）。
+    - **改速度 / 尺寸要重新合成，但不必重新生成**：帧的 ref 还在，`omni.gif.make`
+      再来一次即可 —— 页面上明确写出这一点，否则用户会以为要重跑一遍生成。
+    - 页签切换不销毁结果：一套 16 张要跑好几分钟，切走再切回来不该清空。
+
+  宿主注入：基础样式、window.omni 运行时、window.__OMNI_BOOT__。
+-->
+<style>
+  /* 模型选择行：分段控件（云端 / 本地）+ 厂商 / 引擎 + 模型 */
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 999px; overflow: hidden; }
+  .seg button {
+    appearance: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+    font: inherit; font-size: 12px; padding: 5px 12px;
+  }
+  .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); }
+  .pick { max-width: 190px; }
+  .pick.grow { max-width: none; }
+
+  .tabs { display: flex; gap: 4px; border-bottom: 1px solid var(--line); }
+  .tabs button {
+    appearance: none; border: 0; background: transparent; color: var(--muted); cursor: pointer;
+    font: inherit; font-weight: 500; padding: 9px 12px; border-bottom: 2px solid transparent;
+  }
+  .tabs button:hover { color: var(--fg); }
+  .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); }
+
+  .two { display: flex; gap: 16px; align-items: flex-start; flex-wrap: wrap; }
+  .two > .left { flex: 1 1 240px; min-width: 220px; max-width: 340px; }
+  .two > .right { flex: 2 1 380px; min-width: 260px; }
+
+  /* 上传区：点一下就是选文件，选完直接变成缩略图（重选是同一个入口） */
+  .drop {
+    width: 100%; min-height: 220px; display: flex; flex-direction: column; align-items: center;
+    justify-content: center; gap: 6px; font: inherit; color: inherit; background: transparent;
+  }
+  .drop .big { font-size: 22px; }
+
+  /* 十六格的表情格子在窄窗口下两列就够，别再挤成一条线 */
+  @media (max-width: 640px) { .two > .left { max-width: none; } }
+  .drop .big { font-size: 22px; line-height: 1; }
+  .drop .t { font-size: 13px; font-weight: 500; color: var(--fg); }
+  .drop img { max-width: 100%; max-height: 300px; border-radius: 12px; display: block; }
+  .drop.filled { padding: 10px; }
+
+  /* 画风卡：一张图不用配（预览图是小应用自己画不出来的），用色块 + 名字，
+     与"表情包到底长什么样"的关系靠名字与下面那句说明交代 */
+  .styles { display: grid; grid-template-columns: repeat(auto-fill, minmax(96px, 1fr)); gap: 8px; }
+  .style {
+    appearance: none; cursor: pointer; font: inherit; text-align: left;
+    border: 1px solid var(--line); background: var(--bg); border-radius: 12px; padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .style:hover { border-color: var(--accent); }
+  .style[aria-pressed="true"] { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent) inset; }
+  .style .sw { height: 42px; border-radius: 8px; }
+  .style .nm { font-size: 12px; font-weight: 600; }
+  .style .dt { font-size: 10.5px; line-height: 1.4; color: var(--muted); }
+  .sw.pixel { background: linear-gradient(135deg, #f59e0b 0 25%, #10b981 25% 50%, #3b82f6 50% 75%, #ef4444 75% 100%); image-rendering: pixelated; }
+  .sw.doodle { background: repeating-linear-gradient(45deg, #fff 0 6px, #d4d4d8 6px 7px); }
+  .sw.chibi { background: radial-gradient(circle at 35% 30%, #fecdd3, #f472b6 60%, #be185d); }
+  .sw.badge { background: linear-gradient(140deg, #fff, #fde68a 55%, #fbbf24); }
+  .sw.custom { background: linear-gradient(140deg, var(--soft), var(--line)); }
+
+  /* 开关：宿主基础样式里只有 checkbox 的 accent-color，这里要一个真正的拨动开关 */
+  .switch { display: inline-flex; align-items: center; gap: 8px; cursor: pointer; user-select: none; }
+  .switch input { position: absolute; opacity: 0; pointer-events: none; }
+  .switch .track {
+    width: 38px; height: 22px; border-radius: 999px; background: var(--line);
+    position: relative; transition: background .15s;
+  }
+  .switch .track::after {
+    content: ''; position: absolute; top: 2px; left: 2px; width: 18px; height: 18px;
+    border-radius: 50%; background: #fff; transition: transform .15s; box-shadow: 0 1px 2px rgba(0,0,0,.25);
+  }
+  .switch input:checked + .track { background: var(--accent); }
+  .switch input:checked + .track::after { transform: translateX(16px); }
+  .switch .txt { font-size: 12px; }
+
+  .progress { height: 4px; border-radius: 999px; background: var(--soft); overflow: hidden; }
+  .progress > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .25s; }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 8px; }
+  .slot {
+    position: relative; border: 1px solid var(--line); border-radius: 12px; overflow: hidden;
+    background: var(--soft); aspect-ratio: 1 / 1; display: flex; align-items: center; justify-content: center;
+  }
+  .slot img { width: 100%; height: 100%; object-fit: contain; display: block; background: #fff; cursor: zoom-in; }
+  .slot .cap {
+    position: absolute; left: 4px; bottom: 4px; right: 4px; font-size: 10px; line-height: 1.2;
+    text-align: center; color: #fff; background: rgba(0,0,0,.45); border-radius: 6px; padding: 2px 4px;
+    pointer-events: none; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  .slot .ph { font-size: 11px; color: var(--muted); text-align: center; padding: 8px; }
+  .slot .acts {
+    position: absolute; inset: auto 0 0 0; display: flex; gap: 4px; justify-content: center;
+    padding: 24px 4px 4px; opacity: 0; transition: opacity .15s;
+    background: linear-gradient(to top, rgba(0,0,0,.55), transparent);
+  }
+  .slot:hover .acts, .slot:focus-within .acts { opacity: 1; }
+  .slot .acts button {
+    appearance: none; border: 0; border-radius: 7px; cursor: pointer; font: inherit; font-size: 10.5px;
+    padding: 3px 7px; background: rgba(255,255,255,.92); color: #18181b;
+  }
+  .slot .acts button:hover { background: #fff; }
+  .slot .cap.hide { display: none; }
+  .slot.failed { border-color: var(--warn); }
+  .slot.failed .ph { color: var(--warn); }
+
+  /* GIF 结果区 */
+  .gifbox { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+  .gifbox .stage {
+    border: 1px solid var(--line); border-radius: 12px; padding: 10px; background: var(--soft);
+    display: flex; align-items: center; justify-content: center; min-width: 180px;
+  }
+  .gifbox .stage img { display: block; max-width: 320px; max-height: 320px; border-radius: 8px; background: #fff; }
+  .frames { display: flex; gap: 6px; flex-wrap: wrap; }
+  .frames figure { margin: 0; text-align: center; }
+  .frames img { width: 52px; height: 52px; object-fit: contain; border: 1px solid var(--line); border-radius: 8px; background: #fff; display: block; }
+  .frames figcaption { font-size: 10px; color: var(--muted); }
+
+  /* 大图预览（点缩略图打开） */
+  .lightbox {
+    position: fixed; inset: 0; background: rgba(0,0,0,.72); display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 12px; padding: 24px; z-index: 50;
+  }
+  .lightbox img { max-width: min(78vw, 560px); max-height: 68vh; border-radius: 14px; background: #fff; }
+  .lightbox .bar2 { display: flex; gap: 8px; flex-wrap: wrap; justify-content: center; }
+  .lightbox .cap { color: #fff; font-size: 12px; opacity: .9; }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+    <span class="sub grow" id="model" style="text-align:right"></span>
+  </div>
+
+  <div id="gate" class="card hidden">
+    <div class="row">
+      <span class="grow err" id="gate-text"></span>
+      <button class="btn sm" id="gate-btn" data-i18n="toSettings"></button>
+    </div>
+  </div>
+
+  <div class="card col" id="model-card">
+    <div class="row">
+      <span class="lb grow" data-i18n="modelLabel"></span>
+      <div class="seg" id="model-kind">
+        <button type="button" data-kind="cloud" data-i18n="modelCloud"></button>
+        <button type="button" data-kind="local" data-i18n="modelLocal"></button>
+      </div>
+    </div>
+    <div class="row hidden" id="pick-cloud">
+      <span class="lb" data-i18n="vendorLabel"></span>
+      <select class="field pick" id="pick-provider"></select>
+      <span class="lb" data-i18n="modelNameLabel"></span>
+      <input class="field pick grow" id="pick-cloud-model" list="cloud-model-options" spellcheck="false" />
+      <datalist id="cloud-model-options"></datalist>
+    </div>
+    <div class="row hidden" id="pick-local">
+      <span class="lb" data-i18n="engineLabel"></span>
+      <select class="field pick" id="pick-engine"></select>
+      <span class="lb" data-i18n="modelNameLabel"></span>
+      <input class="field pick grow" id="pick-local-model" list="local-model-options" spellcheck="false" />
+      <datalist id="local-model-options"></datalist>
+    </div>
+    <span class="hint" id="model-note"></span>
+  </div>
+
+  <div class="tabs" role="tablist">
+    <button id="tabbtn-pack" role="tab" aria-selected="true" data-i18n="tabPack"></button>
+    <button id="tabbtn-motion" role="tab" aria-selected="false" data-i18n="tabMotion"></button>
+  </div>
+
+  <!-- ── 页签 A：照片 → 一套静态表情 ─────────────────────────────────── -->
+  <section id="pane-pack" class="col" role="tabpanel">
+    <div class="two">
+      <div class="left">
+        <button class="drop" id="photo-drop" type="button">
+          <span class="big">↑</span>
+          <span class="t" data-i18n="photoDrop"></span>
+          <span class="hint" data-i18n="photoHint"></span>
+        </button>
+        <div class="card hidden" id="text-mode-note">
+          <div class="col">
+            <span class="t" style="font-weight:600" data-i18n="textModeTitle"></span>
+            <span class="hint" data-i18n="textModeDesc"></span>
+            <button class="btn sm" id="to-cloud" type="button" data-i18n="textModeSwitch"></button>
+          </div>
+        </div>
+      </div>
+      <div class="right col">
+        <span class="lb" data-i18n="styleLabel"></span>
+        <div class="styles" id="styles"></div>
+        <input class="field hidden" id="custom-style" data-i18n-ph="customPh" />
+
+        <div class="row" style="justify-content:space-between;border:1px solid var(--line);border-radius:12px;padding:9px 12px">
+          <span class="grow" style="font-size:12px" data-i18n="withText"></span>
+          <label class="switch">
+            <input type="checkbox" id="with-text" checked />
+            <span class="track"></span>
+          </label>
+        </div>
+
+        <div class="row">
+          <span class="lb" data-i18n="countLabel"></span>
+          <span class="grow"></span>
+          <div class="row" id="counts"></div>
+        </div>
+
+        <span class="hint" data-i18n="countHint"></span>
+
+        <span class="lb" id="extra-label" data-i18n="extraLabel"></span>
+        <textarea class="field" id="extra" data-i18n-ph="extraPh" style="min-height:56px"></textarea>
+
+        <div class="row">
+          <button class="btn primary" id="run-pack" disabled data-i18n="runPack"></button>
+          <button class="btn hidden" id="stop-pack" data-i18n="stop"></button>
+          <span class="busy hidden" id="pack-busy"><span class="spin"></span><span id="pack-busy-text"></span></span>
+        </div>
+        <div class="progress hidden" id="pack-progress"><i></i></div>
+        <span class="err" id="pack-err"></span>
+      </div>
+    </div>
+
+    <div class="col hidden" id="pack-result">
+      <div class="row">
+        <span class="lb grow" id="pack-summary"></span>
+        <button class="btn sm" id="save-all" data-i18n="saveAll"></button>
+      </div>
+      <div class="grid" id="pack-grid"></div>
+    </div>
+  </section>
+
+  <!-- ── 页签 B：一张静态表情 → 循环 GIF ─────────────────────────────── -->
+  <section id="pane-motion" class="col hidden" role="tabpanel">
+    <div class="two">
+      <div class="left col">
+        <button class="drop" id="motion-drop" type="button">
+          <span class="big">↑</span>
+          <span class="t" data-i18n="motionDrop"></span>
+          <span class="hint" data-i18n="motionHint"></span>
+        </button>
+        <div class="card col hidden" id="motion-text-src">
+          <span class="lb" data-i18n="characterLabel"></span>
+          <textarea class="field" id="motion-character" data-i18n-ph="characterPh" style="min-height:64px"></textarea>
+          <span class="hint" data-i18n="motionTextNote"></span>
+        </div>
+      </div>
+      <div class="right col">
+        <span class="lb" data-i18n="motionLabel"></span>
+        <div class="row" id="motions"></div>
+
+        <div class="row">
+          <span class="lb" data-i18n="sizeLabel"></span>
+          <span class="grow"></span>
+          <div class="row" id="gif-sizes"></div>
+        </div>
+        <div class="row">
+          <span class="lb" data-i18n="speedLabel"></span>
+          <span class="grow"></span>
+          <div class="row" id="gif-speeds"></div>
+        </div>
+
+        <div class="row">
+          <button class="btn primary" id="run-gif" disabled data-i18n="makeGif"></button>
+          <button class="btn hidden" id="re-gif" data-i18n="reMake"></button>
+          <span class="busy hidden" id="gif-busy"><span class="spin"></span><span id="gif-busy-text"></span></span>
+        </div>
+        <span class="hint" id="motion-mode-note" data-i18n="reMakeHint"></span>
+        <span class="hint" data-i18n="reMakeHint"></span>
+        <span class="err" id="gif-err"></span>
+      </div>
+    </div>
+
+    <div class="card hidden" id="gif-result">
+      <div class="gifbox">
+        <div class="stage"><img id="gif-img" alt="gif" /></div>
+        <div class="col grow">
+          <span class="lb" data-i18n="framesLabel"></span>
+          <div class="frames" id="gif-frames"></div>
+          <div class="row">
+            <button class="btn primary" id="save-gif" data-i18n="saveGif"></button>
+            <span class="ok" id="gif-ok"></span>
+          </div>
+          <span class="hint" id="gif-meta"></span>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="lightbox hidden" id="lightbox">
+  <img id="lightbox-img" alt="sticker" />
+  <div class="cap" id="lightbox-cap"></div>
+  <div class="bar2">
+    <button class="btn sm" id="lb-save" data-i18n="saveOne"></button>
+    <button class="btn sm" id="lb-again" data-i18n="retry"></button>
+    <button class="btn sm" id="lb-motion" data-i18n="animate"></button>
+    <button class="btn sm" id="lb-close" data-i18n="close"></button>
+  </div>
+</div>
+
+<script>
+(function () {
+  // ---------------------------------------------------------------------------
+  // 文案
+  // ---------------------------------------------------------------------------
+  var DICT = {
+    zh: {
+      title: '动态表情包',
+      sub: '一张照片做整套表情，再让它们动起来',
+      tabPack: '做一套静态表情',
+      tabMotion: '让表情动起来',
+      toSettings: '去配置模型',
+      photoDrop: '上传一张照片',
+      photoHint: '建议：正脸、光线均匀、单人、背景干净',
+      styleLabel: '选择画风',
+      customPh: '自己描述想要的画风，例如：纸质拼贴风、粗描边、米色背景',
+      withText: '表情包包含文字',
+      countHint: '每张表情是一次生图调用：先用 4 张把画风试出来，满意了再做整套。',
+      confirmAgain: '现在这套里已经有 {n} 张了，重新生成会丢掉它们（每张都是一次生图调用）。继续？',
+      countLabel: '这一套做几张',
+      extraLabel: '补充描述（可选）',
+      extraPh: '例如：戴黑框眼镜、深色卫衣、齐肩短发',
+      runPack: '生成我的表情包',
+      stop: '停止',
+      working: '正在画第 {done}/{total} 张…',
+      packSummary: '已完成 {done}/{total} 张',
+      saveAll: '全部保存',
+      saveOne: '保存这张',
+      retry: '重做',
+      animate: '动起来',
+      close: '关闭',
+      saved: '已保存到「{name}」',
+      savedAll: '已保存 {n} 张到下载目录',
+      failed: '第 {n} 张失败',
+      failedMany: '{n} 张没画出来（点格子上的「重做」再来一次）',
+      stopped: '已停止：还可以继续重做没画出来的那些',
+      needPhoto: '先上传一张照片',
+      needSource: '先选一张静态表情',
+      needStaged: '这张图还没准备好：请重新选一次（png / jpg / webp / bmp）',
+      modelLabel: '生图模型',
+      modelCloud: '云端',
+      modelLocal: '本地',
+      vendorLabel: '厂商',
+      engineLabel: '引擎',
+      modelNameLabel: '模型',
+      modelNoteRef: '支持照片参考：会用你的照片当参考图（效果最像本人）',
+      modelNoteText: '本地引擎只能按文字描述作画：不会用照片当参考，画出来是描述的那个角色',
+      modelNotReady: '「{name}」现在还不能用：{why}',
+      noModels: '还没有可用的生图模型：在「设置 → 云端模型」启用一个厂商（或到「图像生成 → 本地」把 MLX 模型下载下来）。',
+      textModeTitle: '本地模型：按描述画角色',
+      textModeDesc: '本地引擎没有参考图能力，所以不用上传照片 —— 在下面写清要画的角色，一整套都按这段描述来画。想用照片生成本人表情，把上面的模型切到「云端」。',
+      textModeSwitch: '换成云端模型（用照片）',
+      characterLabel: '角色描述',
+      characterPh: '例如：短发女生、黑框眼镜、深色卫衣、笑起来有酒窝',
+      characterRequired: '先写一句角色描述（本地模型按它作画）：它决定整套表情长什么样',
+      motionTextNote: '本地模型会按角色描述重画动作帧（不是改动这张图）',
+      modelInUse: '本页使用：{label}',
+      motionDrop: '上传一张静态表情',
+      motionHint: 'PNG / JPG；也可以在上面那一套里点「动起来」直接带过来',
+      motionLabel: '选择动作',
+      sizeLabel: '动图尺寸',
+      speedLabel: '播放速度',
+      makeGif: '转成 GIF',
+      reMake: '按新设置重新合成',
+      reMakeHint: '只改速度 / 尺寸不用重新画：帧还在，重新合成一遍就行。',
+      framesLabel: '动作帧（循环顺序 A-B-C-B）',
+      saveGif: '保存 GIF',
+      gifWorking: '正在设计动作 {done}/{total}…',
+      gifMixing: '正在合成动图…',
+      gifMeta: '{frames} 帧 · {size}px · 每帧 {delay}ms · {kb}KB',
+      gifNeedFrames: '动作帧没生成完整，再试一次',
+    },
+    en: {
+      title: 'Animated stickers',
+      sub: 'One photo makes a whole sticker pack — then bring them to life',
+      tabPack: 'Make a still pack',
+      tabMotion: 'Animate a sticker',
+      toSettings: 'Configure a model',
+      photoDrop: 'Upload one photo',
+      photoHint: 'Front facing, even light, single person, clean background',
+      styleLabel: 'Pick a style',
+      customPh: 'Describe the style you want, e.g. paper collage, thick outline, beige background',
+      withText: 'Include captions',
+      countHint: 'Every sticker is one image call: try 4 first to lock the style, then run the full pack.',
+      confirmAgain: 'This pack already has {n} stickers — regenerating discards them (each one was an image call). Continue?',
+      countLabel: 'How many stickers',
+      extraLabel: 'Extra description (optional)',
+      extraPh: 'e.g. black-framed glasses, dark hoodie, shoulder-length hair',
+      runPack: 'Generate my pack',
+      stop: 'Stop',
+      working: 'Drawing {done}/{total}…',
+      packSummary: '{done}/{total} done',
+      saveAll: 'Save all',
+      saveOne: 'Save this one',
+      retry: 'Redo',
+      animate: 'Animate',
+      close: 'Close',
+      saved: 'Saved to “{name}”',
+      savedAll: 'Saved {n} files to Downloads',
+      failed: 'No. {n} failed',
+      failedMany: '{n} failed — hit “Redo” on those tiles',
+      stopped: 'Stopped: the missing ones can be redone one by one',
+      needPhoto: 'Upload a photo first',
+      needSource: 'Pick a still sticker first',
+      needStaged: 'This image is not staged yet — please pick it again (png / jpg / webp / bmp)',
+      modelLabel: 'Image model',
+      modelCloud: 'Cloud',
+      modelLocal: 'Local',
+      vendorLabel: 'Provider',
+      engineLabel: 'Engine',
+      modelNameLabel: 'Model',
+      modelNoteRef: 'Takes a reference photo — the stickers keep the person\u2019s likeness',
+      modelNoteText: 'Local engines draw from a text description only: the photo is not used, and the character is whatever you describe',
+      modelNotReady: '“{name}” is not usable yet: {why}',
+      noModels: 'No image model available yet — enable a provider in Settings → Cloud providers, or download an MLX model on the Image page.',
+      textModeTitle: 'Local model: draw from a description',
+      textModeDesc: 'Local engines cannot take a reference image, so no photo is needed — describe the character below and the whole pack is drawn from that description. Switch the model to Cloud above to build stickers from a photo.',
+      textModeSwitch: 'Switch to a cloud model',
+      characterLabel: 'Character description',
+      characterPh: 'e.g. short-haired woman, black-framed glasses, dark hoodie, dimples when smiling',
+      characterRequired: 'Write a character description first — with a local model it decides what the whole pack looks like',
+      motionTextNote: 'Local mode redraws the motion frames from your description (it does not edit this image)',
+      modelInUse: 'Using: {label}',
+      motionDrop: 'Upload a still sticker',
+      motionHint: 'PNG / JPG — or hit “Animate” on a tile above to bring it over',
+      motionLabel: 'Pick a motion',
+      sizeLabel: 'GIF size',
+      speedLabel: 'Speed',
+      makeGif: 'Make GIF',
+      reMake: 'Re-mix with new settings',
+      reMakeHint: 'Changing speed or size needs no redraw: the frames are kept, we just re-mix.',
+      framesLabel: 'Keyframes (loop order A-B-C-B)',
+      saveGif: 'Save GIF',
+      gifWorking: 'Designing the motion {done}/{total}…',
+      gifMixing: 'Mixing the GIF…',
+      gifMeta: '{frames} frames · {size}px · {delay}ms each · {kb}KB',
+      gifNeedFrames: 'Keyframes did not come back complete — try again',
+    },
+  };
+
+  // ---------------------------------------------------------------------------
+  // 系统提示词
+  //
+  // 由三段拼出来：**基础规则（BASE）** —— 每一张都带；**画风（STYLES）** —— 决定它长
+  // 什么样；**这一张的内容（emotion / motion）** —— 决定它在做什么。拆开写，是因为画风
+  // 要能换（还要能自定义），而基础规则一条都不能漏：表情包翻车几乎都翻在那几条上
+  // （画成两个人、背景一堆东西、缩小到聊天气泡里看不清、图里多出半行字）。
+  //
+  // 图片里的那句短文案单独一条规则，并且明确"不要出现别的文字"：模型很容易顺手把
+  // 情绪词再拼一行、或把中文写错 —— 那会让整张图不能直接用。
+  // ---------------------------------------------------------------------------
+  var PROMPT = {
+    base: [
+      'Redraw the person in the reference photo as ONE single chat sticker illustration.',
+      '',
+      'Hard rules — every one of them matters:',
+      '1. Exactly one character: the person from the reference photo. Keep their identity — face shape, hairstyle, hair color, skin tone, glasses and other accessories, and the colors of their clothes.',
+      '2. Half-body or head-and-shoulders, facing the viewer, centered on a square canvas with generous empty margin around the character.',
+      '3. It must still read clearly when shrunk to a 120px chat sticker: bold silhouette, big unmistakable facial expression, no thin lines, no busy texture.',
+      '4. Plain flat background in one soft color. No scenery, no props other than the single one the pose needs, no frame, no border, no watermark, no signature, no second character, no grid or collage.',
+      '5. Output exactly one square image.',
+    ].join('\n'),
+
+    // 文字模式（本地引擎）：没有参考图，角色只能靠描述立起来。所以这里多了一条
+    // 参考图模式不需要的规则 —— "一整套要保持同一个角色"，那是"一套表情"的前提。
+    baseFromDescription(character) {
+      return [
+        'Draw ONE single chat sticker illustration of this character: ' + character + '.',
+        '',
+        'Hard rules — every one of them matters:',
+        '1. Exactly one character, and the SAME character in every sticker of this set: identical face shape, hairstyle, hair color, skin tone, glasses and accessories, and the same clothing colors.',
+        '2. Half-body or head-and-shoulders, facing the viewer, centered on a square canvas with generous empty margin around the character.',
+        '3. It must still read clearly when shrunk to a 120px chat sticker: bold silhouette, big unmistakable facial expression, no thin lines, no busy texture.',
+        '4. Plain flat background in one soft color. No scenery, no props other than the single one the pose needs, no frame, no border, no watermark, no signature, no second character, no grid or collage.',
+        '5. Output exactly one square image.',
+      ].join('\n');
+    },
+
+    /** 描述为空时的兜底角色：宁可给一个通用的，也不要发一条"画个人"的空提示词。 */
+    defaultCharacter:
+      'a friendly young person with shoulder-length dark hair, wearing a casual hoodie',
+
+    // 动作帧的规则：这里**不重复画风**——画风由参考图带着，多说一句反而会让模型重新理解
+    // 整张图。只强调"除了这一个姿势，别的都别动"，这是帧之间不跳的关键。
+    frameBase: [
+      'This is one frame of a short looping animation made from the reference sticker.',
+      '',
+      'Keep EVERYTHING else identical to the reference image: the same character with the same face, hairstyle, clothing and colors, the same art style, the same background color, the same framing and scale, and the same caption text in the same place with the same lettering.',
+      'Change only the pose, exactly as described below. Do not add, remove, move or restyle anything else. No extra text, no watermark, no border, no second character.',
+    ].join('\n'),
+
+    // 文字模式的动作帧：每一帧都从同一段描述重画，所以"角色与画风保持一致"要写在
+    // 每一条里（参考图模式有图带着，这里只能靠文字）。
+    frameBaseFromDescription(character) {
+      return [
+        'Draw ONE frame of a short looping animation of this character: ' + character + '.',
+        '',
+        'Keep the character and the art style identical to the other frames of this animation: the same face shape, hairstyle, hair color, skin tone, accessories, clothing colors, the same art style, framing and background color.',
+        'Only the pose changes, exactly as described below. No extra text, no watermark, no border, no second character.',
+      ].join('\n');
+    },
+
+    negative: [
+      'extra text, misspelled text, watermark, signature, logo, border, frame,',
+      'two people, extra characters, extra limbs, extra fingers, deformed hands, distorted face,',
+      'busy background, scenery, collage, grid, blurry, low resolution, jpeg artifacts, cropped head',
+    ].join(' '),
+
+    // 用户没选画风/自定义留空时的兜底：宁可给一句通用的，也不要发一条没有画风的提示词
+    // （那会让模型自由发挥，一张一个样，整套就不是"一套"了）。
+    fallbackStyle: 'clean modern illustration, bold outlines, flat colors, simple shapes',
+
+    // 画风：sw 是卡片上的色块类名，style 是发给模型的画风句
+    styles: [
+      {
+        id: 'pixel', sw: 'pixel', zh: '像素风', en: 'Pixel art',
+        zhDesc: '16 位游戏精灵', enDesc: '16-bit sprite',
+        style: '16-bit pixel art sprite — chunky visible pixels, limited retro palette, thick dark pixel outline, flat cel shading, crisp hard edges',
+      },
+      {
+        id: 'doodle', sw: 'doodle', zh: '简笔画', en: 'Doodle',
+        zhDesc: '单线手绘、留白多', enDesc: 'Ink line, lots of white',
+        style: 'minimalist hand-drawn doodle — single-weight dark ink outlines, flat pastel fills, marker-pen look, plenty of white space',
+      },
+      {
+        id: 'chibi', sw: 'chibi', zh: '可爱 3D', en: 'Cute 3D',
+        zhDesc: '软陶质感、大眼睛', enDesc: 'Soft clay, big eyes',
+        style: 'cute 3D rendered toy character — soft vinyl and clay shading, glossy highlights, big expressive eyes, soft studio light, subtle contact shadow',
+      },
+      {
+        id: 'badge', sw: 'badge', zh: 'Q 版贴纸', en: 'Chibi sticker',
+        zhDesc: '大头小身、白边', enDesc: 'Big head, white die-cut',
+        style: 'kawaii chibi sticker — big head and small body, bold glossy outline with a white die-cut sticker edge, flat bright colors, soft shadow under the feet',
+      },
+      { id: 'custom', sw: 'custom', zh: '自定义', en: 'Custom', zhDesc: '自己描述', enDesc: 'Describe it' },
+    ],
+
+    // 16 个情绪：pose 是给模型的动作描述（英文，模型对动作的英文描述更稳），
+    // zh / en 是画在图片里的那句短文案。
+    emotions: [
+      { id: 'hi', zh: '你好呀', en: 'Hi there!', pose: 'waving one hand up beside the head, head tilted a little, warm open smile' },
+      { id: 'yeah', zh: '好耶！', en: 'Yay!', pose: 'both arms raised high in celebration, eyes squeezed shut in a big joyful laugh' },
+      { id: 'heart', zh: '比心', en: 'Love you', pose: 'both hands making a heart shape in front of the chest, shy happy smile, two tiny hearts floating beside the head' },
+      { id: 'hug', zh: '求抱抱', en: 'Hug me', pose: 'both arms wide open asking for a hug, leaning slightly forward, hopeful sparkling eyes' },
+      { id: 'thanks', zh: '谢谢～', en: 'Thanks!', pose: 'palms pressed together in a thank-you gesture with a small bow, grateful smiling eyes, one tiny sparkle' },
+      { id: 'sorry', zh: '对不起', en: 'Sorry', pose: 'palms pressed together apologizing, eyes looking down, guilty small frown, one sweat drop beside the head' },
+      { id: 'cry', zh: '呜呜呜', en: 'Waaah', pose: 'crying out loud, big teardrops flying sideways, mouth wide open, eyes squeezed shut' },
+      { id: 'angry', zh: '哼！', en: 'Hmph!', pose: 'pouting with puffed-up cheeks, frowning eyebrows, hands on hips, two small anger puffs beside the head' },
+      { id: 'wow', zh: '哇哦', en: 'Wow!', pose: 'eyes wide open, mouth in a big O, both hands raised beside the cheeks in surprise, a few short surprise lines around the head' },
+      { id: 'think', zh: '咦？', en: 'Huh?', pose: 'head tilted to one side, one eyebrow up and one down, one hand on the chin, a floating question mark beside the head' },
+      { id: 'ok', zh: '收到！', en: 'Roger!', pose: 'standing straight giving a crisp salute, determined confident smile, a small check mark beside the head' },
+      { id: 'no', zh: '不行哦', en: 'Nope', pose: 'forearms crossed into an X in front of the chest, eyes closed, firm head shake, two short refusal marks' },
+      { id: 'sleep', zh: '晚安', en: 'Good night', pose: 'rubbing one sleepy eye with a hand, yawning, half-closed eyes, two letter Z floating beside the head' },
+      { id: 'busy', zh: '忙疯了', en: 'So busy!', pose: 'overwhelmed — hugging a stack of paper and a laptop, sweat drops, comical panicked smile' },
+      { id: 'food', zh: '干饭啦', en: 'Food time!', pose: 'happily hugging a big bowl of rice with chopsticks, sparkling eyes, tiny steam over the bowl' },
+      { id: 'cheer', zh: '加油！', en: 'Go go go!', pose: 'clenching a raised fist to the side, determined eyes, confident encouraging smile, a few short energy lines' },
+    ],
+
+    // 动作：每个动作给 2 个（眨眼只给 1 个）关键帧描述。循环播放顺序是 A-B-C-B，
+    // 其中 A 就是源表情本身（不花一次生成），所以这里只描述 B 与 C。
+    motions: [
+      {
+        id: 'breath', zh: '自动 / 呼吸', en: 'Auto / breathe', auto: true,
+        steps: [
+          'the body sinks about 3% lower as if breathing out, shoulders relaxed, expression unchanged',
+          'the body rises about 3% higher than the reference, shoulders slightly lifted, the corners of the mouth a little higher, as if breathing in cheerfully',
+        ],
+      },
+      {
+        id: 'nod', zh: '点头', en: 'Nod',
+        steps: [
+          'the head tilts down about 10 degrees, eyes still looking at the viewer, mouth unchanged',
+          'the head is bowed about 22 degrees, eyes gently closed, a small content smile',
+        ],
+      },
+      {
+        id: 'wave', zh: '挥手', en: 'Wave',
+        steps: [
+          'one arm raised to shoulder height beside the head, hand half open, the rest of the pose unchanged',
+          'that hand above the head, palm open and swung slightly outward, big happy smile, two short motion arcs beside the hand',
+        ],
+      },
+      {
+        id: 'bounce', zh: '蹦跳', en: 'Bounce',
+        steps: [
+          'knees slightly bent and the body lowered about 8%, both arms lowered a little — gathering energy to jump',
+          'jumping: the body lifted about 8% above the reference, feet off the ground, both arms raised up, joyful open-mouth smile, two short motion lines under the feet',
+        ],
+      },
+      {
+        id: 'blink', zh: '眨眼', en: 'Blink',
+        steps: [
+          'the eyes closed for a blink, expression and pose otherwise identical to the reference',
+        ],
+      },
+      {
+        id: 'sway', zh: '摇晃', en: 'Sway',
+        steps: [
+          'the upper body leaning about 8 degrees to one side, arms relaxed and trailing slightly behind',
+          'leaning about 15 degrees to that side with one foot slightly lifted, playful smile',
+        ],
+      },
+    ],
+  };
+
+  var COUNTS = [4, 9, 16];
+  var GIF_SIZES = [240, 320, 512];
+  var SPEEDS = [
+    { id: 'slow', delay: 180, zh: '慢', en: 'Slow' },
+    { id: 'mid', delay: 120, zh: '中', en: 'Normal' },
+    { id: 'fast', delay: 80, zh: '快', en: 'Fast' },
+  ];
+  /**
+   * 同时在跑的生成请求数。
+   *
+   * 一套 16 张串行要等好几分钟（每张一次改图调用），两张并行能把等待砍掉一半，
+   * 又不会把上游的限流打满 —— 再高就得不偿失了。
+   */
+  var CONCURRENCY = 2;
+
+  // ---------------------------------------------------------------------------
+  // 小工具
+  // ---------------------------------------------------------------------------
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(params[k]); });
+    return text;
+  };
+  var L = function (item, suffix) { return omni.lang === 'en' ? item['en' + (suffix || '')] : item['zh' + (suffix || '')]; };
+  var $ = function (sel) { return document.querySelector(sel); };
+  var el = function (tag, cls, text) {
+    var node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined && text !== null) node.textContent = text;
+    return node;
+  };
+  var seed = function () { return Math.floor(Math.random() * 2147483000); };
+  var clamp = function (text, max) { return String(text || '').slice(0, max); };
+
+  var state = {
+    tab: 'pack',
+    /** 宿主发来的生图模型目录（本地 / 云端 / 就绪状态 / 哪些后端支持参考图）。 */
+    catalog: null,
+    /** 页面上的选择：云端看 providerId + cloudModel，本地看 localBackend + localModel。 */
+    kind: 'cloud',
+    providerId: '',
+    cloudModel: '',
+    localBackend: 'mlx',
+    localModel: '',
+    /** 选择解析结果：{ backend, providerId, model, supportsReference, ready, label, why }。 */
+    choice: null,
+    /** 跑一套时记下的上下文（动图按同一段描述/画风重画动作帧用）。 */
+    packContext: null,
+    photo: null,        // { path, dataUrl, name, ref }
+    style: PROMPT.styles[0],
+    customStyle: '',
+    withText: true,
+    count: 16,
+    extra: '',
+    pack: [],           // 每个位置：[{ emotion, status, url, ref, error }]
+    busy: false,
+    stopped: false,
+    motion: PROMPT.motions[0],
+    size: 320,
+    speed: SPEEDS[1],
+    source: null,       // 页签 B 的源：{ url, ref } 或 { url, path, name }
+    frames: null,       // 上一次生成的动作帧 ref + 帧序
+    gifBusy: false,
+    gif: null,
+    lightbox: -1,
+  };
+
+  // ---------------------------------------------------------------------------
+  // 提示词拼装
+  // ---------------------------------------------------------------------------
+  function styleLine() {
+    var text = state.style.id === 'custom' ? state.customStyle : (state.style.style || '');
+    text = clamp(text, 240).replace(/\s+/g, ' ').trim();
+    return 'Style: ' + (text || PROMPT.fallbackStyle) + '.';
+  }
+
+  /** 这次生成用哪个上下文（一套里的画风/描述/文案设置）。 */
+  function contextOf(ctx) {
+    var c = ctx || state.packContext || state;
+    return c;
+  }
+
+  function captionLine(emotion, ctx) {
+    var context = contextOf(ctx);
+    if (!(context.withText === undefined ? state.withText : context.withText)) {
+      return 'No text anywhere in the image: no caption, no letters, no watermark, no signature.';
+    }
+    var text = omni.lang === 'en' ? emotion.en : emotion.zh;
+    return 'Also letter the short phrase "' + text + '" into the empty margin (top or bottom, whichever balances the composition), ' +
+      'hand-lettered in a bold rounded comic font that matches the art style, large and correctly spelled. ' +
+      'That is the only text in the image — no other letters, numbers or watermarks.';
+  }
+
+  /** 文字模式要画的那个角色：用户写的那句，空着就用兜底的一句。 */
+  function characterText(ctx) {
+    var text = clamp((ctx && ctx.character !== undefined ? ctx.character : state.extra) || '', 300)
+      .replace(/\s+/g, ' ')
+      .trim();
+    return text || (omni.lang === 'en' ? PROMPT.defaultCharacter : PROMPT.defaultCharacter);
+  }
+
+  function styleOf(ctx) {
+    var style = (ctx && ctx.style) || state.style;
+    var custom = ctx && ctx.customStyle !== undefined ? ctx.customStyle : state.customStyle;
+    var text = style.id === 'custom' ? custom : (style.style || '');
+    text = clamp(text, 240).replace(/\s+/g, ' ').trim();
+    return 'Style: ' + (text || PROMPT.fallbackStyle) + '.';
+  }
+
+  /**
+   * 一套里的某一张：基础规则 + 画风 + 这个情绪 + 文案。
+   *
+   * 两种模式的基础规则不一样：拿照片当参考时规则里写的是"照着照片里这个人重画"，
+   * 本地引擎没有参考图，角色只能靠一段描述立起来（而且在"一套"里必须保持一致）。
+   */
+  function packPrompt(emotion, ctx) {
+    var context = contextOf(ctx);
+    var reference = supportsReference();
+    var parts = [
+      reference ? PROMPT.base : PROMPT.baseFromDescription(characterText(context)),
+      styleOf(context),
+      'This sticker: ' + emotion.pose + '.',
+    ];
+    // 参考图模式下"补充描述"是细节补充；文字模式下角色已经由描述决定了，不必再说一遍。
+    if (reference) {
+      var extra = clamp((context.character !== undefined ? context.character : state.extra) || '', 300)
+        .replace(/\s+/g, ' ')
+        .trim();
+      if (extra) parts.push('Keep these details from the user: ' + extra + '.');
+    }
+    parts.push(captionLine(emotion, context));
+    return parts.join('\n\n');
+  }
+
+  /**
+   * 动作帧：参考图模式下"除了这个姿势，别的都别动"；文字模式下每帧都从同一段
+   * 描述重画，所以一致性只能写在规则里（同一个角色 + 同一个画风）。
+   */
+  function framePrompt(step, ctx) {
+    var base = supportsReference() ? PROMPT.frameBase : PROMPT.frameBaseFromDescription(characterText(ctx));
+    return [base, 'Change only the pose: ' + step + '.'].join('\n\n');
+  }
+
+  /** 参考图模式下第一帧就是源表情本身；文字模式只能按描述画一个静止起始帧。 */
+  var REST_POSE = {
+    breath: 'standing still with a gentle smile, arms relaxed at the sides, no motion',
+    nod: 'standing still, head level, eyes open, gentle smile',
+    wave: 'standing still with both arms relaxed down, gentle smile',
+    bounce: 'standing still with both feet on the ground, arms down, gentle smile',
+    blink: 'standing still, eyes open, calm smile',
+    sway: 'standing still, body upright, arms relaxed, gentle smile',
+  };
+
+  // ---------------------------------------------------------------------------
+  // 生图模型：目录来自宿主，页面只负责"选"
+  //
+  // 目录里既有"有哪些模型"，也有"哪个现在能用"（MLX 权重下没下、厂商填没填 Key），
+  // 还有"哪些后端支持参考图" —— 所以页面不需要按后端名去猜行为，也不必自己拼
+  // 什么"未配置"判断（那是最容易和设置页说法打架的一类重复逻辑）。
+  // ---------------------------------------------------------------------------
+  function supportsReference() {
+    return Boolean(state.choice && state.choice.supportsReference);
+  }
+
+  /** 每次生成都带上当前选择；宿主会对着目录再校验一遍（不存在的厂商 / 越权的值都会被打回）。 */
+  function choiceParams() {
+    var c = state.choice;
+    if (!c) return {};
+    var out = { backend: c.backend };
+    if (c.providerId) out.providerId = c.providerId;
+    if (c.model) out.model = c.model;
+    return out;
+  }
+
+  function cloudProviders() { return (state.catalog && state.catalog.cloud) || []; }
+  function localGroups() { return (state.catalog && state.catalog.local) || []; }
+
+  function cloudProvider() {
+    var list = cloudProviders();
+    for (var i = 0; i < list.length; i++) {
+      if (list[i].providerId === state.providerId) return list[i];
+    }
+    return list[0] || null;
+  }
+
+  function localGroup() {
+    var groups = localGroups();
+    for (var i = 0; i < groups.length; i++) {
+      if (groups[i].backend === state.localBackend) return groups[i];
+    }
+    return groups[0] || null;
+  }
+
+  function firstOf(list) { return list && list.length > 0 ? list[0] : null; }
+
+  /** 把页面上的选择解析成一份可用的结论（后端 / 厂商 / 模型 / 能不能用 / 支不支持参考图）。 */
+  function syncChoice() {
+    if (!state.catalog) { state.choice = null; return; }
+    if (state.kind === 'cloud') {
+      var provider = cloudProvider();
+      if (!provider) { state.choice = null; return; }
+      state.providerId = provider.providerId;
+      var first = firstOf(provider.models);
+      var model = state.cloudModel.trim() || (first ? first.id : '');
+      var known = null;
+      for (var i = 0; i < provider.models.length; i++) {
+        if (provider.models[i].id === model) known = provider.models[i];
+      }
+      state.choice = {
+        backend: 'api',
+        providerId: provider.providerId,
+        model: model,
+        supportsReference: state.catalog.supportsReference.api !== false,
+        // 目录里没列到的模型 id 也放行（厂商随时上新，用户在生图页也是手填）：
+        // 有 Key 就当可用，具体能不能跑由上游回答。
+        ready: known ? known.ready : provider.models.length > 0,
+        label: provider.name + (model ? ' · ' + model : ''),
+        why: known && !known.ready ? (known.note || '') : '',
+      };
+      return;
+    }
+    var group = localGroup();
+    if (!group) { state.choice = null; return; }
+    state.localBackend = group.backend;
+    var firstLocal = firstOf(group.models);
+    var localModel = state.localModel.trim() || (firstLocal ? firstLocal.id : '');
+    var picked = null;
+    for (var j = 0; j < group.models.length; j++) {
+      if (group.models[j].id === localModel) picked = group.models[j];
+    }
+    state.choice = {
+      backend: group.backend,
+      providerId: '',
+      model: localModel,
+      supportsReference: Boolean(state.catalog.supportsReference[group.backend]),
+      ready: Boolean(picked && picked.ready),
+      label: group.label + (localModel ? ' · ' + localModel : ''),
+      why: (picked && !picked.ready ? picked.note : '') || group.note || '',
+    };
+  }
+
+  function paintPicker() {
+    if (!state.catalog) return;
+    var cloud = state.kind === 'cloud';
+    $('#pick-cloud').classList.toggle('hidden', !cloud);
+    $('#pick-local').classList.toggle('hidden', cloud);
+    document.querySelectorAll('#model-kind button').forEach(function (btn) {
+      btn.setAttribute('aria-pressed', btn.dataset.kind === state.kind ? 'true' : 'false');
+    });
+
+    var providerSel = $('#pick-provider');
+    providerSel.innerHTML = '';
+    cloudProviders().forEach(function (provider) {
+      var opt = document.createElement('option');
+      opt.value = provider.providerId;
+      opt.textContent = provider.name;
+      providerSel.appendChild(opt);
+    });
+    var provider = cloudProvider();
+    if (provider) providerSel.value = provider.providerId;
+
+    var cloudList = $('#cloud-model-options');
+    cloudList.innerHTML = '';
+    (provider ? provider.models : []).forEach(function (model) {
+      var opt = document.createElement('option');
+      opt.value = model.id;
+      opt.label = model.ready ? model.label : model.label + ' · ' + (model.note || '');
+      cloudList.appendChild(opt);
+    });
+    $('#pick-cloud-model').value = state.cloudModel;
+
+    var engineSel = $('#pick-engine');
+    engineSel.innerHTML = '';
+    localGroups().forEach(function (group) {
+      var opt = document.createElement('option');
+      opt.value = group.backend;
+      opt.textContent = group.label;
+      engineSel.appendChild(opt);
+    });
+    var group = localGroup();
+    if (group) engineSel.value = group.backend;
+
+    var localList = $('#local-model-options');
+    localList.innerHTML = '';
+    (group ? group.models : []).forEach(function (model) {
+      var opt = document.createElement('option');
+      opt.value = model.id;
+      opt.label = model.ready ? model.label : model.label + ' · ' + (model.note || '');
+      localList.appendChild(opt);
+    });
+    $('#pick-local-model').value = state.localModel;
+
+    syncChoice();
+    var choice = state.choice;
+    // 输入框里显示**实际会用的那个**：默认取该厂商/引擎的第一个模型，
+    // 空着却已经在用某个模型是最容易让人误判的一处界面。
+    if (choice) {
+      if (state.kind === 'cloud') {
+        $('#pick-cloud-model').value = choice.model;
+        state.cloudModel = choice.model;
+      } else {
+        $('#pick-local-model').value = choice.model;
+        state.localModel = choice.model;
+      }
+    }
+    var note = $('#model-note');
+    if (!choice) {
+      note.className = 'err';
+      note.textContent = t('noModels');
+    } else if (!choice.ready && choice.why) {
+      note.className = 'err';
+      note.textContent = t('modelNotReady', { name: choice.label, why: choice.why });
+    } else {
+      note.className = 'hint';
+      note.textContent = choice.supportsReference ? t('modelNoteRef') : t('modelNoteText');
+    }
+    $('#model').textContent = choice ? t('modelInUse', { label: choice.label }) : '';
+    applyMode();
+    checkGate();
+  }
+
+  /** 参考图模式 / 文字模式在界面上的差别：要不要上传照片、描述字段叫什么。 */
+  function applyMode() {
+    var reference = supportsReference();
+    $('#photo-drop').classList.toggle('hidden', !reference);
+    $('#text-mode-note').classList.toggle('hidden', reference);
+    $('#extra-label').textContent = t(reference ? 'extraLabel' : 'characterLabel');
+    $('#extra').placeholder = t(reference ? 'extraPh' : 'characterPh');
+    // 页签 B：参考图模式要一张源表情（改它），文字模式只要一段描述（重画它）
+    $('#motion-drop').classList.toggle('hidden', !reference);
+    $('#motion-text-src').classList.toggle('hidden', reference);
+    $('#motion-mode-note').className = reference ? 'hint hidden' : 'hint';
+  }
+
+  /**
+   * 目录拉取与初始化。
+   *
+   * 默认值取用户在生图页保存的那份配置（云端就是那个厂商 + 模型），所以"我平时用
+   * gpt-image-2"的人打开这一页，选中的就是 gpt-image-2 —— 不必再选一次。
+   */
+  function loadModels(resetSelection) {
+    return omni.image.models().then(function (catalog) {
+      state.catalog = catalog || null;
+      var current = (catalog && catalog.current) || {};
+      if (!resetSelection) {
+        // 能力变化（用户刚在设置里配好厂商又切回来）只刷新目录与就绪状态，
+        // 不把他在这一页已经选好的模型顶回保存的那份。
+        paintPicker();
+        return catalog;
+      }
+      if (current.backend === 'api') {
+        state.kind = 'cloud';
+        state.providerId = current.providerId || '';
+        state.cloudModel = current.model || '';
+      } else if (current.backend === 'mlx' || current.backend === 'comfyui') {
+        state.kind = 'local';
+        state.localBackend = current.backend;
+        state.localModel = current.model || '';
+      } else {
+        // 生图页没配过：有云端厂商就用云端（效果最好），否则落到本地第一组
+        state.kind = cloudProviders().length > 0 ? 'cloud' : 'local';
+      }
+      paintPicker();
+      return catalog;
+    }).catch(function (e) {
+      omni.log('models.failed', e.message || String(e), {});
+      state.catalog = null;
+      checkGate();
+    });
+  }
+
+  // ---------------------------------------------------------------------------
+  // 能力门槛
+  // ---------------------------------------------------------------------------
+  function checkGate() {
+    var choice = state.choice;
+    var usable = Boolean(choice && choice.ready);
+    $('#gate').classList.toggle('hidden', usable);
+    if (!usable) {
+      $('#gate-text').textContent = choice
+        ? t('modelNotReady', { name: choice.label, why: choice.why || '' })
+        : t('noModels');
+    }
+    syncButtons();
+  }
+
+  function syncButtons() {
+    // 两种模式各有一个"必要输入"：云端要照片，本地要一段角色描述。
+    $('#run-pack').disabled = state.busy || !state.choice || !state.choice.ready ||
+      (supportsReference() ? !state.photo : !state.extra.trim());
+    $('#run-gif').disabled = state.gifBusy || !state.choice || !state.choice.ready || !motionReady();
+    $('#re-gif').classList.toggle('hidden', !state.frames || state.gifBusy);
+    $('#stop-pack').classList.toggle('hidden', !state.busy);
+  }
+
+  /** 动图能不能开跑：参考图模式要一张源图，文字模式要一段描述（或刚做过的一整套）。 */
+  function motionReady() {
+    if (supportsReference()) return Boolean(state.source);
+    return Boolean((state.packContext && state.packContext.character) || state.extra.trim().length > 0);
+  }
+
+  // ---------------------------------------------------------------------------
+  // 上传
+  // ---------------------------------------------------------------------------
+  /**
+   * 选一张图并交给宿主暂存。
+   *
+   * 暂存是为了拿到两样沙箱里拿不到的东西：一个能显示的媒体地址（`file://` 在
+   * opaque origin 下打不开），以及宿主签发的 ref —— 后面所有改图都以它为参考，
+   * 生成的 GIF 也需要拿它当第一帧。暂存失败（格式不支持等）就当这次选图没发生。
+   */
+  function pickPhoto(into, kinds) {
+    return omni.files.pickAndRead({ types: kinds || 'png,jpg,jpeg,webp,bmp' })
+      .then(function (picked) {
+        if (!picked || !picked.dataUrl) return null;
+        return omni.image.stage({ path: picked.path }).then(function (staged) {
+          var src = { path: picked.path, dataUrl: staged.url || picked.dataUrl, ref: staged.ref, name: picked.name };
+          into(src);
+          return src;
+        });
+      });
+  }
+
+  function paintDrop(node, src, emptyKey, hintKey) {
+    node.innerHTML = '';
+    node.classList.toggle('filled', Boolean(src));
+    if (!src) {
+      node.appendChild(el('span', 'big', '↑'));
+      node.appendChild(el('span', 't', t(emptyKey)));
+      node.appendChild(el('span', 'hint', t(hintKey)));
+      return;
+    }
+    var img = el('img');
+    // 两个来源都要认：上传的图有 dataUrl（宿主暂存后也会给媒体地址），
+    // 从一套里带过来的只有媒体地址。
+    img.src = src.dataUrl || src.url;
+    img.alt = src.name || 'source';
+    node.appendChild(img);
+  }
+
+  $('#photo-drop').addEventListener('click', function () {
+    if (state.busy) return;
+    pickPhoto(function (src) { state.photo = src; }, 'png,jpg,jpeg,webp,bmp,heic')
+      .then(function (picked) {
+        if (!picked) return;
+        paintDrop($('#photo-drop'), state.photo, 'photoDrop', 'photoHint');
+        syncButtons();
+      })
+      .catch(function (e) { showErr('pack-err', e.message || String(e)); });
+  });
+
+  $('#motion-drop').addEventListener('click', function () {
+    if (state.gifBusy) return;
+    pickPhoto(function (src) { state.source = src; state.frames = null; state.gif = null; })
+      .then(function (picked) {
+        if (!picked) return;
+        paintDrop($('#motion-drop'), state.source, 'motionDrop', 'motionHint');
+        renderGif();
+        syncButtons();
+      })
+      .catch(function (e) { showErr('gif-err', e.message || String(e)); });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 页签 A 的控件
+  // ---------------------------------------------------------------------------
+  var styleNodes = {};
+  PROMPT.styles.forEach(function (style) {
+    var btn = el('button', 'style');
+    btn.type = 'button';
+    btn.setAttribute('aria-pressed', style.id === state.style.id ? 'true' : 'false');
+    btn.appendChild(el('span', 'sw ' + style.sw));
+    btn.appendChild(el('span', 'nm', L(style)));
+    if (style.id !== 'custom') btn.appendChild(el('span', 'dt', L(style, 'Desc')));
+    btn.addEventListener('click', function () {
+      state.style = style;
+      Object.keys(styleNodes).forEach(function (id) {
+        styleNodes[id].setAttribute('aria-pressed', id === style.id ? 'true' : 'false');
+      });
+      $('#custom-style').classList.toggle('hidden', style.id !== 'custom');
+    });
+    styleNodes[style.id] = btn;
+    $('#styles').appendChild(btn);
+  });
+
+  $('#custom-style').addEventListener('input', function () { state.customStyle = this.value; });
+
+  $('#with-text').addEventListener('change', function () { state.withText = this.checked; });
+
+  var countNodes = [];
+  COUNTS.forEach(function (n) {
+    var chip = el('button', 'chip', String(n));
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', n === state.count ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.count = n;
+      countNodes.forEach(function (node) { node.setAttribute('aria-pressed', node.textContent === String(n) ? 'true' : 'false'); });
+    });
+    countNodes.push(chip);
+    $('#counts').appendChild(chip);
+  });
+
+  /**
+   * 描述字段在页签 A、B 各有一个（同名同值）。
+   *
+   * 文字模式下它就是"角色"本身，两边都得能改：在页签 B 想调一句描述还得切回页签 A
+   * 是很别扭的。两处共用一个值，改任意一处另一处立刻跟上。
+   */
+  function setCharacter(value) {
+    state.extra = value;
+    if ($('#extra').value !== value) $('#extra').value = value;
+    if ($('#motion-character').value !== value) $('#motion-character').value = value;
+    // 文字模式下这段描述是必要输入：它一空，生成按钮就该灰掉
+    syncButtons();
+  }
+
+  $('#extra').addEventListener('input', function () { setCharacter(this.value); });
+  $('#motion-character').addEventListener('input', function () { setCharacter(this.value); });
+
+  // ---------------------------------------------------------------------------
+  // 页签 A：一套表情
+  // ---------------------------------------------------------------------------
+  function showErr(id, message) { $('#' + id).textContent = message || ''; }
+
+  function setPackBusy(on, text) {
+    state.busy = on;
+    $('#pack-busy').classList.toggle('hidden', !on);
+    if (text) $('#pack-busy-text').textContent = text;
+    $('#run-pack').disabled = on || !state.choice || !state.choice.ready || (supportsReference() && !state.photo);
+    $('#stop-pack').classList.toggle('hidden', !on);
+  }
+
+  function packDone() { return state.pack.filter(function (item) { return item.status === 'done'; }).length; }
+
+  function updateProgress() {
+    var total = state.pack.length || 1;
+    var settled = state.pack.filter(function (item) { return item.status === 'done' || item.status === 'failed'; }).length;
+    $('#pack-progress').classList.toggle('hidden', !state.busy);
+    var bar = $('#pack-progress').querySelector('i');
+    if (bar) bar.style.width = Math.round((settled / total) * 100) + '%';
+    $('#pack-summary').textContent = t('packSummary', { done: packDone(), total: state.pack.length });
+  }
+
+  function renderSlot(slot, index) {
+    var node = el('div', 'slot');
+    var cap = el('span', 'cap', omni.lang === 'en' ? slot.emotion.en : slot.emotion.zh);
+    if (!state.withText) cap.classList.add('hide');
+
+    if (slot.status === 'done') {
+      var img = el('img');
+      img.src = slot.url;
+      img.alt = slot.emotion.id;
+      img.title = t('retry');
+      img.addEventListener('click', function () { openLightbox(index); });
+      node.appendChild(img);
+      node.appendChild(cap);
+      node.appendChild(slotActions(index));
+    } else if (slot.status === 'failed') {
+      node.classList.add('failed');
+      node.appendChild(el('div', 'ph', (slot.error || t('failed', { n: index + 1 }))));
+      var retry = el('button', 'chip', t('retry'));
+      retry.type = 'button';
+      retry.style.zIndex = '2';
+      retry.addEventListener('click', function () { regenOne(index); });
+      node.appendChild(retry);
+    } else if (slot.status === 'busy') {
+      var busy = el('div', 'ph');
+      busy.appendChild(el('span', 'spin'));
+      node.appendChild(busy);
+      node.appendChild(cap);
+    } else {
+      node.appendChild(el('div', 'ph', omni.lang === 'en' ? slot.emotion.en : slot.emotion.zh));
+    }
+    return node;
+  }
+
+  function slotActions(index) {
+    var acts = el('div', 'acts');
+    var mk = function (key, fn) {
+      var btn = el('button', null, t(key));
+      btn.type = 'button';
+      // 格子上的按钮在图片上方：别让点击冒泡到图片（那会打开大图预览）
+      btn.addEventListener('click', function (event) { event.stopPropagation(); fn(); });
+      return btn;
+    };
+    acts.appendChild(mk('saveOne', function () { saveOne(index); }));
+    acts.appendChild(mk('retry', function () { regenOne(index); }));
+    acts.appendChild(mk('animate', function () { sendToMotion(index); }));
+    return acts;
+  }
+
+  function renderPack() {
+    var grid = $('#pack-grid');
+    grid.innerHTML = '';
+    if (state.pack.length === 0) return;
+    state.pack.forEach(function (slot, index) { grid.appendChild(renderSlot(slot, index)); });
+    updateProgress();
+  }
+
+  function regenOne(index) {
+    if (!state.choice || !state.choice.ready) return;
+    if (supportsReference() && !state.photo) return;
+    var slot = state.pack[index];
+    if (!slot || slot.status === 'busy') return;
+    slot.status = 'busy';
+    slot.error = '';
+    renderPack();
+    var job = drawOnce(state.photo, packPrompt(slot.emotion));
+    job.then(function (image) {
+      slot.status = 'done';
+      slot.url = image.url;
+      slot.ref = image.ref;
+    }).catch(function (e) {
+      slot.status = 'failed';
+      slot.error = e.message || String(e);
+      omni.log('pack.retry.failed', slot.error, { emotion: slot.emotion.id });
+    }).then(function () { renderPack(); });
+  }
+
+  /**
+   * 跑一整套。
+   *
+   * 每张出来就上屏（格子先按情绪排好），失败不打断整套 —— 一套要跑几分钟，
+   * "等到最后才知道哪张挂了"是最难受的一种失败方式。
+   */
+  function runPack() {
+    if (state.busy || !state.choice || !state.choice.ready) return;
+    // 两种模式各要一样东西：云端要照片（参考图），本地要一段角色描述（没有图可参考）。
+    if (supportsReference()) {
+      if (!state.photo) { showErr('pack-err', t('needPhoto')); return; }
+    } else if (!state.extra.trim()) {
+      showErr('pack-err', t('characterRequired'));
+      return;
+    }
+    // 重新跑一套会丢掉现有结果，而每一张都是一次真实的生图调用 —— 先问一句，
+    // 别让"再点一下"变成一次静默的重复花费（sandbox 里 confirm 是可用的）。
+    var existing = packDone();
+    if (existing > 0 && !window.confirm(t('confirmAgain', { n: existing }))) return;
+    showErr('pack-err', '');
+
+    // 这一套的上下文：画风与角色描述在开跑那一刻定格，之后用户改了界面也不影响
+    // 已经生成/还要补做的那几张（"重做"与动图都按这份上下文走）。
+    state.packContext = {
+      style: state.style,
+      customStyle: state.customStyle,
+      character: state.extra,
+      withText: state.withText,
+      emotion: null,
+    };
+    var list = PROMPT.emotions.slice(0, state.count);
+    state.pack = list.map(function (emotion) { return { emotion: emotion, status: 'pending', url: '', ref: '', error: '' }; });
+    state.stopped = false;
+    $('#pack-result').classList.remove('hidden');
+    renderPack();
+    setPackBusy(true, t('working', { done: 0, total: list.length }));
+
+    var cursor = 0;
+    var running = 0;
+
+    function tick() {
+      if (state.stopped) {
+        if (running === 0) finish();
+        return;
+      }
+      while (running < CONCURRENCY && cursor < state.pack.length) {
+        start(cursor);
+        cursor += 1;
+      }
+      if (cursor >= state.pack.length && running === 0) finish();
+    }
+
+    function start(index) {
+      var slot = state.pack[index];
+      if (!slot) return;
+      running += 1;
+      slot.status = 'busy';
+      renderPack();
+      setPackBusy(true, t('working', { done: packDone(), total: state.pack.length }));
+      drawOnce(state.photo, packPrompt(slot.emotion))
+        .then(function (image) {
+          slot.status = 'done';
+          slot.url = image.url;
+          slot.ref = image.ref;
+        })
+        .catch(function (e) {
+          slot.status = 'failed';
+          slot.error = e.message || String(e);
+          omni.log('pack.failed', slot.error, { emotion: slot.emotion.id });
+        })
+        .then(function () {
+          running -= 1;
+          renderPack();
+          setPackBusy(true, t('working', { done: packDone(), total: state.pack.length }));
+          tick();
+        });
+    }
+
+    function finish() {
+      setPackBusy(false);
+      $('#pack-progress').classList.add('hidden');
+      var failed = state.pack.filter(function (item) { return item.status === 'failed'; }).length;
+      if (state.stopped) showErr('pack-err', t('stopped'));
+      else if (failed > 0) showErr('pack-err', t('failedMany', { n: failed }));
+      updateProgress();
+      omni.log('pack.done', 'pack finished', { total: state.pack.length, done: packDone(), failed: failed, style: state.style.id });
+    }
+
+    tick();
+  }
+
+  $('#run-pack').addEventListener('click', runPack);
+  $('#stop-pack').addEventListener('click', function () {
+    state.stopped = true;
+    $('#stop-pack').classList.add('hidden');
+  });
+
+  // ---------------------------------------------------------------------------
+  // 存图（大图 / 单张 / 全部）
+  // ---------------------------------------------------------------------------
+  function toDataUrl(url) {
+    return fetch(url, { mode: 'cors' })
+      .then(function (res) { return res.blob(); })
+      .then(function (blob) {
+        return new Promise(function (resolve, reject) {
+          var reader = new FileReader();
+          reader.onload = function () { resolve(String(reader.result)); };
+          reader.onerror = function () { reject(new Error('读取失败')); };
+          reader.readAsDataURL(blob);
+        });
+      });
+  }
+
+  function saveUrl(url, name) {
+    return toDataUrl(url).then(function (dataUrl) {
+      return omni.files.save({ name: name, dataUrl: dataUrl });
+    });
+  }
+
+  function saveOne(index) {
+    var slot = state.pack[index];
+    if (!slot || slot.status !== 'done') return;
+    saveUrl(slot.url, 'sticker-' + slot.emotion.id + '-' + Date.now().toString().slice(-5) + '.png')
+      .then(function (res) {
+        showErr('pack-err', '');
+        $('#pack-summary').textContent = t('saved', { name: (res.path || '').split('/').pop() || '' });
+      })
+      .catch(function (e) { showErr('pack-err', e.message || String(e)); });
+  }
+
+  $('#save-all').addEventListener('click', function () {
+    var done = state.pack.filter(function (item) { return item.status === 'done'; });
+    if (done.length === 0) return;
+    var stamp = Date.now().toString().slice(-5);
+    var chain = Promise.resolve(0);
+    done.forEach(function (slot, i) {
+      chain = chain.then(function (count) {
+        return saveUrl(slot.url, 'sticker-' + slot.emotion.id + '-' + stamp + '.png').then(function () { return count + 1; });
+      });
+    });
+    chain
+      .then(function (count) { $('#pack-summary').textContent = t('savedAll', { n: count }); })
+      .catch(function (e) { showErr('pack-err', e.message || String(e)); });
+  });
+
+  // ---------------------------------------------------------------------------
+  // 大图预览
+  // ---------------------------------------------------------------------------
+  function openLightbox(index) {
+    var slot = state.pack[index];
+    if (!slot || slot.status !== 'done') return;
+    state.lightbox = index;
+    $('#lightbox-img').src = slot.url;
+    $('#lightbox-cap').textContent = omni.lang === 'en' ? slot.emotion.en : slot.emotion.zh;
+    $('#lightbox').classList.remove('hidden');
+  }
+
+  function closeLightbox() {
+    state.lightbox = -1;
+    $('#lightbox').classList.add('hidden');
+  }
+
+  $('#lb-close').addEventListener('click', closeLightbox);
+  $('#lightbox').addEventListener('click', function (event) { if (event.target === this) closeLightbox(); });
+  $('#lb-save').addEventListener('click', function () { if (state.lightbox >= 0) saveOne(state.lightbox); });
+  $('#lb-again').addEventListener('click', function () {
+    var index = state.lightbox;
+    closeLightbox();
+    if (index >= 0) regenOne(index);
+  });
+  $('#lb-motion').addEventListener('click', function () {
+    var index = state.lightbox;
+    closeLightbox();
+    if (index >= 0) sendToMotion(index);
+  });
+
+  // ---------------------------------------------------------------------------
+  // 页签 B：动图
+  // ---------------------------------------------------------------------------
+  var motionNodes = [];
+  PROMPT.motions.forEach(function (motion) {
+    var chip = el('button', 'chip', L(motion));
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', motion.id === state.motion.id ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.motion = motion;
+      motionNodes.forEach(function (node) { node.setAttribute('aria-pressed', node.dataset.id === motion.id ? 'true' : 'false'); });
+    });
+    chip.dataset.id = motion.id;
+    motionNodes.push(chip);
+    $('#motions').appendChild(chip);
+  });
+
+  var sizeNodes = [];
+  GIF_SIZES.forEach(function (size) {
+    var chip = el('button', 'chip', size + 'px');
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', size === state.size ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.size = size;
+      sizeNodes.forEach(function (node) { node.setAttribute('aria-pressed', node.textContent === size + 'px' ? 'true' : 'false'); });
+    });
+    sizeNodes.push(chip);
+    $('#gif-sizes').appendChild(chip);
+  });
+
+  var speedNodes = [];
+  SPEEDS.forEach(function (speed) {
+    var chip = el('button', 'chip', L(speed));
+    chip.type = 'button';
+    chip.setAttribute('aria-pressed', speed.id === state.speed.id ? 'true' : 'false');
+    chip.addEventListener('click', function () {
+      state.speed = speed;
+      speedNodes.forEach(function (node) { node.setAttribute('aria-pressed', node.dataset.id === speed.id ? 'true' : 'false'); });
+    });
+    chip.dataset.id = speed.id;
+    speedNodes.push(chip);
+    $('#gif-speeds').appendChild(chip);
+  });
+
+  function setGifBusy(on, text) {
+    state.gifBusy = on;
+    $('#gif-busy').classList.toggle('hidden', !on);
+    if (text) $('#gif-busy-text').textContent = text;
+    $('#run-gif').disabled = on || !state.choice || !state.choice.ready || !motionReady();
+    $('#re-gif').classList.toggle('hidden', on || !state.frames);
+  }
+
+  /** 给媒体地址加一个时间戳破缓存（data: 地址不能加，加了就不是那张图了）。 */
+  function withStamp(url, stamp) {
+    if (!url || url.indexOf('data:') === 0) return url;
+    return url + (url.indexOf('?') >= 0 ? '&' : '?') + 't=' + stamp;
+  }
+
+  function renderGif() {
+    var box = $('#gif-result');
+    if (!state.gif) { box.classList.add('hidden'); return; }
+    box.classList.remove('hidden');
+    $('#gif-img').src = withStamp(state.gif.url, state.gif.stamp);
+    $('#gif-meta').textContent = t('gifMeta', {
+      frames: state.gif.frames,
+      size: state.size,
+      delay: state.speed.delay,
+      kb: Math.max(1, Math.round(state.gif.bytes / 1024)),
+    });
+    var strip = $('#gif-frames');
+    strip.innerHTML = '';
+    (state.gif.frameUrls || []).forEach(function (url, index) {
+      var fig = el('figure');
+      var img = el('img');
+      img.src = url;
+      img.alt = 'frame ' + (index + 1);
+      fig.appendChild(img);
+      fig.appendChild(el('figcaption', null, String(index + 1)));
+      strip.appendChild(fig);
+    });
+  }
+
+  /**
+   * 一次改图。
+   *
+   * 参考图一律给 ref：源图在选中的那一刻就暂存过（见 pickPhoto），一套里的每一张、
+   * 动图的每一帧都挂在同一个 ref 上 —— 宿主侧只暂存一份，也不用反复走文件对话框。
+   */
+  function edit(source, prompt) {
+    if (!source || !source.ref) return Promise.reject(new Error(t('needStaged')));
+    var params = {
+      ref: source.ref,
+      prompt: prompt,
+      negativePrompt: PROMPT.negative,
+      seed: seed(),
+    };
+    var choice = choiceParams();
+    Object.keys(choice).forEach(function (key) { params[key] = choice[key]; });
+    return omni.image.edit(params);
+  }
+
+  /**
+   * 一次文生图（没有参考图）。
+   *
+   * 本地引擎（MLX / ComfyUI）走这条：角色完全由提示词里的描述决定，
+   * 尺寸固定方图（表情包本来就要方图），种子每次不同 —— 同一段描述本来也画不出
+   * 两张一样的图，那是文生图的固有差别，不是这里能"修"的。
+   */
+  function generate(prompt) {
+    var params = {
+      prompt: prompt,
+      negativePrompt: PROMPT.negative,
+      width: 1024,
+      height: 1024,
+      seed: seed(),
+    };
+    var choice = choiceParams();
+    Object.keys(choice).forEach(function (key) { params[key] = choice[key]; });
+    return omni.image.generate(params);
+  }
+
+  /**
+   * 动图用哪份上下文。
+   *
+   * 从上面那一套点「动起来」带过来的，就用**那一套**的画风 / 描述（开跑那一刻定格的
+   * 那份），而不是用户此刻在界面上改成的样子 —— 否则动图会画成另一个风格/角色。
+   * 自己上传图片的（只有参考图模式有这个入口）就用界面上的当前值。
+   */
+  function motionContext() {
+    if (state.packContext) return state.packContext;
+    return {
+      style: state.style,
+      customStyle: state.customStyle,
+      character: state.extra,
+      withText: state.withText,
+      emotion: null,
+    };
+  }
+
+  /** 按当前模式发一次"画一张"：有参考图就改图，没有就按描述文生图。 */
+  function drawOnce(source, prompt) {
+    return supportsReference() ? edit(source, prompt) : generate(prompt);
+  }
+
+  /**
+   * 生成动作帧并合成动图。
+   *
+   * 只生成两张（中段 / 顶点），第一帧直接用源表情 —— 播放顺序排成 A-B-C-B：
+   * 首尾同源，循环点看不出跳变，也不必为"回到起始姿势"多花一次生成。
+   */
+  function makeGif() {
+    if (state.gifBusy || !state.choice || !state.choice.ready) return;
+    if (!motionReady()) {
+      showErr('gif-err', supportsReference() ? t('needSource') : t('characterRequired'));
+      return;
+    }
+    showErr('gif-err', '');
+
+    var reference = supportsReference();
+    var steps = state.motion.steps;
+    var context = motionContext();
+    // 第一帧是"静止起始帧"：
+    //   参考图模式 = 源表情本身（不花一次生成，而且首尾同源、循环看不出跳变）；
+    //   文字模式没有源图可用，只能按同一段描述先画一张静止的。
+    var rest = reference
+      ? { url: state.source.dataUrl || state.source.url, ref: state.source.ref }
+      : null;
+    var plan = reference ? steps.slice() : [REST_POSE[state.motion.id] || REST_POSE.breath].concat(steps);
+    var picks = [];
+    var done = 0;
+
+    function next(i) {
+      if (i >= plan.length) return Promise.resolve();
+      setGifBusy(true, t('gifWorking', { done: done, total: plan.length }));
+      var call = reference
+        ? edit(state.source, framePrompt(plan[i], context))
+        : generate(framePrompt(plan[i], context));
+      return call
+        .then(function (image) {
+          picks.push(image);
+          done += 1;
+          setGifBusy(true, t('gifWorking', { done: done, total: plan.length }));
+        })
+        .then(function () { return next(i + 1); });
+    }
+
+    next(0)
+      .then(function () {
+        if (picks.length !== plan.length) throw new Error(t('gifNeedFrames'));
+        // 序列 S = 起始帧 + 关键帧，播放顺序是 S 再倒着回来 —— 但**掐掉两端的重复**：
+        // [A,B,C] → A,B,C,B（末尾不再回到 A，循环本身就是回到 A），
+        // 两帧的情况 [A,B] 就正好是两个来回，不会变成 A,B,B。
+        var seq = (rest ? [rest] : []).concat(picks);
+        var frames = seq.concat(seq.slice(1, seq.length - 1).reverse());
+        var refs = [];
+        for (var i = 0; i < frames.length; i++) {
+          if (!frames[i].ref) throw new Error(t('gifNeedFrames'));
+          refs.push(frames[i].ref);
+        }
+        setGifBusy(true, t('gifMixing'));
+        return omni.gif.make({ refs: refs, delayMs: state.speed.delay, size: state.size }).then(function (gif) {
+          state.frames = { refs: refs, frameUrls: frames.map(function (frame) { return frame.url; }) };
+          state.gif = {
+            url: gif.url,
+            ref: gif.ref,
+            bytes: gif.bytes,
+            frames: gif.frames,
+            frameUrls: state.frames.frameUrls,
+            stamp: Date.now(),
+          };
+          renderGif();
+          omni.log('gif.done', 'gif assembled', { motion: state.motion.id, frames: gif.frames, size: state.size, delay: state.speed.delay });
+        });
+      })
+      .catch(function (e) {
+        showErr('gif-err', e.message || String(e));
+        omni.log('gif.failed', e.message || String(e), { motion: state.motion.id });
+      })
+      .then(function () {
+        setGifBusy(false);
+        syncButtons();
+      });
+  }
+
+  $('#run-gif').addEventListener('click', makeGif);
+
+  // 只改速度 / 尺寸：帧还在，重新合成一遍即可（不再花生成调用）。
+  $('#re-gif').addEventListener('click', function () {
+    if (!state.frames || state.gifBusy) return;
+    showErr('gif-err', '');
+    setGifBusy(true, t('gifMixing'));
+    omni.gif.make({ refs: state.frames.refs, delayMs: state.speed.delay, size: state.size })
+      .then(function (gif) {
+        state.gif = {
+          url: gif.url, ref: gif.ref, bytes: gif.bytes, frames: gif.frames,
+          frameUrls: state.frames.frameUrls, stamp: Date.now(),
+        };
+        renderGif();
+      })
+      .catch(function (e) { showErr('gif-err', e.message || String(e)); })
+      .then(function () { setGifBusy(false); });
+  });
+
+  $('#save-gif').addEventListener('click', function () {
+    if (!state.gif) return;
+    saveUrl(state.gif.url, 'sticker-' + state.motion.id + '-' + Date.now().toString().slice(-5) + '.gif')
+      .then(function (res) { $('#gif-ok').textContent = t('saved', { name: (res.path || '').split('/').pop() || '' }); })
+      .catch(function (e) { showErr('gif-err', e.message || String(e)); });
+  });
+
+  /** 从一套里把某张送到页签 B：这一张已经在宿主侧有 ref，不用重新上传。 */
+  function sendToMotion(index) {
+    var slot = state.pack[index];
+    if (!slot || slot.status !== 'done') return;
+    // 记下这一张的情绪：文字模式下重画动作帧时，文案（"好耶！"）要跟它一致
+    if (state.packContext) state.packContext.emotion = slot.emotion;
+    state.source = { url: slot.url, ref: slot.ref, name: slot.emotion.id };
+    state.frames = null;
+    state.gif = null;
+    paintDrop($('#motion-drop'), state.source, 'motionDrop', 'motionHint');
+    renderGif();
+    setTab('motion');
+    syncButtons();
+  }
+
+  // ---------------------------------------------------------------------------
+  // 页签与启动
+  // ---------------------------------------------------------------------------
+  function setTab(tab) {
+    state.tab = tab;
+    $('#tabbtn-pack').setAttribute('aria-selected', tab === 'pack' ? 'true' : 'false');
+    $('#tabbtn-motion').setAttribute('aria-selected', tab === 'motion' ? 'true' : 'false');
+    $('#pane-pack').classList.toggle('hidden', tab !== 'pack');
+    $('#pane-motion').classList.toggle('hidden', tab !== 'motion');
+  }
+
+  $('#tabbtn-pack').addEventListener('click', function () { setTab('pack'); });
+  $('#tabbtn-motion').addEventListener('click', function () { setTab('motion'); });
+
+  // 去配置：缺引擎（本地）与缺厂商/Key（云端）是两件不同的事，送人去对地方。
+  $('#gate-btn').addEventListener('click', function () {
+    var local = state.kind === 'local';
+    var engineMissing = local && state.choice && /引擎|engine/i.test(state.choice.why || '');
+    omni.openSettings(engineMissing ? 'engines' : 'cloud');
+  });
+
+  // 模型选择：云端（厂商 + 模型）与本地（引擎 + 模型）各自记住自己的选择。
+  document.querySelectorAll('#model-kind button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      state.kind = btn.dataset.kind === 'local' ? 'local' : 'cloud';
+      paintPicker();
+    });
+  });
+  $('#pick-provider').addEventListener('change', function () {
+    state.providerId = this.value;
+    state.cloudModel = '';
+    paintPicker();
+  });
+  $('#pick-cloud-model').addEventListener('input', function () {
+    state.cloudModel = this.value;
+    syncChoice();
+    checkGate();
+    applyMode();
+    var note = $('#model-note');
+    if (state.choice && state.choice.supportsReference) note.textContent = t('modelNoteRef');
+  });
+  $('#pick-engine').addEventListener('change', function () {
+    state.localBackend = this.value;
+    state.localModel = '';
+    paintPicker();
+  });
+  $('#pick-local-model').addEventListener('input', function () {
+    state.localModel = this.value;
+    paintPicker();
+  });
+
+  // 本地模式没有照片可用：一键切到云端（没配过厂商就送去设置页）
+  // 用户在设置里配好厂商 / 下好模型又切回来：重读目录（不动他在这一页的选择）
+  omni.onCapabilities = function () { void loadModels(false); };
+
+  $('#to-cloud').addEventListener('click', function () {
+    if (cloudProviders().length === 0) {
+      omni.openSettings('cloud');
+      return;
+    }
+    state.kind = 'cloud';
+    paintPicker();
+  });
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (node) { node.textContent = t(node.dataset.i18n); });
+    document.querySelectorAll('[data-i18n-ph]').forEach(function (node) { node.placeholder = t(node.dataset.i18nPh); });
+    // 画风 / 动作 / 速度的名字与页签标题一样是动态的，重画一遍（切语言时不能只有静态文案变）
+    PROMPT.styles.forEach(function (style) {
+      var node = styleNodes[style.id];
+      if (!node) return;
+      node.querySelector('.nm').textContent = L(style);
+      var desc = node.querySelector('.dt');
+      if (desc) desc.textContent = L(style, 'Desc');
+    });
+    motionNodes.forEach(function (node) {
+      var motion = PROMPT.motions.filter(function (m) { return m.id === node.dataset.id; })[0];
+      if (motion) node.textContent = L(motion);
+    });
+    speedNodes.forEach(function (node) {
+      var speed = SPEEDS.filter(function (s) { return s.id === node.dataset.id; })[0];
+      if (speed) node.textContent = L(speed);
+    });
+    $('#lightbox-cap').textContent = state.lightbox >= 0 && state.pack[state.lightbox]
+      ? (omni.lang === 'en' ? state.pack[state.lightbox].emotion.en : state.pack[state.lightbox].emotion.zh)
+      : '';
+  }
+
+  omni.ready.then(function () {
+    paint();
+    setTab('pack');
+    updateProgress();
+    applyMode();
+    // 模型目录是这一页能不能跑的前提：拉到之前按钮保持禁用，别让用户点了才报错。
+    loadModels(true).then(function () {
+      omni.log('models.loaded', 'image catalog loaded', {
+        cloud: cloudProviders().length,
+        local: localGroups().length,
+        backend: state.choice && state.choice.backend,
+      });
+    });
+  });
+})();
+</script>
+</body>
+</html>

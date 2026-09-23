@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 
+import { classifyStartupError } from "../../shared/engine-errors";
 import { extractDeadWorkerError, extractStartupError } from "./errors";
 
 /** mlx_lm.server 遇到不认识的架构时真实打出来的那段（背景见 errors.ts）。 */
@@ -36,6 +37,27 @@ test("正常启动的日志不误报", () => {
     "Starting httpd at 127.0.0.1 on port 18010...",
   ].join("\n");
   expect(extractDeadWorkerError(logs)).toBeNull();
+});
+
+/** llama-server 加载不了模型时真实打出来的尾巴（实测 2026-09-18：架构不认识的 GGUF）。 */
+const LLAMA_LOAD_FAILURE_LOG = [
+  "0.00.051.535 I srv    load_model: loading model '/tmp/Bonsai-27B-dspark-bf16.gguf'",
+  "0.00.052.115 E llama_model_load: error loading model: unknown model architecture: 'dspark'",
+  "0.00.052.290 E llama_model_load_from_file_impl: failed to load model",
+  "0.00.052.310 E common_fit_params: encountered an error while trying to fit params to free device memory: failed to load model",
+  "0.00.052.675 E llama_model_load: error loading model: unknown model architecture: 'dspark'",
+  "0.00.052.678 E llama_model_load_from_file_impl: failed to load model",
+  "0.00.052.679 E cmn  common_init_: failed to load model '/tmp/Bonsai-27B-dspark-bf16.gguf'",
+  "0.00.052.681 I srv  operator(): operator(): cleaning up before exit...",
+  "0.00.053.106 E srv  llama_server: exiting due to model loading error",
+].join("\n");
+
+test("级联错误：挑出根因行，而不是最后那句总结", () => {
+  const message = extractStartupError(LLAMA_LOAD_FAILURE_LOG, "fallback");
+  expect(message).toContain("unknown model architecture");
+  expect(message).toContain("dspark");
+  // 根因行要能被分到 model-format，界面才给得出「架构不支持」的建议
+  expect(classifyStartupError(message)).toBe("model-format");
 });
 
 test("extractStartupError 的既有行为不变（它只在进程退出 / 超时那条路上被调用）", () => {

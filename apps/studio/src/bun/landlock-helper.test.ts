@@ -250,7 +250,10 @@ describe("编译与探测", () => {
     } else if (!first.ok && !third.ok) {
       expect(third.reason).toBe(first.reason);
     }
-  });
+    // 这条用例在 Linux 上会**真编一次 C 辅助程序**（cc + 头文件）。CI runner 忙起来
+    // 会超过 bun 默认的 5 秒而被判超时（实测 5012ms 红过一次，同一份代码本机与上一次
+    // CI 都是绿的）—— 给真编译留出余量，别把环境抖动当成缺陷。
+  }, 30_000);
 });
 
 /**
@@ -265,7 +268,9 @@ describe("辅助程序本体（真编译）", () => {
     if (!compiles || binary) return;
     const built = buildInto(workDir);
     binary = built.ok ? built.path! : null;
-  });
+    // 这里是一次**真编译**（cc + 头文件）：CI runner 忙起来会超过 bun 默认的 5 秒，
+    // 钩子超时会把整个 describe 一起弄红。给真编译留余量。
+  }, 30_000);
 
   test.if(compiles)("--probe 在没有 Landlock 的平台上退出 2 并说明原因", () => {
     expect(binary).toBeTruthy();

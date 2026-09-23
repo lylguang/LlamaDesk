@@ -939,7 +939,12 @@ function createGenerateVideo(ctx: ToolContext): BuiltTool {
       prompt: Type.String({ description: "What the video should show, including camera and motion." }),
       aspect_ratio: Type.Optional(Type.String({ description: 'Aspect ratio, e.g. "16:9" | "9:16" | "1:1". Default 16:9.' })),
       duration: Type.Optional(Type.Number({ description: "Duration in seconds (cloud backends: 4-15)." })),
-      resolution: Type.Optional(Type.String({ description: 'Resolution, e.g. "768P" | "1080p".' })),
+      resolution: Type.Optional(
+        Type.String({
+          description:
+            'Resolution tier: "768P" | "2K" | "480P" (MiniMax) or "480p" | "720p" | "1080p" (Seedance).',
+        }),
+      ),
       model: Type.Optional(Type.String({ description: "Model id override. Usually omit." })),
       first_frame: Type.Optional(
         Type.String({

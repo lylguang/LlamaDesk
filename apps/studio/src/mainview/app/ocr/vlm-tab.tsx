@@ -28,7 +28,7 @@ import {
 } from "@ui/select";
 import { useRouter } from "@stores/router";
 import { useServerStore } from "@stores/server";
-import { useT } from "@stores/ui-lang";
+import { useT, useTOptional } from "@stores/ui-lang";
 import { CloudModelSelect } from "@components/cloud-model-select";
 import { fileKind, engineSupports, type InferenceEngine } from "../../../shared/modelscope";
 import { MODEL_PROFILES } from "../../../shared/model-profiles";
@@ -59,6 +59,7 @@ export function VlmTab({
   engineSwitcher?: React.ReactNode;
 }) {
   const t = useT();
+  const tOptional = useTOptional();
   const queryClient = useQueryClient();
   const router = useRouter();
   const serverStatus = useServerStore((s) => s.status);
@@ -109,6 +110,8 @@ export function VlmTab({
   const installedModels = (installedData?.models ?? [])
     // 目录条目（整个仓库）文件名没有扩展名，格式按目录内容判定。
     .filter((m) => engineSupports(engine, m.kind ?? fileKind(m.fileName)))
+    // VLM 选的是对话模型：嵌入 / 重排类别会被 setActiveModel 拒掉，别让它们进下拉框。
+    .filter((m) => m.category !== "embedding" && m.category !== "rerank")
     .sort((a, b) => Number(b.isActive) - Number(a.isActive));
 
   useEffect(() => {
@@ -157,7 +160,7 @@ export function VlmTab({
   const provider = providerData?.config;
   const configured = !!provider?.providerId;
 
-  // 云端 VLM OCR 只选厂商 + 模型（地址 / 密钥在「设置 → 模型云服务」里）。
+  // 云端 VLM OCR 只选厂商 + 模型（地址 / 密钥在「设置 → 云端模型」里）。
   const [pProviderId, setPProviderId] = useState("");
   const [pModel, setPModel] = useState("");
   const lastProvider = useRef("");
@@ -257,7 +260,8 @@ export function VlmTab({
                   {t("ocr.vlm.remote.cloudProvider")}
                 </Label>
                 <CloudModelSelect
-                  // VLM 属于对话类模型：OCR 只列已启动厂商里的对话 / 视觉模型。
+                  // 用途分类里没有单独的"视觉"维度：VLM 与对话模型同属 `chat`，
+                  // 所以这里只按 chat 过滤（`CloudModelType` 见 shared/cloud-providers.ts）。
                   kind="chat"
                   providerId={pProviderId}
                   model={pModel}
@@ -331,7 +335,7 @@ export function VlmTab({
             {installedModels.length === 0 ? (
               <div className="flex flex-col items-start gap-2 rounded-lg border border-dashed px-3 py-3">
                 <p className="text-[11px] text-muted-foreground">{t("ocr.vlm.noModels")}</p>
-                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "settings", tab: "store" })}>
+                <Button size="xs" variant="outline" onClick={() => router.setRoute({ path: "settings", tab: "library" })}>
                   <StoreIcon data-icon="inline-start" />
                   {t("ocr.vlm.goLibrary")}
                 </Button>
@@ -381,7 +385,7 @@ export function VlmTab({
                     <span className="truncate">{p.label}</span>
                     {p.badge ? (
                       <Badge variant="secondary" className="shrink-0 text-[9px]">
-                        {p.badge}
+                        {tOptional(`modelProfile.${p.id}.badge`, p.badge)}
                       </Badge>
                     ) : null}
                   </span>
@@ -391,8 +395,12 @@ export function VlmTab({
           </SelectContent>
         </Select>
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          {MODEL_PROFILES.find((p) => p.id === profileId)?.description ??
-            t("ocr.vlm.profile")}
+          {/* 档案说明来自 shared/model-profiles.ts（英文），词条里备了中英两份：
+              英文界面下不再硬塞英文说明，中文界面下也不再是英文。 */}
+          {tOptional(
+            `modelProfile.${profileId}.description`,
+            MODEL_PROFILES.find((p) => p.id === profileId)?.description ?? t("ocr.vlm.profile"),
+          )}
         </p>
       </PanelSection>
 

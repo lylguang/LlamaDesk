@@ -1,11 +1,12 @@
 import { eq } from "drizzle-orm";
 import type { InferenceEngine } from "../../shared/modelscope";
-import { ENGINE_IDS, ENGINE_SPECS } from "../../shared/engines";
+import { ENGINE_IDS, ENGINE_SPECS, EMBEDDING_PORT_BASE } from "../../shared/engines";
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
-import { decryptSecret, encryptSecret, isEncryptedSecret } from "../secrets";
+import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "../secrets";
+import { logEvent } from "../app-log";
 
 export type SettingsKey =
   | "SETUP_COMPLETE"
@@ -43,16 +44,27 @@ export type SettingsKey =
   | "SERVER_PARALLEL"
   | "SERVER_TEMP"
   | "SERVER_TOP_P"
+  | "SERVER_TOP_K"
+  | "SERVER_REPEAT_PENALTY"
+  | "SERVER_IDLE_UNLOAD_MINUTES"
+  | "SERVER_FALLBACK_MODELS"
   | "SERVER_GPU_LAYERS"
   | "SERVER_CACHE_TYPE_K"
   | "SERVER_CACHE_TYPE_V"
+  // 模型加载模式（llama.cpp 的 mmap / mlock 取舍，PERF-02）：auto 之外的取值按
+  // llama-server 是 `--load-mode`（新版）还是 `--mlock`（旧版）折算，见
+  // bun/runtimes/llama-load-mode.ts。合法取值在 set 时校验，非法值直接拒。
+  | "SERVER_LOAD_MODE"
   | "CUSTOM_HF_MODEL"
   | "LOCAL_MODEL_PATH"
   | "LOCAL_MODEL_NAME"
   | "CHAT_MODEL"
   | "UI_LANG"
   | "UI_THEME"
-  // 网络代理（设置 → 偏好 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
+  // 左侧一级菜单的顺序与显示 / 隐藏（设置 → 外观）：JSON 数组，解析与容错规则见
+  // shared/app-rail.ts。空串 = 默认布局（默认顺序 + 全部可见）。
+  | "APP_RAIL_LAYOUT"
+  // 网络代理（设置 → 通用）：system = 跟随系统 / 环境变量，custom = 手填地址，
   // none = 强制直连。生效范围见 bun/proxy.ts —— 云端模型、模型/引擎下载、联网检索都走它，
   // 回环与（默认的）局域网地址直连。
   | "PROXY_MODE"
@@ -126,11 +138,27 @@ export type SettingsKey =
   | "VIDEO_COMFY_CKPT"
   | "VIDEO_COMFY_CLIP"
   | "VIDEO_COMFY_VAE"
+  // AI 音乐生成（music-gen.ts）
+  | "MUSIC_BACKEND"
+  | "MUSIC_PROVIDER_ID"
+  | "MUSIC_MODEL"
+  | "MUSIC_LOCAL_API"
+  | "MUSIC_LOCAL_BASE"
+  | "MUSIC_LOCAL_MODEL"
   | "MODEL_DOWNLOADS"
   | "GATEWAY_ENABLED"
   | "GATEWAY_HOST"
   | "GATEWAY_PORT"
   | "GATEWAY_API_KEY"
+  /** 内网穿透：把上面的网关经 Cloudflare 隧道暴露到公网（见 bun/tunnel.ts）。 */
+  | "TUNNEL_ENABLED"
+  /** quick = 免账号的临时隧道（域名随机、重启即变）；token = 命名隧道（自己的域名）。 */
+  | "TUNNEL_MODE"
+  /** 命名隧道的 Token（加密存储）与公网域名（Host 白名单 + 拼接访问地址）。 */
+  | "TUNNEL_TOKEN"
+  | "TUNNEL_PUBLIC_HOST"
+  /** 出站协议：auto / http2（UDP 7844 被封时用）/ quic。 */
+  | "TUNNEL_PROTOCOL"
   | "WEB_SEARCH_ENABLED"
   | "WEB_SEARCH_PROVIDER"
   | "WEB_SEARCH_API_KEY"
@@ -142,6 +170,11 @@ export type SettingsKey =
   | "MEMORY_EMBEDDING_BASE"
   | "MEMORY_EMBEDDING_API_KEY"
   | "MEMORY_SCOPE_ENABLED"
+  /**
+   * 小应用「笔记」是否对 Agent 可见：开启时每条笔记沉淀一条索引级记忆，
+   * 且 Agent 拿到 note_list / note_search / note_read 三个只读工具（0=只是用户的私人笔记）。
+   */
+  | "NOTES_AGENT_ACCESS"
   | "TRANSLATION_ENGINE"
   | "AGENT_WORKSPACE"
   | "AGENT_WORKSPACES"
@@ -241,7 +274,17 @@ export type SettingsKey =
   | "OCR_PROVIDER_ID"
   | "CLOUD_APP_PROVIDERS_MIGRATED"
   // 已启动模型注册表：当前活动实例 id（本地模式请求的目标），见 bun/model-servers.ts
-  | "SERVED_ACTIVE_ID";
+  | "SERVED_ACTIVE_ID"
+  // 嵌入服务（llama.cpp `--embeddings`）的端口段基址与池化方式；嵌入实例不占聊天端口段，
+  // 也不参与聊天活动状态（见 shared/engines.ts 的 EMBEDDING_PORT_BASE）。
+  | "EMBEDDING_PORT"
+  | "EMBEDDING_POOLING"
+  // 全局默认嵌入配置（设置 → 默认模型 → 向量嵌入）。**只在写入时快照**：
+  // 新建 KB 预填进 KB 行、KB 设置页「启用向量检索」按入重嵌，共享记忆在解析时兜底。
+  // 唯一读取点见 bun/embeddings.ts 的 globalEmbeddingDefaults()。
+  | "EMBEDDING_MODEL"
+  | "EMBEDDING_BASE"
+  | "EMBEDDING_API_KEY";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -280,9 +323,18 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SERVER_PARALLEL: "1",
   SERVER_TEMP: "0.2",
   SERVER_TOP_P: "0.9",
+  SERVER_TOP_K: "40",
+  SERVER_REPEAT_PENALTY: "1.12",
+  // 0 = 关闭（默认）：空闲卸载是给「机器小、模型多」的人省显存用的，
+  // 默认打开会让「昨晚还跑着的模型今天不见了」变成一个需要解释的意外。
+  SERVER_IDLE_UNLOAD_MINUTES: "0",
+  // 备选模型链：配置的模型起不来时按顺序试（逗号分隔），空 = 不回退。
+  SERVER_FALLBACK_MODELS: "",
   SERVER_GPU_LAYERS: "-1",
   SERVER_CACHE_TYPE_K: "q8_0",
   SERVER_CACHE_TYPE_V: "q8_0",
+  // auto = 不传参数（llama.cpp 自己的默认：能用 mmap 就用）。
+  SERVER_LOAD_MODE: "auto",
   CUSTOM_HF_MODEL: "",
   LOCAL_MODEL_PATH: "",
   LOCAL_MODEL_NAME: "",
@@ -290,6 +342,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   UI_LANG: "zh",
   /** 界面主题：system / light / dark，前端据此切换 <html> 的 .dark 类。 */
   UI_THEME: "system",
+  /** 左侧一级菜单布局：空串 = 默认顺序 + 全部可见。 */
+  APP_RAIL_LAYOUT: "",
   // 默认跟随系统：用户 shell 里的 HTTP(S)_PROXY 与 macOS / Windows 的系统代理本来就在生效，
   // 默认值保持这个行为；没有配代理时解析结果为空 = 直连，与以前完全一致。
   PROXY_MODE: "system",
@@ -356,7 +410,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   IMG_COMFY_BASE: "",
   // MLX 生图常驻 worker 空闲多少分钟后自动卸载（0 = 一直常驻）：模型会占数 GB 内存。
   IMG_MLX_IDLE_MINUTES: "10",
-  // 云端生视频：厂商与模型在「设置 → 模型云服务」里配（VIDEO_PROVIDER_ID / VIDEO_MODEL）。
+  // 云端生视频：厂商与模型在「设置 → 云端模型」里配（VIDEO_PROVIDER_ID / VIDEO_MODEL）。
   VIDEO_BACKEND: "cloud",
   VIDEO_PROVIDER_ID: "",
   VIDEO_MODEL: "",
@@ -371,11 +425,27 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VIDEO_COMFY_CKPT: "",
   VIDEO_COMFY_CLIP: "",
   VIDEO_COMFY_VAE: "",
+  // 云端生音乐：与生视频同一套做法 —— 厂商与模型在「设置 → 云端模型」里配
+  // （MUSIC_PROVIDER_ID / MUSIC_MODEL），地址与密钥都来自厂商行。
+  MUSIC_BACKEND: "cloud",
+  MUSIC_PROVIDER_ID: "",
+  MUSIC_MODEL: "",
+  // 本地生音乐：**已预留、尚未接入引擎**。三把键先占好位，接入时只需补一个
+  // MUSIC_LOCAL_API 取值 + 一个 submit/poll 实现，不必再动设置面与界面。
+  MUSIC_LOCAL_API: "",
+  MUSIC_LOCAL_BASE: "",
+  MUSIC_LOCAL_MODEL: "",
   MODEL_DOWNLOADS: "[]",
   GATEWAY_ENABLED: "1",
   GATEWAY_HOST: "127.0.0.1",
   GATEWAY_PORT: "10000",
   GATEWAY_API_KEY: "",
+  // 隧道默认关：它把网关推到公网，必须是用户显式开启的能力（且要求先配 GATEWAY_API_KEY）。
+  TUNNEL_ENABLED: "0",
+  TUNNEL_MODE: "quick",
+  TUNNEL_TOKEN: "",
+  TUNNEL_PUBLIC_HOST: "",
+  TUNNEL_PROTOCOL: "auto",
   WEB_SEARCH_ENABLED: "1",
   WEB_SEARCH_PROVIDER: "bing",
   WEB_SEARCH_API_KEY: "",
@@ -389,6 +459,8 @@ const DEFAULTS: Record<SettingsKey, string> = {
   MEMORY_EMBEDDING_API_KEY: "",
   /** 是否把 Agent 写入记为项目记忆（按工作区隔离，1=开启）。 */
   MEMORY_SCOPE_ENABLED: "1",
+  /** 笔记对 Agent 可见（沉淀记忆 + 可读正文）：默认开，开关在笔记小应用的设置里。 */
+  NOTES_AGENT_ACCESS: "1",
   TRANSLATION_ENGINE: "model",
   AGENT_WORKSPACE: "",
   /** 最近使用的工作区列表（JSON 数组），供输入框上方的工作区选择面板展示。 */
@@ -482,6 +554,15 @@ const DEFAULTS: Record<SettingsKey, string> = {
   OCR_PROVIDER_ID: "",
   CLOUD_APP_PROVIDERS_MIGRATED: "",
   SERVED_ACTIVE_ID: "",
+  // 嵌入服务：端口段基址（实例从它起 +100 顺延，与聊天段语义一致）+ 池化方式
+  // （set 时校验枚举 last|mean|none|cls，非法值直接拒，见 updateSettings）。
+  EMBEDDING_PORT: String(EMBEDDING_PORT_BASE),
+  EMBEDDING_POOLING: "last",
+  // 全局默认嵌入配置：留空 = 不设默认（新建 KB 仍为空配置的纯关键词库，
+  // 记忆也保持关键词检索）。地址与密钥可选；地址留空时解析按既有四层链走。
+  EMBEDDING_MODEL: "",
+  EMBEDDING_BASE: "",
+  EMBEDDING_API_KEY: "",
 };
 
 /**
@@ -502,12 +583,40 @@ const settingsCache = new Map<string, { value: string; at: number }>();
  * （网关 / chat / 翻译 / 嵌入等几十处 getSetting 调用点）零改动。这解决的是
  * 「密钥明文躺 SQLite」的问题：拷走数据库读到的是密文，而密钥只在内存里解密。
  *
- * 目前有两类：模型云激活行回写的 VLLM_API_KEY，以及本地 API 网关自身的
- * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘）。
+ * 目前有三类：模型云激活行回写的 VLLM_API_KEY、本地 API 网关自身的
+ * GATEWAY_API_KEY（网关是用户允许保留 Key 的两处之一，同样不该明文躺盘），
+ * 以及内网穿透用的隧道 Token（它等价于"在这条隧道上运行 cloudflared"的凭据）。
  * `EMPTY` 哨兵值不加密也不解密（它就是"无 key"的约定占位，解密会把它当成
  * 普通明文透传）。
  */
-const ENCRYPTED_KEYS = new Set<SettingsKey>(["VLLM_API_KEY", "GATEWAY_API_KEY"]);
+export const ENCRYPTED_SETTINGS_KEYS: readonly SettingsKey[] = [
+  "VLLM_API_KEY",
+  "GATEWAY_API_KEY",
+  "TUNNEL_TOKEN",
+  // 第二批（FUT-02）：以前只有上面三类落盘加密，其余同样属于「凭据」的键是明文躺着的，
+  // 分成两批的唯一原因是第一批先做。判定标准只有一条 —— **这个值落到别人手里，
+  // 他就等于能替你花钱或替你写代码**：各家云厂商的 Key（语音 / OCR / 生图 / 视频 /
+  // 联网搜索 / 记忆向量）、Skills 仓库的 PAT、备份远端的访问密钥。
+  // 漏一个的后果是「拷走 omni-studio.db 就能拿到全部凭据」，而加进来的成本只是一个字符串。
+  "TTS_PROVIDER_API_KEY",
+  "ASR_PROVIDER_API_KEY",
+  "OCR_PROVIDER_API_KEY",
+  "IMG_API_KEY",
+  "VIDEO_MINIMAX_API_KEY",
+  "VIDEO_SEEDANCE_API_KEY",
+  "WEB_SEARCH_API_KEY",
+  "MEMORY_EMBEDDING_API_KEY",
+  "VOICE_CALL_REALTIME_API_KEY",
+  "SKILLS_GIT_PAT",
+  "BACKUP_REMOTE_ACCESS_KEY",
+  "BACKUP_REMOTE_SECRET_KEY",
+];
+
+/**
+ * 唯一真源就是上面那个数组：测试直接遍历它（新增一个键，测试自动覆盖到），
+ * 所以这里只做一次 Set 包装，不再抄一遍名单。
+ */
+const ENCRYPTED_KEYS = new Set<SettingsKey>(ENCRYPTED_SETTINGS_KEYS);
 
 function maybeEncrypt(key: SettingsKey, value: string): string {
   if (!ENCRYPTED_KEYS.has(key)) return value;
@@ -518,7 +627,29 @@ function maybeEncrypt(key: SettingsKey, value: string): string {
 function maybeDecrypt(key: SettingsKey, value: string): string {
   if (!ENCRYPTED_KEYS.has(key)) return value;
   if (!value || value === "EMPTY") return value;
-  return decryptSecret(value);
+  const result = tryDecryptSecret(value);
+  if (result.ok) return result.value;
+  // 解不开**不抛**：读设置是启动路上的第一个调用，抛出去等于引导页永远走不完、
+  // 进不去主界面（点「跳过」也救不回来 —— 它写完 SETUP_COMPLETE，界面还要再读一次设置）。
+  // 最常见来源是"恢复了一份别处机器的备份"：归档不含 secrets.key，库里那些密文
+  // 本机钥匙解不开。按空值处理并留一条日志，语义就是"这台机器上没有这个凭据"。
+  warnDecryptFailure(key, result.error);
+  return "";
+}
+
+/** 同一个键在一次进程内只报一条：读设置是热路径，不这样收一下会把日志刷满。 */
+const decryptWarned = new Set<string>();
+
+function warnDecryptFailure(key: string, error: string): void {
+  if (decryptWarned.has(key)) return;
+  decryptWarned.add(key);
+  logEvent({
+    level: "warn",
+    source: "settings",
+    event: "settings.decrypt.failed",
+    message: `设置项 ${key} 的密文在本机解不开（多来自别的机器 / 数据目录的备份），已按空值处理`,
+    detail: { key, reason: error.slice(0, 200) },
+  });
 }
 
 /** 清空设置缓存（跨进程写入后需要立即生效时手动调用）。 */
@@ -553,8 +684,34 @@ export function getAllSettings(): Record<string, string> {
   return result;
 }
 
+/**
+ * llama.cpp `--pooling` 的合法取值。设置非法值直接拒（不写库、不进缓存），
+ * 别把坏参数塞给 llama-server —— 读侧回落 DEFAULTS 的 "last"。
+ */
+export const EMBEDDING_POOLING_VALUES = ["last", "mean", "none", "cls"] as const;
+
+/**
+ * llama.cpp `--load-mode` 的合法取值（`llama-server --help` 的原文枚举）。非法值直接拒
+ * —— 这个值最终会进 argv，白名单是「手改设置行也塞不进别的参数」的那道闸。
+ */
+export const LOAD_MODE_SETTING_VALUES = ["auto", "mmap", "mlock", "mmap+mlock", "none", "dio"] as const;
+
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
+// EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
+    if (
+      key === "EMBEDDING_POOLING" &&
+      !(EMBEDDING_POOLING_VALUES as readonly string[]).includes(value)
+    ) {
+      continue;
+    }
+    // 同上：加载模式只认枚举值（读侧回落默认 auto，等于不传参数）。
+    if (
+      key === "SERVER_LOAD_MODE" &&
+      !(LOAD_MODE_SETTING_VALUES as readonly string[]).includes(value)
+    ) {
+      continue;
+    }
     const encrypted = maybeEncrypt(key as SettingsKey, value);
     db.insert(settingsTable)
       .values({ key, value: encrypted })

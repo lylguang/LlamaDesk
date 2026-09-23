@@ -57,14 +57,67 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   state goes to the top bar, and binding is retried every 5s so the app takes over once the
   other instance quits
 - **Every subsystem failure goes to one log**: `src/bun/app-log.ts` writes event-level records
-  (JSONL, `<dataDir>/logs/app.log`, 2MB rotation, secrets redacted) for image / video / TTS /
-  ASR / OCR, the inference server, downloads, the gateway, the Agent and webview-side errors.
+  (JSONL, `<dataDir>/logs/app.log`, 2MB rotation, secrets redacted) for image / video / music /
+  TTS / ASR / OCR, the inference server, downloads, the gateway, the Agent and webview-side errors.
   Read it with `omi logs` (falls back to the file when the app is down — crash triage),
   the control socket `logs` command, or RPC `getAppLogs`. Inference server stdout/stderr is
   deliberately **not** in there (per-instance 200k in-memory buffer, `omi server logs`).
   A failure path without a `logEvent` call is a bug: the next person cannot diagnose it.
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
+- **Every local runtime the app installs is one catalog, managed in one place**
+  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the ten engines —
+  llama.cpp / vLLM / SGLang / MLX (text inference), whisper.cpp, audio.cpp, PaddleOCR,
+  Tesseract, mflux and cloudflared — each get one row with state, version, path, disk usage
+  and 安装 / 升级 / 卸载. Adding an engine = one `LOCAL_ENGINE_SPECS` entry + one probe/install/
+  uninstall adapter; the page, its groups and its buttons are derived from those two, and the
+  id doubles as the setup-screen engine id (`EngineInstallEvent.engine` is a `LocalEngineId`).
+  Three rules: **uninstall only ever removes the managed copy** under `<dataDir>/engines/<id>`
+  (PATH / brew / conda installs are never touched, so those rows deliberately show no uninstall
+  button), **model weights are never deleted with an engine** (each spec points at the page that
+  owns them), and **install/uninstall stops whatever was using the engine first** (served models,
+  whisper-server, OCR / MLX workers) — cloudflared refuses while its tunnel is up instead.
+  Upgrading is the same path as installing with `upgrade: true` (pip `--upgrade`, or re-download
+  for engines whose version is pinned in code); progress reuses the setup-screen push channel
+  (`engineInstallLog` / `engineInstallPhase`), and `startEngineLogBridge()` folds the other
+  installers' own logs into it rather than adding a second channel.
+- **The 模型 group is five entries, one per question — don't add a sixth** (设置 → 模型):
+  **模型库** (`library`), **运行模型** (`run`), **云端模型** (`cloud`), **默认模型** (`defaults`),
+  **模型引擎** (`engines`).
+  `mainview/app/model-library/` answers "what models do I have / where do they come from" with three
+  horizontal tabs — **market** (ModelScope / HF search + recommended presets; downloads happen in
+  model-detail), **downloaded** (the installed list, default tab) and **favorites** — and nothing
+  else: engine choice and launch parameters are `mainview/app/local-models/` (运行模型), providers
+  and their API keys are `CloudProviderPanel` (云端模型), the per-scene defaults (chat / embedding /
+  voice call / TTS / ASR) are `main-layout/default-models-panel.tsx` (默认模型 — its own entry,
+  *not* stacked under the cloud panel: credentials and "which model for which job" are two
+  different questions), engine install/upgrade/uninstall is `main-layout/engines-tab.tsx`
+  (模型引擎). A model-related surface belongs in one of those five, not in a new entry — the earlier
+  six parallel entries (模型云服务 / 默认模型 / 本地模型 / 引擎 / 模型库 / 在线模型市场) forced users
+  to hop pages for one task. Two rules that cost real bugs if broken: external jump targets still use
+  the old ids
+  (`network` → cloud, `model` → run, `store` → library, `market` → library's market
+  tab, plus mini-app `omni.openSettings("network")` and `omi`'s `navigate` with `tab` / `sub`;
+  `defaults` is a real tab again, so it no longer needs a legacy hop),
+  so `settings.tsx`'s `LEGACY_TABS` must keep resolving them — an unmapped id lands on a blank pane;
+  and every user-facing "configure it over in …" string (bun error messages, `cloud.where`, CLI
+  help, the omni-doctor playbooks, whose left column matches raw error text) must name
+  设置 → 云端模型 (厂商与密钥) / 设置 → 默认模型 (各场景用哪个模型) / 设置 → 模型引擎, not the
+  retired names.
+- **"This file is already downloaded" is a question about a repo, never about a bare file name**:
+  the market's install check is `installedFilesForRepo(models, repo)`
+  (`mainview/lib/installed-models.ts`) and it must stay repo-scoped — repo ids are normalized
+  (`safeRepoId`, so the market's `org/repo` matches the on-disk `org__repo` dir and the HF-cache
+  `org/repo` entry) and a file only counts for *its own* repo. `model-00001-of-00002.safetensors`
+  is the same name in nearly every safetensors repo, so a global name set makes "download the whole
+  model" skip the real weights: the repo lands with config/tokenizer only, and since
+  `isRepoModelDir()` needs actual weights it then shows up nowhere — not in 运行模型 and not in the
+  market, which prints 已下载 (真机丢过 K2-Horizon-7B-Uno-oQ6e 的 5.0+2.5 GB 与
+  Qwen3.8-27B-4bit-MTP-MLX 的 ~16 GB). Two companions on the same path: `supportFiles` from the
+  scan (config / tokenizer) must be counted too, or a complete repo still shows "还有 N 个文件要下";
+  and a stale failed task must not stop the missing files from being enqueued — the download card's
+  action补队列（`models.continueDownload`）resumes failed tasks *and* starts files that were never
+  queued.
 - **Cloud models are picked as `provider → model`, never as a per-page URL + key**: image,
   image-edit, video, TTS, ASR, live-translate and VLM OCR each store only a provider id
   (`IMG_PROVIDER_ID` / `TTS_PROVIDER_ID` / …) plus a model name; base URL and key come from
@@ -74,9 +127,133 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   (`CloudModelEntry.type`: image / video / tts / asr / chat / …; inferred from the id when
   absent) and every picker filters by it — a new cloud model selector must go through
   `CloudModelSelect` + `providersForType` instead of listing all providers.
-  Video is the exception that proves the rule: video APIs are not standardized, so the
-  provider row also carries `videoApi` ("minimax" | "seedance") and polling looks the
-  submitter up by the record's `providerId`.
+  **The provider entries themselves are a built-in catalog, not something users assemble**:
+  every entry in `CLOUD_PRESETS` (`shared/cloud-providers.ts`, grouped by `section`:
+  official / cn / aggregator / global) is seeded into the table on first read
+  (`ensureBuiltinProviders`, idempotent — existing rows are never touched), so the settings
+  page lists all of them up front and the user only pastes an API key. A built-in row whose
+  `baseUrl` still equals the preset's is an *app-maintained* address (`isBuiltinBaseUrl`):
+  read-only in the panel, rejected by `updateCloudProvider`, and `deleteCloudProvider`
+  refuses built-ins (they would just be re-seeded). Legacy rows whose address the user
+  already changed stay editable. Adding a vendor = one `CLOUD_PRESETS` entry (with
+  `section` + `apiKeyUrl`), never a UI or schema change; the first-run setup screen
+  (`mainview/app/setup-screen/remote-flow.tsx`) reuses the same catalog and ends in
+  `cloudProviderConfigure`, so a key typed there is the same row the settings page shows.
+  Video and music are the exceptions that prove the rule: those APIs are not standardized, so
+  the provider row also carries a protocol — `videoApi` ("minimax" | "seedance") and `musicApi`
+  ("stepfun" | "minimax") — and it is the *only* dispatch switch (`bun/music-gen.ts` never
+  branches on a vendor name). A new vendor = one protocol value + one submit/poll pair. Music
+  also shows why per-protocol dispatch is not cosmetic: `stepfun` is async (submit + poll) while
+  `minimax` is synchronous (one blocking request, so it runs in a background job and the record
+  is backfilled), and both live in the same `music_records` table. Adding a *local* engine is a
+  reserved slot already: settings (`MUSIC_LOCAL_*`), the record's `localBase`, and the UI toggle
+  exist, and `localUnavailable()` states plainly that no engine is wired up rather than faking
+  a result.
+- **Public exposure goes through `bun/tunnel.ts`, never through `GATEWAY_HOST=0.0.0.0`**:
+  Settings → Services → Remote Access runs a supervised `cloudflared` child process
+  (`bun/cloudflared.ts` downloads the official binary into `<dataDir>/engines/cloudflared/`;
+  `--no-autoupdate` and detached + process-group kill are required) so the gateway is
+  reachable from the internet over an outbound connection with no inbound port. Three
+  invariants must not be relaxed: a **gateway API key is mandatory** before a tunnel starts
+  (and is re-checked on every reconcile — a cleared key takes the tunnel offline), the
+  gateway only accepts the tunnel's own hostname via `setGatewayPublicExposure()`
+  (DNS-rebinding protection stays on, and `/` + `/health` additionally require the key while
+  exposed), and the tunnel target port is always the gateway's **actually bound** port.
+  Protocol fallback is the `TUNNEL_TRANSPORT_PROTOCOL` env var — cloudflared has no
+  `--protocol` flag. Details and the failure modes already hit: docs/architecture.md §5.
+- **Gateway API keys are a managed list, not a setting** (`bun/gateway-keys.ts`,
+  `gateway_keys` table): each key has a name and can be enabled / disabled / deleted from
+  Settings → Gateway, and the gateway checks every *enabled* key on each request, so
+  revoking one takes effect immediately without a restart. `settings.GATEWAY_API_KEY`
+  survives as a **mirror** of the oldest enabled key because tunnel gating, `/health`,
+  `/docs`, `omi launch` and the KB access page read that slot (all keys disabled = tunnel
+  goes offline); a value written there from outside (`omi serve --api-key`) is **adopted**
+  into the list on the next read, so no key can stay usable-but-invisible. With no enabled
+  key the historical behavior returns: open access for local processes, 401 while publicly
+  exposed. Key values are shown masked (`shared/gateway-key.ts`) — never plaintext by
+  default.
+- **The web pages (`/chat`, `/agent`) are the app's own frontend, never a second UI**: the gateway
+  serves the vite build of `mainview` as static files, and `mainview/lib/remote.ts` swaps the RPC
+  transport for HTTP + SSE when `window.__electrobun` is missing (`lib/rpc.ts` keeps everything above
+  the transport identical). Pushes reuse the existing `init*Broadcast(win)` wiring by feeding it a
+  **fake window** whose `webview.rpc.send.<name>` becomes an SSE frame — never hand-copy a push list.
+  Two rules when touching it: browser clients may only call `REMOTE_METHODS` in `bun/rpc/index.ts`
+  (host dialogs, disk writes, engine installs and approval-mode changes stay closed), and
+  `getSettings` must keep scrubbing credential fields (`REMOTE_SECRET_KEY`) before leaving the
+  process. Remote clients intentionally skip the right panel (terminal / browser / review), the
+  automations & plugins views, and the settings entry.
+- **Mini apps are sandboxed single-file HTML pages, and the host hands them capabilities one by
+  one** (app rail → 小应用 / `AppId = "apps"`): each one is `src/mainview/miniapps/<id>.html`
+  (self-contained, `?raw`-imported into an `<iframe sandbox srcdoc>` **without**
+  `allow-same-origin`, so it can never reach the host DOM / store / localStorage), plus one entry
+  in `shared/miniapps.ts`. The host injects base styles, a boot config and the `window.omni`
+  runtime (`mainview/lib/miniapp-bridge.ts`); every call comes back as a postMessage action that
+  `dispatchMiniAppRequest` translates into a specific RPC. Two rules: the action list in
+  `shared/miniapps.ts` is the *entire* surface (never add a "call RPC by name" pass-through — an
+  iframe script would then own the whole RPC surface), and parameters from the page are untrusted
+  (clamp lengths/ranges; `miniappReadFile` only accepts paths the user just picked in the system
+  dialog). Capability readiness (`getMiniAppCapabilities` in `bun/miniapps.ts`) is checked before a
+  card lets you in, mini-apps get the host language/theme via the `ready` event, and every failure
+  lands in `app.log` under source `miniapp` (the page's own console is invisible to the host).
+  Mini apps that must *keep* data go through host storage, not the iframe (an opaque origin has no
+  `localStorage`): the Notes mini app writes bodies to the `miniapp_notes` table and attachments to
+  `images/notes/<attachmentId>/` via the `notes.*` actions, so both travel with `omi backup`. Two
+  rules on that path: the notes page renders Markdown itself (no bundler, so no parser dependency —
+  it escapes the whole body first and only then applies markers, and allows http(s) links only, since
+  the body is user input), and an attachment ref is only accepted in the host-generated shape
+  `notes/<id>/<file>.<png|jpg|webp|gif>` (deleting a note removes that directory — a loose shape
+  means "delete anything"), and size is clamped host-side (12MB decoded, long edge compressed to 2048).
+  Notes are also the one mini-app that writes into the shared **memory** store: every save sinks an
+  index-level memory (`笔记《title》(date)：body excerpt`, `sourceRef = note:<id>`, ≤500 chars — memories
+  are single-line and get injected into every agent's context, so they carry a pointer, not the full
+  text). Same note id updates the same memory, deleting the note deletes the memory, secret-looking
+  notes are skipped while the body still saves, and `NOTES_AGENT_ACCESS` (on by default, shown in the
+  notes settings) is the kill switch — it also gates the three read-only agent tools
+  (`note_list` / `note_search` / `note_read` in `bun/notes-tools.ts`). Those exist because a 500-char
+  memory only lets the agent *remember* a note; without a read path it improvises (grepping the
+  workspace) and tells the user it cannot open the note. The memory text therefore ends with
+  `（完整正文：note_read #<id>）` so recall leads straight into the tool. Tools are read-only, capped
+  (8 items / 140-char excerpts / 12k chars of body) and given in plan mode too.
+  Mini-app data is also invisible to backups until it is registered: a new table needs a scope in
+  `shared/backup.ts`'s `BACKUP_SCOPES`, and new media needs a `BACKUP_FILE_ROOTS` entry — files that
+  match no root are silently skipped, and the `media` root is off by default (notes therefore have
+  their own default-on scope plus a `note-images` root under `images/notes`).
+  Image work that spans several calls goes through `bun/miniapp-image.ts` (动态表情包:
+  照片 → 16 张贴纸 → GIF). Four invariants: a **session ref** — the host signs refs
+  (`image.stage`) and only accepts its own back (`image.edit`'s `ref`, `gif.make`'s frames),
+  per app id; without that, `ref` would be an interface for a sandboxed page to send any
+  image in the user's library to a cloud vendor. Staging is **cached per (app, path)** so a
+  16-piece pack copies the source photo once instead of sixteen times. **The model is picked
+  inside the page, from a host-owned catalog** (`omni.image.models`: what exists, what is
+  usable — MLX weights downloaded? provider key filled? — and `supportsReference` per
+  backend), because "which models exist" is knowledge only the main process has; the page
+  only reports its choice and `resolveMiniAppImageChoice` re-validates it (MLX presets only,
+  existing+configured providers, no `..` in a ComfyUI checkpoint name) while never writing the
+  user's saved image config. `supportsReference` is also what switches the prompts between
+  "redraw the person in this photo" (cloud) and "draw this described character" (local MLX /
+  ComfyUI, which are text-to-image only) — do not infer that from the backend name in the page.
+  GIF assembly happens **in the host** (sharp; frames are resized individually *before* `join`,
+  because resizing a joined animation silently collapses it to one page) and the page only
+  decides frame order — `S + reverse(S)[1:-1]`, where S starts with the source sticker itself in
+  reference mode, so loops join seamlessly for the price of two generated frames. Prompts live
+  in the page (`PROMPT` in `sticker.html`): base rules + style + per-sticker pose/caption,
+  because a pack is only a pack if every image is the same person in the same art style.
+  To look at a page without booting the desktop app: `bun run --cwd apps/studio miniapps:preview`
+  (the pages, with a stub host in a plain browser) and `miniapps:center` (the app center, rendered
+  against the built stylesheet).
+- **Music is a playlist library, not a record list** (音乐 app): the left sidebar is playlists
+  (`bun/music-playlists.ts` + `music_playlists` / `music_playlist_items`), the right side is the
+  selected playlist's track page, and a bottom player bar (`stores/music-player.ts`) stays put
+  across all three views. Three invariants: the **default playlist is a real builtin row** — every
+  new record is added to it by `insertMusicRecord`, so a song can never exist only in the creation
+  log; songs are recorded once and belong to *N* playlists, which is why membership is its own table
+  (removing one there must stick, so the old-record backfill runs **only** when that row is created,
+  never on later reads); and the **audio element is a module-level singleton outside React** whose
+  queue is a snapshot taken when the user hits play, refreshed by `patchQueue` from the
+  `["music-records"]` query — a track that finishes generating must become playable without
+  restarting playback. Album art does not exist in either upstream API, so covers are deterministic
+  gradients (`app/music/cover.tsx`); a playlist cover is a 2×2 mosaic of its first four tracks.
+  Playlists are user-authored structure, so they get their own default-on `BACKUP_SCOPES` entry.
 - **One proxy governs every outbound request** (Settings → Preferences → General):
   `bun/proxy.ts` wraps `globalThis.fetch` at startup, so cloud model calls (chat / image /
   video / TTS / ASR / OCR / translate), the model hubs, engine and weight downloads, web
@@ -145,10 +322,11 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
 All user data lives under `<userData>` (macOS: `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`):
 
 ```
-omni-studio.db          SQLite (WAL) — 33 tables, Drizzle ORM
+omni-studio.db          SQLite (WAL) — 44 tables, Drizzle ORM
 models/<repo>/...       Downloaded model weights
 engines/{paddleocr,mflux,whispercpp,audiocpp,tessdata}/   Local engine binaries/data
-images/{<docId>,chat,gen,edit,ocr,audio,videos}/          Media artifacts
+images/{<docId>,chat,gen,edit,ocr,audio,videos,music,notes}/   Media artifacts
+                        (notes/ = 笔记小应用的附件，目录名即附件 id，删笔记时整目录删掉)
 uploads/                Uploaded source files for OCR / translation
 backups/                *.omnibackup archives + temp restore dirs
 mlx-downloads/          MLX weight download progress (.part resume)
@@ -162,10 +340,18 @@ logs/app.log            JSONL app log (2MB rotation, secrets redacted)
 
 ## Frontend Conventions
 
-- **Navigation is explicit dual-state, no URL routing:** `stores/app.ts` manages `activeApp` (~18 apps: chat, agent, voicecall, voice, image, video, ocr, translate, prompt, skills, kb, memory, automations, benchmark, gateway, usage, dashboard); `stores/router.ts` manages routes within each app.
+- **Navigation is explicit dual-state, no URL routing:** `stores/app.ts` manages `activeApp` (~18 apps: chat, agent, voicecall, voice, image, video, music, ocr, translate, prompt, skills, kb, memory, automations, benchmark, gateway, usage, dashboard); `stores/router.ts` manages routes within each app. The **id list of the left primary menu** (`AppId`, the 15 rail entries) lives in `shared/app-rail.ts` — together with the layout rule below — so the rail and the settings card that configures it can never disagree.
+- **The left primary menu is user-configurable** (`APP_RAIL_LAYOUT` = one JSON array of `{id, hidden}`, edited in 设置 → 外观 → 左侧一级菜单): order = display order, each entry can be hidden, and the **settings gear stays pinned** at the bottom (never part of the list — hiding the way back into settings would be a trap). Parse/serialize/move are pure functions in `shared/app-rail.ts`, with three tolerance rules that must not be relaxed: unknown ids are dropped, duplicates keep the first, and ids missing from the stored layout are **appended in default order and visible** (a new app must not ship invisible because the user once saved an old layout). Empty string = default; `resolveRailLayout` never returns a partial list.
 - **State management is dual-track:** TanStack Query for data fetched from main process; Zustand for UI state and streaming data. Main-process push events write stores directly in `lib/rpc.ts` message handler (bypassing React render cycle), only calling `queryClient.invalidateQueries()` on terminal events.
 - **RPC calls are direct:** ~220 call sites use `import { rpcClient }` then `rpcClient.xxx()` — no wrapper layer. Voice screen has the most (53+ calls). One light wrapper exists: `lib/use-engine.ts` for engine settings reads/writes.
-- **Adding a new Screen:** Create `app/<name>-screen.tsx`, register it in `main-layout/settings.tsx`'s `TAB_DEFS` / `TAB_GROUPS`, add an icon to `app-rail`, and define RPC methods in `src/bun/rpc/index.ts`.
+- **Adding a new Screen:** Create `app/<name>-screen.tsx`, register it in `main-layout/settings.tsx`'s `TAB_DEFS` / `TAB_GROUPS`, add its id to `shared/app-rail.ts`'s `APP_RAIL_IDS` **and** an icon to `app-rail.tsx`'s `APP_ICONS` (both are `Record<AppId, …>` — TS will point at the missing one; the settings card derives its rows from the same list, so a new app needs no UI work to be reorderable), and define RPC methods in `src/bun/rpc/index.ts`.
+- **Model ids are shown in full, never as `…`:** the id is the only thing telling
+  `stepaudio-3-asr-max` from `stepaudio-2.5-asr`, and it is what a user retypes into an API call —
+  a column of `stepaudi…` makes the list useless. Let the id wrap when the column is narrow
+  (`wrap-anywhere`, which shrinks the column's min-content so auto table layout still fits the
+  card) and treat `title` as a bonus, not as the only way to read it. Ellipsis is for secondary
+  text only — a `name` alias or a remark. List / management surfaces must obey this; a narrow
+  fixed-height picker trigger (`CloudModelSelect`) cannot wrap, so the tooltip stays the fallback.
 
 ---
 
@@ -184,7 +370,7 @@ The RPC contract lives in `src/bun/rpc/index.ts` (~5,400 lines) which holds both
 
 ## Database Migrations
 
-Migrations live in `apps/studio/src/bun/db/migrations/` (currently 0000–0031). Generated by `drizzle-kit generate`:
+Migrations live in `apps/studio/src/bun/db/migrations/` (currently 0000–0040). Generated by `drizzle-kit generate`:
 
 ```bash
 cd apps/studio && bun run db:generate
@@ -192,6 +378,15 @@ cd apps/studio && bun run db:generate
 
 **Critical rules:**
 - **Always check migration ordering.** The `when` field determines execution order — if a new migration's `when` is less than a previous one, older databases skip it entirely during upgrade.
+- **The migrator compares one number, read once**: drizzle takes `SELECT … ORDER BY created_at DESC LIMIT 1`
+  before the loop and never updates it, so any migration whose `when` is not greater than that value is
+  **permanently unreachable** for that database — it will not be re-tried on later starts. Two mechanisms
+  in `db/index.ts` exist for that, and both run before `migrate()`: `normalizeMigrationTimestamps()`
+  rewrites applied rows' `created_at` to the journal's `when` (matched by SQL hash), and
+  `repairUnreachableMigrations()` re-runs entries whose `when` is ≤ the DB's max but which have no applied
+  row. A merged branch that renumbers migrations (main keeps its numbers, ours shift to the end —
+  `when` taken from the introducing commit's ms) is exactly when these fire; regression coverage is
+  `db/db-migrate-timestamps.tests.ts` (four cases: fresh, poisoned, released 0.1.0, local canary).
 - New tables/columns go into SQL files; Drizzle schema lives in `src/bun/db/schema.ts`.
 - WAL mode + `busy_timeout=5000` + `synchronous=NORMAL` supports concurrent reads from CLI/MCP bridge while app runs.
 
@@ -221,7 +416,7 @@ End-to-end integration tests that exercise real DB operations, media pipelines, 
 cd apps/studio && bun run test:smoke
 ```
 
-Runs: migrations-smoke, memory-smoke, kb-smoke, kb-chat-smoke, kb-rerank-smoke, kb-access-smoke, kb-governance-smoke, video-gen-smoke, backup-smoke, proxy-smoke, agent-capabilities-smoke, agent-live-check, agent-resilience-smoke, omi-docs-smoke, builtin-skills-smoke.
+Runs: migrations-smoke, memory-smoke, kb-smoke, kb-chat-smoke, kb-rerank-smoke, kb-access-smoke, kb-governance-smoke, video-gen-smoke, music-gen-smoke, backup-smoke, proxy-smoke, agent-capabilities-smoke, agent-live-check, agent-resilience-smoke, omi-docs-smoke, builtin-skills-smoke.
 
 ---
 

@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   MessageCircleDashedIcon,
   SquareTerminalIcon,
@@ -6,6 +7,7 @@ import {
   AudioWaveformIcon,
   ShapesIcon,
   ClapperboardIcon,
+  MusicIcon,
   ScanSearchIcon,
   EarthIcon,
   WandSparklesIcon,
@@ -13,9 +15,11 @@ import {
   LibraryIcon,
   BrainIcon,
   GaugeIcon,
+  LayoutGridIcon,
   SlidersHorizontalIcon,
 } from "lucide-react";
 
+import { rpcClient } from "@lib/rpc";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@ui/tooltip";
 import { useRouter } from "@stores/router";
 import { useAppStore, type AppId } from "@stores/app";
@@ -23,31 +27,18 @@ import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
+import { APP_RAIL_LAYOUT_KEY, resolveRailLayout, visibleRailEntries } from "@/shared/app-rail";
 
-const APP_IDS: AppId[] = [
-  "chat",
-  "agent",
-  "voicecall",
-  "voice",
-  "image",
-  "video",
-  "ocr",
-  "translate",
-  "prompt",
-  "skills",
-  "kb",
-  "memory",
-  "benchmark",
-];
-
-// 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标
-const APP_ICONS: Record<AppId, ReactNode> = {
+// 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标。
+// 导出给设置 → 外观 的菜单配置卡复用 —— 配置里看到的图标必须就是菜单里那个。
+export const APP_ICONS: Record<AppId, ReactNode> = {
   chat: <MessageCircleDashedIcon className="size-5" />,
   agent: <SquareTerminalIcon className="size-5" />,
   voicecall: <PhoneIcon className="size-5" />,
   voice: <AudioWaveformIcon className="size-5" />,
   image: <ShapesIcon className="size-5" />,
   video: <ClapperboardIcon className="size-5" />,
+  music: <MusicIcon className="size-5" />,
   ocr: <ScanSearchIcon className="size-5" />,
   translate: <EarthIcon className="size-5" />,
   prompt: <WandSparklesIcon className="size-5" />,
@@ -55,6 +46,8 @@ const APP_ICONS: Record<AppId, ReactNode> = {
   kb: <LibraryIcon className="size-5" />,
   memory: <BrainIcon className="size-5" />,
   benchmark: <GaugeIcon className="size-5" />,
+  // 小应用中心：九宫格 == "一堆小格子点进去"，与其它具象图标区分开
+  apps: <LayoutGridIcon className="size-5" />,
 };
 
 function RailButton({
@@ -99,6 +92,14 @@ export function AppRail() {
   const activeApp = useAppStore((s) => s.activeApp);
   const setActiveApp = useAppStore((s) => s.setActiveApp);
 
+  // 顺序与显示 / 隐藏由「设置 → 外观 → 左侧一级菜单」决定（`APP_RAIL_LAYOUT`）。
+  // 设置页改完 invalidate 这个 query，菜单立刻跟着变，不需要重启。
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const items = visibleRailEntries(resolveRailLayout(data?.settings?.[APP_RAIL_LAYOUT_KEY]));
+
   const onMainRoute = route.path === "index" || route.path === "chat";
   const inSettings = route.path === "settings";
 
@@ -120,7 +121,7 @@ export function AppRail() {
         className="flex w-12 shrink-0 flex-col items-center gap-1.5 border-r bg-muted/40 pb-3"
       >
         <div className="electrobun-webkit-app-region-drag h-10 w-full shrink-0" />
-        {APP_IDS.map((app) => (
+        {items.map(({ id: app }) => (
           <RailButton
             key={app}
             active={onMainRoute && activeApp === app}

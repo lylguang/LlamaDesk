@@ -43,8 +43,8 @@ import { cn } from "@/mainview/lib/utils";
  * （webview 刷新 / HMR 后 store 会重置，推送只在变化时发）。
  */
 
-/** 轮询 + 推送合并写入 store。 */
-function useServedModelsSync() {
+/** 轮询 + 推送合并写入 store（网关页等其它页面也要读 served 快照，故对外导出）。 */
+export function useServedModelsSync() {
   const setSnapshot = useServedStore((s) => s.setSnapshot);
   const { data } = useQuery({
     queryKey: ["served-models"],
@@ -160,7 +160,9 @@ function ServedModelRow({ model }: { model: ServedModelInfo }) {
     activateMutation.isPending || restartMutation.isPending || unloadMutation.isPending;
   const starting = model.status === "starting" || model.status === "downloading";
   const rawError = error ?? model.error;
-  const hint = serverErrorHint(t, rawError);
+  // 实例自带的分类（主进程在失败时算好的）优先：`error` 是本机这次操作的报错，
+  // 它和 `model.error` 说的可能不是同一件事，所以类型只在用 `model.error` 时才跟着走。
+  const hint = serverErrorHint(t, rawError, error ? undefined : model.errorKind);
 
   return (
     <div className="flex flex-col gap-2 rounded-lg border p-3">
@@ -367,8 +369,12 @@ function StartServedModelForm() {
 
 const ANSI_RENDER_LIMIT = 30_000;
 
-/** 某个实例的日志（实时尾随：store 里的增量 + 首次拉全量）。 */
-function ServedModelTerminal({ model }: { model: ServedModelInfo }) {
+/**
+ * 某个实例的日志（实时尾随：store 里的增量 + 首次拉全量）。
+ * `limit` = 只显示最近 N 行（控制台的「最近 N 条」档位）：日志已经在 store 里，
+ * 为显示窗口再回主进程要一遍没意义，前端截尾巴即可。
+ */
+function ServedModelTerminal({ model, limit }: { model: ServedModelInfo; limit?: number }) {
   const t = useT();
   const logs = useServedStore((s) => s.logs[model.id]) ?? "";
   const setLog = useServedStore((s) => s.setLog);
@@ -382,8 +388,9 @@ function ServedModelTerminal({ model }: { model: ServedModelInfo }) {
     });
   }, [model.id, logs, setLog]);
 
-  const renderText = logs.length > ANSI_RENDER_LIMIT ? logs.slice(-ANSI_RENDER_LIMIT) : logs;
-  const truncated = logs.length > ANSI_RENDER_LIMIT;
+  const tailed = limit && limit > 0 ? logs.split("\n").slice(-limit).join("\n") : logs;
+  const renderText = tailed.length > ANSI_RENDER_LIMIT ? tailed.slice(-ANSI_RENDER_LIMIT) : tailed;
+  const truncated = tailed.length < logs.length || tailed.length > ANSI_RENDER_LIMIT;
   const streaming = model.status === "starting" || model.status === "downloading";
 
   return (
@@ -447,14 +454,25 @@ export function ServedModelsPanel({ compact = false }: { compact?: boolean }) {
   );
 }
 
-/** 控制台的日志区：选择实例 + 实时终端（每个实例一份日志）。 */
-export function ServedModelLogs() {
+/**
+ * 控制台的日志区：选择实例 + 实时终端（每个实例一份日志）。
+ * 控制台自己带来源切换器时，用 `modelId` 指定实例（内嵌的选择器随之收起，
+ * 免得同一个页面上出现两个「日志来源」）；`limit` 是只显示最近 N 行。
+ */
+export function ServedModelLogs({
+  modelId,
+  limit,
+}: {
+  modelId?: string;
+  limit?: number;
+} = {}) {
   const t = useT();
   const models = useServedStore((s) => s.models);
   const activeId = useServedStore((s) => s.activeId);
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
-  const selected = models.find((m) => m.id === selectedId) ?? models.find((m) => m.id === activeId) ?? models[0];
+  const chosen = modelId ?? selectedId;
+  const selected = models.find((m) => m.id === chosen) ?? models.find((m) => m.id === activeId) ?? models[0];
 
   if (!selected) {
     return (
@@ -466,7 +484,7 @@ export function ServedModelLogs() {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-2">
-      {models.length > 1 && (
+      {!modelId && models.length > 1 && (
         <div className="flex items-center gap-2">
           <span className="text-[11px] text-muted-foreground">{t("console.logSource")}</span>
           <Select value={selected.id} onValueChange={setSelectedId}>
@@ -486,7 +504,7 @@ export function ServedModelLogs() {
           </Select>
         </div>
       )}
-      <ServedModelTerminal model={selected} />
+      <ServedModelTerminal model={selected} limit={limit} />
     </div>
   );
 }

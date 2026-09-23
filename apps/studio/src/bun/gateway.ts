@@ -1,13 +1,15 @@
 import { randomBytes } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
-import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
+import { getSetting, getActiveServerPort } from "./db/settings";
+import { gatewayAuthTokens, hasGatewayAuthKey } from "./gateway-keys";
 import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
 import * as Asr from "./asr";
 import { getTTSProviderConfig, listProviderModels, runTTSEdge } from "./voice";
 import { listInstalledModels, slugModelFileName } from "./model-store";
 import { getChatModelLabel, getChatModelName, getLocalRequestModelId } from "./chat-model";
+import { resolveEmbeddingBackend } from "./model-servers";
 import { providerLabelFor, recordUsageEvent } from "./usage";
 import { mergeSystemMessages } from "./chat-messages";
 import * as Memory from "./memory";
@@ -16,6 +18,9 @@ import { handleMcpRequest } from "./kb-mcp";
 import { searchMediaAssetsFromQuery } from "./media-api";
 import * as Img from "./gateway-images";
 import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
+import { normalizeApiBase } from "../shared/cloud-providers";
+import { audioVendorFor, resolveTtsVoice } from "../shared/tts-voices";
+import { handleWebRequest, isWebSocketPath, mediaTicketValid, serveWebAppPage, serveWebAsset, webSocketAuthorized, webSocketOpened } from "./gateway-web";
 
 /**
  * 本地 API 网关。
@@ -28,6 +33,7 @@ import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
  *   - GET  /openapi.json  OpenAPI 3.0 规范
  *   - GET  /v1/models     模型列表（本地 + 云端 + TTS/ASR 能力模型）
  *   - POST /v1/chat/completions        OpenAI Chat Completions（流式透传）
+ *   - POST /v1/embeddings              OpenAI Embeddings（代理运行中的嵌入实例）
  *   - POST /v1/responses               OpenAI Responses API（流式 + 非流式）
  *   - POST /v1/messages                Anthropic Messages API（流式 + 非流式）
  *   - POST /v1/audio/speech            语音合成 TTS（本地 → 推理服务器 → 云端 provider → Edge 在线）
@@ -35,8 +41,9 @@ import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
  *   - POST /v1/images/generations      文本生图（MLX 本地引擎 → OpenAI 兼容 API → ComfyUI）
  *   - GET  /health       健康检查
  *
- * 鉴权：设置 GATEWAY_API_KEY 后，所有 /v1/* 端点需要
- * `Authorization: Bearer <key>` 或 `x-api-key: <key>`（兼容 Anthropic 客户端）。
+ * 鉴权：在设置 → 网关里建了 API Key 后，所有 /v1/* 端点需要
+ * `Authorization: Bearer <key>` 或 `x-api-key: <key>`（兼容 Anthropic 客户端）；
+ * 多把 Key 各自可停用 / 删除，校验逻辑与遗留槽位见 bun/gateway-keys.ts。
  */
 
 export type GatewayStatus = "stopped" | "starting" | "running" | "error";
@@ -113,25 +120,50 @@ export function getGatewayConfig(): { host: string; port: number } {
 // API Key 鉴权
 // ---------------------------------------------------------------------------
 
+/**
+ * 当前生效的 API Key（列表里最早启用的一把，见 bun/gateway-keys.ts 的镜像说明）。
+ *
+ * 只用于展示与"有没有配 Key"的判定：真正的校验见 authOk —— 它认的是**全部**启用的
+ * Key（多把 Key 可分别停用 / 删除）。这里的值来自 settings 的遗留槽位，`omi serve
+ * --api-key` 与旧版本升级上来的用户写的也是它。
+ */
 export function getGatewayApiKey(): string {
   return (getSetting("GATEWAY_API_KEY") || "").trim();
 }
 
-/** 生成新的网关 API Key 并持久化，返回新 Key。 */
-export function generateGatewayApiKey(): string {
-  const key = `osk-${randomBytes(18).toString("base64url")}`;
-  updateSettings({ GATEWAY_API_KEY: key });
-  return key;
+/** 校验通过的 Key 集合：表里启用的 + 遗留槽位里的。 */
+function authTokens(): string[] {
+  return gatewayAuthTokens();
 }
 
-function authOk(req: Request): boolean {
-  const key = getGatewayApiKey();
-  if (!key) return true;
+/**
+ * 请求带来的 Key 是否正确。
+ *
+ * 没配任何 Key 时返回 false（"没 Key = 开放访问"由下面的 requestAuthorized /
+ * browserOriginAllowed 表达），避免"忘了配置"被这里读成"鉴权通过"。令牌集合由调用方
+ * 传入：一次请求只查一次库。
+ */
+function authOk(req: Request, tokens: string[]): boolean {
   const auth = req.headers.get("authorization") ?? "";
   const bearer = auth.toLowerCase().startsWith("bearer ") ? auth.slice(7).trim() : "";
-  const xApiKey = req.headers.get("x-api-key") ?? "";
+  const xApiKey = (req.headers.get("x-api-key") ?? "").trim();
+  if (!bearer && !xApiKey) return false;
 
-  return bearer === key || xApiKey === key;
+  return tokens.includes(bearer) || tokens.includes(xApiKey);
+}
+
+/**
+ * 鉴权判定。
+ *
+ * 不能直接看 authOk 的"没人对得上就拒绝"：网关没配 Key 时对本机进程是开放访问
+ * （历史行为，curl / agent 都不带 Key）。但公网暴露期间这条恰是最危险的路径 ——
+ * 用户在隧道开着时停用 / 删掉所有 Key，就变成对全网开放。所以暴露期间的判据是
+ * "必须配了 Key 且带对了"，没配一律 401。
+ */
+function requestAuthorized(req: Request): boolean {
+  const tokens = authTokens();
+  if (tokens.length === 0) return !isPubliclyExposed();
+  return authOk(req, tokens);
 }
 
 /**
@@ -144,7 +176,23 @@ function browserOriginAllowed(req: Request): boolean {
   const origin = (req.headers.get("origin") ?? "").trim();
   if (!origin) return true; // 非浏览器请求
   if (isLocalOrigin(origin)) return true;
-  return getGatewayApiKey().length > 0 && authOk(req);
+  // 隧道域名下的**同源**请求必须放行：vite 产物带的 `<script crossorigin>` 会让浏览器
+  // 给页面自己的 JS/CSS 也带上 `Origin: https://<隧道域名>`。不认这条，公网打开 /chat
+  // 就是整页资源 403、界面白屏（curl 不带 Origin，所以只测接口是发现不了的）。
+  if (isOwnExposedOrigin(origin)) return true;
+  const tokens = authTokens();
+  if (tokens.length === 0) return !isPubliclyExposed();
+  return authOk(req, tokens);
+}
+
+/** Origin 的主机名是否就是本网关当前对外暴露的那个域名（即"同源"）。 */
+function isOwnExposedOrigin(origin: string): boolean {
+  if (!publicExposureHost) return false;
+  try {
+    return normalizeHostName(new URL(origin).host) === publicExposureHost;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -152,10 +200,41 @@ function browserOriginAllowed(req: Request): boolean {
  * （网页把自己的域名解析到 127.0.0.1，Host 仍是攻击者域名）。
  * 用户显式把 GATEWAY_HOST 绑到非回环地址时视为有意对外服务，不做限制。
  */
+/**
+ * 公网暴露（内网穿透隧道）期间放行的入口主机名，由 bun/tunnel.ts 维护。
+ *
+ * 隧道流量到达这里时 Host 是公网域名，而网关默认绑在回环地址上 —— 下面那句
+ * `return !isLoopbackHost(boundHost)` 会把隧道请求 403 掉。与其让用户把
+ * GATEWAY_HOST 改成 0.0.0.0（那会**同时**关掉 DNS-rebinding 防护、并让网关真的
+ * 监听所有网卡），不如只在隧道开启期间放行"用户自己那个域名"：攻击者域名照样被拒。
+ */
+let publicExposureHost: string | null = null;
+
+/** 隧道就绪 / 断开时调用（null = 恢复纯回环）。 */
+export function setGatewayPublicExposure(host: string | null): void {
+  const normalized = host ? normalizeHostName(host) : "";
+  publicExposureHost = normalized || null;
+}
+
+/** 是否处于公网暴露状态：元信息端点据此一并要求 API Key。 */
+export function isPubliclyExposed(): boolean {
+  return publicExposureHost !== null;
+}
+
+/** Host 头可能带端口 / 尾点，配置里的域名通常不带：统一后再比。 */
+function normalizeHostName(host: string): string {
+  return host
+    .trim()
+    .toLowerCase()
+    .replace(/:\d+$/, "")
+    .replace(/\.$/, "");
+}
+
 function hostHeaderAllowed(req: Request): boolean {
   const host = req.headers.get("host");
   if (!host) return true;
   if (isLoopbackHost(host)) return true;
+  if (publicExposureHost && normalizeHostName(host) === publicExposureHost) return true;
   return !isLoopbackHost(boundHost);
 }
 
@@ -1545,6 +1624,56 @@ async function handleChatCompletions(req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------------------
+// Embeddings
+// ---------------------------------------------------------------------------
+
+/**
+ * OpenAI Embeddings API（POST /v1/embeddings）。
+ *
+ * 后端固定为「运行中的嵌入实例」（进程内状态解析 —— 后端地址不来自请求参数，
+ * 不引入新的可配置上游，零新增信任面）。没有运行中的嵌入实例时返回 503 与
+ * 可操作引导，而不是转发给聊天后端（聊天模式的 llama-server 对本端点返回 501）。
+ * 嵌入是纯 JSON 请求 / 响应，无流式，直接透传请求体与上游响应。
+ */
+async function handleEmbeddings(req: Request): Promise<Response> {
+  const backend = resolveEmbeddingBackend();
+  if (!backend) {
+    return apiError(
+      503,
+      "嵌入服务未运行：先在模型页启动嵌入类别的模型，或在知识库设置里配置嵌入服务地址。",
+      "server_error",
+    );
+  }
+
+  let body: Record<string, unknown>;
+  try {
+    body = (await req.json()) as Record<string, unknown>;
+  } catch {
+    return apiError(400, "请求体必须是合法 JSON");
+  }
+
+  let upstream: Response;
+  try {
+    upstream = await fetch(`${backend}/v1/embeddings`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      // 嵌入是纯 JSON、无流式，超时参照本仓库嵌入调用先例（embeddings.ts）。
+      signal: AbortSignal.timeout(120_000),
+    });
+  } catch (e) {
+    return apiError(502, `转发失败：${errMsg(e)}`, "upstream_error");
+  }
+  if (!upstream.ok) return forwardUpstreamError(upstream, "嵌入服务返回错误");
+
+  const contentType = upstream.headers.get("content-type") ?? "application/json";
+  return new Response(upstream.body, {
+    status: upstream.status,
+    headers: { "Content-Type": contentType, ...CORS },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // TTS / ASR
 // ---------------------------------------------------------------------------
 
@@ -1624,7 +1753,14 @@ async function handleSpeech(req: Request): Promise<Response> {
   const provider = getTTSProviderConfig();
   if (provider.base && !isSelfBase(provider.base)) {
     try {
-      const res = await fetch(`${provider.base.replace(/\/+$/, "")}/audio/speech`, {
+      // 音色按厂商解析：外部调用方往往不传 voice（或沿用 OpenAI 的 alloy），而 voice 是
+      // 必填、各家 id 又不通用 —— 原样发出去只会得到一句上游的 invalid voice。
+      const voice = resolveTtsVoice({
+        requested: body.voice,
+        configured: getSetting("TTS_VOICE"),
+        vendor: audioVendorFor({ providerId: provider.providerId, baseUrl: provider.base }),
+      });
+      const res = await fetch(`${normalizeApiBase(provider.base)}/audio/speech`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -1633,7 +1769,7 @@ async function handleSpeech(req: Request): Promise<Response> {
         body: JSON.stringify({
           model: body.model?.trim() || provider.model || undefined,
           input: text,
-          voice: body.voice,
+          voice,
           response_format: body.response_format === "mp3" ? "mp3" : "wav",
           ...(typeof body.speed === "number" ? { speed: body.speed } : {}),
         }),
@@ -1933,8 +2069,8 @@ function openApiSpec(): Record<string, unknown> {
       description:
         "LlamaDesk 统一模型网关。聚合本机推理后端（llama.cpp / vLLM / SGLang、whisper-server、audio.cpp TTS）" +
         "与已配置的云端 OpenAI 兼容 API，提供 OpenAI Chat Completions、OpenAI Responses、Anthropic Messages 三套对话协议，" +
-        "以及 TTS / ASR 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
-        "设置 GATEWAY_API_KEY 后 /v1/* 端点需要 Bearer Token 或 x-api-key 鉴权。",
+        "以及 TTS / ASR / Embeddings 端点，另有共享记忆与本地素材库（图片 / 语音 / 视频）查询端点。" +
+        "在设置 → 网关里新建 API Key 后，/v1/* 端点需要 Bearer Token 或 x-api-key 鉴权（多把 Key 可分别停用 / 删除）。",
     },
     servers: [{ url: `http://${host}:${port}` }],
     security: [{ bearerAuth: [] }],
@@ -2031,6 +2167,36 @@ function openApiSpec(): Record<string, unknown> {
           responses: {
             "200": { description: "补全结果（非流式为 JSON，流式为 SSE）" },
             "503": { description: "没有可用的对话后端" },
+          },
+        },
+      },
+      "/v1/embeddings": {
+        post: {
+          summary: "文本向量化（OpenAI Embeddings API）",
+          description:
+            "OpenAI 兼容 Embeddings 接口，代理到运行中的嵌入实例（在模型页以嵌入类别启动的模型）。" +
+            "没有运行中的嵌入实例时返回 503 与启动引导。",
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: {
+                  type: "object",
+                  required: ["input"],
+                  properties: {
+                    model: { type: "string", description: "嵌入模型 ID（上游按启动的模型返回，一般可省略）" },
+                    input: {
+                      oneOf: [{ type: "string" }, { type: "array", items: { type: "string" } }],
+                      description: "要向量化的文本（单条或数组）",
+                    },
+                  },
+                },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "嵌入结果（OpenAI 形状：object/data[].embedding/usage）" },
+            "503": { description: "没有运行中的嵌入实例" },
           },
         },
       },
@@ -2182,7 +2348,11 @@ function openApiSpec(): Record<string, unknown> {
     },
     components: {
       securitySchemes: {
-        bearerAuth: { type: "http", scheme: "bearer", description: "GATEWAY_API_KEY；未设置时开放访问" },
+        bearerAuth: {
+          type: "http",
+          scheme: "bearer",
+          description: "网关 API Key（设置 → 网关 → API Key）；没有启用的 Key 时对本机进程开放访问",
+        },
       },
       schemas: {
         ChatCompletionRequest: {
@@ -2355,16 +2525,52 @@ async function route(req: Request): Promise<Response> {
   if (!browserOriginAllowed(req) || !hostHeaderAllowed(req)) {
     return apiError(
       403,
-      "该请求来自外部网页。网关只接受本机进程调用，或在配置 GATEWAY_API_KEY 后携带正确 Key 调用。",
+      "该请求来自外部网页。网关只接受本机进程调用，或携带正确的网关 API Key 调用。",
       "forbidden",
     );
   }
 
+  // 网页端的事件流：WebSocket 通道，必须排在下面那道 Key 校验之前 ——
+  // 浏览器的 WS 握手指不了 Authorization 头，所以它认的是 RPC 桥下发的那枚票据 Cookie。
+  if (isWebSocketPath(path)) {
+    if (!webSocketAuthorized(req, url)) return unauthorized();
+    const upgraded = server?.upgrade(req, { data: {} });
+    if (upgraded) return undefined as unknown as Response;
+    return apiError(400, "WebSocket 升级失败");
+  }
+
   // API Key 鉴权：/v1/* 与 /mcp 端点需要（元信息端点保持开放）。
   // 例外：浏览器 GET /mcp 返回静态调试工作台（无秘密，页面里的调用仍需 Key）。
+  //
+  // 隧道开启后开放面从"本机进程"变成"整个互联网"：/（会说明是否配了 Key）与
+  // /health（会带出上游状态与云端地址）一并要求 Key；/docs、/redoc、/openapi.json
+  // 是纯静态页面与 schema，保持开放 —— 否则公网用户连文档都打不开，也就无从填 Key。
   const mcpPlaygroundGet = req.method === "GET" && path === "/mcp";
-  if ((path.startsWith("/v1/") || (path === "/mcp" && !mcpPlaygroundGet)) && !authOk(req)) {
+  const metaNeedsKey = isPubliclyExposed() && (path === "/" || path === "/health");
+  if (
+    (path.startsWith("/v1/") || (path === "/mcp" && !mcpPlaygroundGet) || metaNeedsKey) &&
+    !requestAuthorized(req)
+  ) {
     return unauthorized();
+  }
+
+  // 媒体代理（`/media/*` → 回环媒体服务）：`<img>` / `<video>` 带不了 Authorization 头，
+  // 所以除了 Key，还认 RPC 桥下发的那枚会话票据 Cookie（见 gateway-web.ts）。
+  if (path.startsWith("/media/") && !mediaTicketValid(req) && !requestAuthorized(req)) {
+    return unauthorized();
+  }
+
+  // 网页版对话 / Agent（/chat、/agent）背后的东西：
+  //   /v1/web/rpc*  —— 前端那份 RPC 的 HTTP 传输（挂在 /v1/ 下，自动受 Key 保护）
+  //   /media/*      —— 媒体文件代理
+  //   /assets/*     —— 前端产物（页面本身与 /docs 一样不需要 Key，否则页面根本加载不出来）
+  if (path.startsWith("/v1/web/") || path.startsWith("/media/")) {
+    const webResponse = await handleWebRequest(req, url);
+    if (webResponse) return webResponse;
+  }
+  if (req.method === "GET") {
+    const asset = serveWebAsset(path);
+    if (asset) return asset;
   }
 
   switch (path) {
@@ -2374,12 +2580,18 @@ async function route(req: Request): Promise<Response> {
         docs: "/docs",
         redoc: "/redoc",
         openapi: "/openapi.json",
-        auth: getGatewayApiKey()
+        auth: hasGatewayAuthKey()
           ? "API key required: Authorization: Bearer <key> or x-api-key: <key>"
           : "API key not set: open access",
+        web: {
+          chat: "/chat",
+          agent: "/agent",
+          note: "Browser UI running the same frontend as the desktop app (same sessions and history). Media is proxied at /media/*.",
+        },
         endpoints: [
           "GET  /v1/models",
           "POST /v1/chat/completions",
+          "POST /v1/embeddings",
           "POST /v1/responses",
           "POST /v1/messages",
           "POST /v1/audio/speech",
@@ -2393,7 +2605,7 @@ async function route(req: Request): Promise<Response> {
       return json({
         status: "ok",
         gateway: true,
-        auth: getGatewayApiKey() ? "required" : "open",
+        auth: hasGatewayAuthKey() ? "required" : "open",
         upstream: ServerManager.getStatus(),
         cloud: cloudChatBase() || null,
         timestamp: Date.now(),
@@ -2404,12 +2616,23 @@ async function route(req: Request): Promise<Response> {
       return htmlResponse(swaggerUiHtml());
     case "/redoc":
       return htmlResponse(redocHtml());
+    // 网页版对话 / Agent：与桌面端同一份前端产物（同一套 React 组件与样式），
+    // 只有传输层换成 HTTP/SSE（见 gateway-web.ts）。页面本身不需要 Key。
+    case "/chat":
+      if (req.method !== "GET") return apiError(405, "Method Not Allowed");
+      return serveWebAppPage();
+    case "/agent":
+      if (req.method !== "GET") return apiError(405, "Method Not Allowed");
+      return serveWebAppPage();
     case "/v1/models":
       if (req.method !== "GET") return apiError(405, "Method Not Allowed");
       return handleListModels();
     case "/v1/chat/completions":
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleChatCompletions(req);
+    case "/v1/embeddings":
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleEmbeddings(req);
     case "/v1/responses":
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleResponses(req);
@@ -2474,7 +2697,29 @@ export async function startGateway(): Promise<{ ok: boolean; error?: string; por
     const port = configuredPort + i;
     if (port > 65535) break;
     try {
-      server = Bun.serve({ hostname: host, port, fetch: route });
+      server = Bun.serve({
+        hostname: host,
+        port,
+        fetch: route,
+        // 网页端的事件流（/v1/web/ws）：把桌面端推送原样转成 WS 帧。
+        websocket: {
+          open(ws) {
+            const cleanup = webSocketOpened(ws as unknown as { send: (data: string) => void });
+            (ws.data as { cleanup?: () => void }).cleanup = cleanup;
+          },
+          close(ws) {
+            (ws.data as { cleanup?: () => void }).cleanup?.();
+          },
+          message() {
+            // 客户端不回传：订阅按会话在页面上过滤，这里不需要收东西。
+          },
+        },
+        // Bun 默认 10 秒内在连接上收发不到任何字节就关掉它 —— 对网关是致命的：
+        // 模型思考/预填充、Agent 调工具、SSE 心跳间隙都可能静默 10 秒以上
+        // （实测 Agent 调 glob 时流被拦腰切断，客户端只收到前两帧）。
+        // 放宽到 120 秒；SSE 另有 5 秒心跳兜底，两侧都不会再误杀长连接。
+        idleTimeout: 120,
+      });
       boundHost = host;
       boundPort = port;
       boundConfiguredPort = configuredPort;
@@ -2482,7 +2727,7 @@ export async function startGateway(): Promise<{ ok: boolean; error?: string; por
       console.log(
         `Gateway running on http://${host}:${port}${
           port !== configuredPort ? ` (configured ${configuredPort} busy)` : ""
-        }${getGatewayApiKey() ? " (API key enabled)" : ""}`,
+        }${hasGatewayAuthKey() ? " (API key enabled)" : ""}`,
       );
       return { ok: true, port };
     } catch {

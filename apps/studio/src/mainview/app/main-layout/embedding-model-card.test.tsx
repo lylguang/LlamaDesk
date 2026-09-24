@@ -262,7 +262,7 @@ function findCustomSearch(): HTMLInputElement {
 
 const zhUseTyped = (model: string) => translate("zh", "kb.modelSelect.useTyped", { model });
 
-/** Radix Select 触发器要求 pointerType === "mouse" 才开下拉 / 选项才认点击。 */
+/** Base UI Select 触发器靠 mousedown 打开下拉（Radix 用 pointerdown）；两个都发以兼容。 */
 const mousePointer = { bubbles: true, button: 0, pointerType: "mouse" } as const;
 
 async function openEmbedSelect(): Promise<HTMLButtonElement> {
@@ -272,6 +272,7 @@ async function openEmbedSelect(): Promise<HTMLButtonElement> {
   expect(trigger).not.toBeNull();
   await act(async () => {
     trigger!.dispatchEvent(new PointerEvent("pointerdown", mousePointer));
+    trigger!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
   });
   await flush();
   return trigger!;
@@ -305,6 +306,9 @@ test("手填模型：候选外的名字出现「使用」项，点击保存；�
   await act(async () => {
     useItem!.dispatchEvent(new PointerEvent("pointerdown", mousePointer));
     useItem!.dispatchEvent(new PointerEvent("pointerup", mousePointer));
+    useItem!.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+    useItem!.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+    useItem!.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0 }));
   });
   await flush();
   await flush();

@@ -220,20 +220,20 @@ async function mountDialog(): Promise<DialogFixture> {
   const pickEmbed = async (label: string) => {
     const trigger = document.querySelector("#kb-embed-select") as HTMLButtonElement | null;
     if (!trigger) throw new Error("找不到嵌入下拉触发器");
-    // Radix Select 触发器要求 pointerType === "mouse"（且 button 0 / 非 ctrl）才开下拉；
-    // happy-dom 的 PointerEvent 默认 pointerType 为空，必须显式传。
+    // Base UI Select 触发器靠 mousedown 打开下拉（Radix 用 pointerdown）；两个都发以兼容。
     await act(async () => {
       trigger.dispatchEvent(new PointerEvent("pointerdown", {
         bubbles: true,
         button: 0,
         pointerType: "mouse",
       }));
+      trigger.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
     });
     await flush();
     const items = [...document.querySelectorAll('[role="option"]')];
     const target = items.find((el) => el.textContent?.includes(label));
     if (!target) throw new Error(`下拉里找不到「${label}」（现有：${items.map((i) => i.textContent).join("、")}）`);
-    // 选项的 onPointerDown 先记下 pointerType，onPointerUp 才认 mouse 并触发选中。
+    // Base UI SelectItem 靠 click 选中；补发 mousedown/mouseup/click 兼容 Radix 的 pointerdown/up。
     await act(async () => {
       target.dispatchEvent(new PointerEvent("pointerdown", {
         bubbles: true,
@@ -245,6 +245,9 @@ async function mountDialog(): Promise<DialogFixture> {
         button: 0,
         pointerType: "mouse",
       }));
+      target.dispatchEvent(new MouseEvent("mousedown", { bubbles: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent("mouseup", { bubbles: true, button: 0 }));
+      target.dispatchEvent(new MouseEvent("click", { bubbles: true, button: 0 }));
     });
     await flush();
   };

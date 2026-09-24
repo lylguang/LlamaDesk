@@ -4,52 +4,6 @@ All notable changes are documented here. 所有重要变更记录于此。
 
 Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and the project adheres to [Semantic Versioning](https://semver.org/lang/zh-CN/).
 
-## [0.0.10] - 2026-09-15
-
-### Added / 新增
-
-- **同步上游 OmniStudio 31 个提交**（349 个文件）：本轮把上游两天内的推进整体并入，主要能力见下。
-- **用量账本与统计页（设置 → 数据 → 使用统计）**：每一次模型调用都记一笔（渠道 / 厂商 / 模型 / 输入 / 输出 / 缓存 / 思考 tokens / 是否估算），写入点覆盖**对话**（含联网检索的查询改写）、**Agent**（主循环逐步、子智能体逐步、上下文压缩摘要）、**网关**（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`，SSE 透传不变样）、**生图 / 修图**、**生视频**、**文档 OCR**、**翻译**。统计页画出概要、近一年活动热力图、每日 Token 趋势（按模型分线）、模型环形图、厂商与调用来源分栏。上游没回 `usage` 时退回本地估算并如实标注「其中 N% 为本地估算」。
-- **API Key 落盘加密**：模型云服务与 `VLLM_API_KEY` 不再明文躺 SQLite —— AES-256-GCM，主密钥存 `<dataDir>/secrets.key`（0600），所有读写出口透明加解密，历史明文在启动时一次性加密写回（幂等，老库兼容）。
-- **Agent 界面重做**：消息流改成时间轴（正文与工具调用按发生顺序混排）、同类连续工具调用收成一行（「查阅 · 2 搜索, 1 列表」，点开仍是逐行）、产出物统一挂在消息底部并可点开预览、会话侧栏每段默认露 5 条并可展开、授权 / 提问以卡片形式落在消息流里（不弹窗）、待办进度面板、子智能体轨迹折成一行。
-- **Agent 能力面补齐**：权限规则表（`(permission, pattern)` + 四档审批模式 `smart` / `manual` / `auto` / `strict` + `doom_loop` 检测）、真实 PTY 终端页签、工作区文件 / 审查（git diff）页签、自动化任务（`once` / `daily` / `weekly`）、通知中心、真实上下文的子智能体。
-- **云厂商可同时启用 + 功能页统一「先选厂商、再选模型」**：生图 / 语音 / OCR / 视频页不再让用户重复填地址与密钥，一律从「已启用」的厂商里挑；对话 / 网关仍走单一「激活」厂商。
-- **统一出站代理 + Linux Landlock 沙箱 + 多镜像下载**：所有出站请求走同一份代理配置；Linux 上可把命令执行关进内核级沙箱（工作区外写入被拒）；模型 / 题库下载支持多镜像回退。
-- **`/omni-doctor` 排障入口 + `omi agent` 命令**：输入框敲 `/omni-doctor` 即按内置技能流程取证（读日志、查库、跑诊断脚本，每个结论都要指到一行日志）；`omi agent run "提示词"` 可无头跑一个 Agent 回合，`--json` 输出 NDJSON 事件流供脚本消费。
-- **应用日志统一**：主进程 / 前端 / 网关日志收进一份可检索的日志，`omi logs --level error -v` 与设置页日志面板同源。
-
-### Fixed / 修复
-
-- **启动白屏（本仓库自研修复）**：dev 渠道探测 Vite 时只看 `fetch` 有没有抛异常。系统 / 代理软件（Clash 等）会让**未监听**的 `localhost:5173` 也返回 502（而不是连接失败），`fetch` 照常 resolve → 应用误判 HMR 可用 → webview 指向代理错误页 → 整个界面白屏。现在校验响应本身（非 2xx 即回退到内置资源）。
-- **CI：Bun 钉在 1.3.9 导致 `--isolate` 的模块隔离失效**：`mock.module()` 跨文件泄漏，21 个用例在 CI 必红（本机 1.4.2 全绿，上游最新提交同样如此）。升到 `bun@1.4.2` 后 1154 个单测全绿。
-- **构建期 tar 路径长度校验写死了上游名字**：改用 `app.name`，避免名字变短时漏放超限路径（这类校验放行的后果是发一个「下得下来、装不上去」的包）。
-- **上游回退到 Radix 的 UI 组件**：本仓库继续保持 Appica 适配器（ScrollArea / Dialog），并把上游新增的「确定高度」「藏原生滚动条」说明并入注释。
-- **上游删掉 `local-engines/` 目录**：本仓库的 **llama.cpp 引擎一键安装**（设置 → 本地模型 → 引擎状态）被单独保留为 `local-engines/engine-install.tsx`，未随上游一起删除。
-- **Windows 安装器发布方式（重要）**：此前 Release 页面把 `LlamaDesk-Setup.exe` 单独抽出来当「免解压直装」发布，但那个 424KB 的 exe 只是 electrobun 的**自解压引导器**，真正载荷是同目录的 `.installer/<name>.tar.zst`（60+MB），且引导器不含任何下载逻辑 —— 用户只下 exe 会直接报 `Not a valid self-extracting installer`。现在不再单独发布引导器，下载指引明确指向 **`*-win-x64-LlamaDesk-Setup.zip`**（解压后运行其中的 exe，`.installer/` 需一并保留）。上游仓库本就是只发 zip，这一步是我们自己加出来的。
-
-## [0.0.9] - 2026-09-13
-
-### Fixed / 修复
-
-- **下载内核并发竞态（数据损坏）**：多分片下载某片失败时，`Promise.all` 一有 reject 就进入清理分支删分片文件，而其余在途分片仍握着同名 fd 继续 append —— 两轮布局交错写同一个 `.partN`，装配出内容偏移的坏文件。改为 `Promise.allSettled`：轮次收尾前绝不动磁盘与 sidecar。CI（较慢的 macOS runner）上偶现、本地全绿的三个 downloader 用例即此因；对应地给测试假服务器加了 `chunkDelayMs` 节流，让「下载到一半 abort」的前提稳定成立。
-- **`omi memory` / `omi benchmark` 读到空库**：商业化把规范库名从 `omni-studio.db` 改成 `llama-desk.db`，但 CLI 的 memory / benchmark 进程内兜底路径仍指旧名 —— `bun:sqlite` 的 `create: true` 会静默开一个全新空库，命令「成功」却全是空数据（比报错更隐蔽）。改回规范名；`backup/index.ts` 的 `resolveDbPath` 现先认 `llama-desk.db`，旧安装的 `omni-studio.db` 仅作回退。
-- **CI / 发布**：`release.yml` 的 release job 缺 `actions/checkout`，导致从 CHANGELOG 提取发布说明的 awk 读不到文件、回退成自动生成——补上 checkout（v0.0.8 正文已手工修好）；备份冒烟脚本的造数据与「坏库对照」检查改用规范库名，并修正远端列表断言的品牌前缀；`docs/omi-cli.md` 重新生成为 LlamaDesk 品牌。
-
-## [0.0.8] - 2026-09-13
-
-### Fixed / 修复
-
-- **对话 / 智能体「停止生成」**：生成过程中新增停止按钮，后端配套 abort RPC 中断推理流——此前小模型复读时全部控件禁用，只能干等或强杀应用。
-- **模型翻译超时与报错**：改为流式聚合并关闭 Bun fetch 的 300 秒默认空闲超时（长文翻译不再中途掐断）；自动剥离 `<think>` 推理段；英文原文报错（"The operation timed out."）换成友好中文提示。
-- **知识库嵌入失败提示**：推理服务不支持向量嵌入时（对话模型返回 HTTP 501/404/401），给可行动中文提示「当前推理服务不支持向量嵌入（只加载了对话模型）。请下载并启动一个嵌入模型…」，不再裸抛 HTTP 错误码。
-- **默认模型面板选择本地模型后自动启动推理服务**：文案承诺与实际行为对齐（此前只记选择、不启动服务，对话页模型选择器看不到 stopped 实例）。
-- **基准测试上下文档位**：按推理服务实际 `SERVER_CTX_SIZE` 截断，超限档位前端禁用——8k 上限的服务不再硬扫 16.4k/32.8k 必失败。
-- **修复 2 个过时断言的存量测试**：备份文件名格式断言（真机产物一直是正确的 `LlamaDesk-YYYYMMDD-HHMMSS.omnibackup`）、下载面板 14 条记录整份渲染断言。
-
-## [0.0.7] - 2026-09-12
-
-（新条目写在这里，发布时整体归入下一个版本小节。）
-
 ## [0.1.5] - 2026-09-23
 
 ### Added / 新增
@@ -391,6 +345,52 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 - **生图 / 修图的上游报错被整段 JSON 丢给用户，而且「模型不存在」看不出是自己设置的问题**：报错信封不止 OpenAI 那一种 —— 国内不少聚合网关用的是 `{ code, message }`（硅基流动 `20012` 那种），而客户端只认 `{ error: { message } }`，取不到就退回原文，界面上显示的就是一坨 `{"code":20012,"message":"Model does not exist…"}`。现在两种信封都取 `message`（`upstreamErrorText`），取到的若是「模型不存在」这类，再补一句能照着做的提示：**点明是哪个厂商、当前模型 id 是什么、去哪儿换**（`modelNotFoundHint`）。实测最常见的成因不是上游坏了 —— `IMG_MODEL` 是三个后端共用的一个槽位，从本地 MLX 切到云端时它不会被清掉，于是 `z-image-turbo`（MLX 的 preset id）被原样发给了厂商，用户从 `Model does not exist` 里看不出问题在自己这边；界面侧同步补上 `isForeignModel()`，切后端时把不属于该后端的 id 标出来（`mainview/lib/image-model.ts` 有单测）。
 - **网关的长连接会被 Bun 默认的 10 秒空闲超时拦腰切断**：`Bun.serve` 默认 10 秒内在连接上收发不到任何字节就关掉它，而模型思考 / 长时间预填充、Agent 调工具、SSE 的心跳间隙都可能静默十秒以上 —— 实测 Agent 调 `glob` 时流被切断，客户端只收到前两帧（自检诊断里查不出来，因为服务端没有任何错误）。现在显式放宽到 120 秒，SSE 另有 5 秒心跳兜底，两侧都不会再误杀长连接。
 - **`images/` 相对 ref 的穿越校验收成一处**（`image-server.ts` 的 `resolveImageRef`）：这个 ref 会从 RPC / 控制套接字 / 小应用一路传进来，`../../omni-studio.db` 这类输入能指到数据目录里的任意文件，而校验此前在 image-gen / video-gen / ocr 各写了一份（新增功能再抄一份就是第四份），`ocr.ts` 的 `resolveOcrImage` 现在转调这里；判定用 `根目录 + 分隔符` 做前缀，避免 `/images-evil/…` 这种同前缀不同目录混进来。
+
+## [0.0.10] - 2026-09-15
+
+### Added / 新增
+
+- **同步上游 OmniStudio 31 个提交**（349 个文件）：本轮把上游两天内的推进整体并入，主要能力见下。
+- **用量账本与统计页（设置 → 数据 → 使用统计）**：每一次模型调用都记一笔（渠道 / 厂商 / 模型 / 输入 / 输出 / 缓存 / 思考 tokens / 是否估算），写入点覆盖**对话**（含联网检索的查询改写）、**Agent**（主循环逐步、子智能体逐步、上下文压缩摘要）、**网关**（`/v1/chat/completions`、`/v1/messages`、`/v1/responses`，SSE 透传不变样）、**生图 / 修图**、**生视频**、**文档 OCR**、**翻译**。统计页画出概要、近一年活动热力图、每日 Token 趋势（按模型分线）、模型环形图、厂商与调用来源分栏。上游没回 `usage` 时退回本地估算并如实标注「其中 N% 为本地估算」。
+- **API Key 落盘加密**：模型云服务与 `VLLM_API_KEY` 不再明文躺 SQLite —— AES-256-GCM，主密钥存 `<dataDir>/secrets.key`（0600），所有读写出口透明加解密，历史明文在启动时一次性加密写回（幂等，老库兼容）。
+- **Agent 界面重做**：消息流改成时间轴（正文与工具调用按发生顺序混排）、同类连续工具调用收成一行（「查阅 · 2 搜索, 1 列表」，点开仍是逐行）、产出物统一挂在消息底部并可点开预览、会话侧栏每段默认露 5 条并可展开、授权 / 提问以卡片形式落在消息流里（不弹窗）、待办进度面板、子智能体轨迹折成一行。
+- **Agent 能力面补齐**：权限规则表（`(permission, pattern)` + 四档审批模式 `smart` / `manual` / `auto` / `strict` + `doom_loop` 检测）、真实 PTY 终端页签、工作区文件 / 审查（git diff）页签、自动化任务（`once` / `daily` / `weekly`）、通知中心、真实上下文的子智能体。
+- **云厂商可同时启用 + 功能页统一「先选厂商、再选模型」**：生图 / 语音 / OCR / 视频页不再让用户重复填地址与密钥，一律从「已启用」的厂商里挑；对话 / 网关仍走单一「激活」厂商。
+- **统一出站代理 + Linux Landlock 沙箱 + 多镜像下载**：所有出站请求走同一份代理配置；Linux 上可把命令执行关进内核级沙箱（工作区外写入被拒）；模型 / 题库下载支持多镜像回退。
+- **`/omni-doctor` 排障入口 + `omi agent` 命令**：输入框敲 `/omni-doctor` 即按内置技能流程取证（读日志、查库、跑诊断脚本，每个结论都要指到一行日志）；`omi agent run "提示词"` 可无头跑一个 Agent 回合，`--json` 输出 NDJSON 事件流供脚本消费。
+- **应用日志统一**：主进程 / 前端 / 网关日志收进一份可检索的日志，`omi logs --level error -v` 与设置页日志面板同源。
+
+### Fixed / 修复
+
+- **启动白屏（本仓库自研修复）**：dev 渠道探测 Vite 时只看 `fetch` 有没有抛异常。系统 / 代理软件（Clash 等）会让**未监听**的 `localhost:5173` 也返回 502（而不是连接失败），`fetch` 照常 resolve → 应用误判 HMR 可用 → webview 指向代理错误页 → 整个界面白屏。现在校验响应本身（非 2xx 即回退到内置资源）。
+- **CI：Bun 钉在 1.3.9 导致 `--isolate` 的模块隔离失效**：`mock.module()` 跨文件泄漏，21 个用例在 CI 必红（本机 1.4.2 全绿，上游最新提交同样如此）。升到 `bun@1.4.2` 后 1154 个单测全绿。
+- **构建期 tar 路径长度校验写死了上游名字**：改用 `app.name`，避免名字变短时漏放超限路径（这类校验放行的后果是发一个「下得下来、装不上去」的包）。
+- **上游回退到 Radix 的 UI 组件**：本仓库继续保持 Appica 适配器（ScrollArea / Dialog），并把上游新增的「确定高度」「藏原生滚动条」说明并入注释。
+- **上游删掉 `local-engines/` 目录**：本仓库的 **llama.cpp 引擎一键安装**（设置 → 本地模型 → 引擎状态）被单独保留为 `local-engines/engine-install.tsx`，未随上游一起删除。
+- **Windows 安装器发布方式（重要）**：此前 Release 页面把 `LlamaDesk-Setup.exe` 单独抽出来当「免解压直装」发布，但那个 424KB 的 exe 只是 electrobun 的**自解压引导器**，真正载荷是同目录的 `.installer/<name>.tar.zst`（60+MB），且引导器不含任何下载逻辑 —— 用户只下 exe 会直接报 `Not a valid self-extracting installer`。现在不再单独发布引导器，下载指引明确指向 **`*-win-x64-LlamaDesk-Setup.zip`**（解压后运行其中的 exe，`.installer/` 需一并保留）。上游仓库本就是只发 zip，这一步是我们自己加出来的。
+
+## [0.0.9] - 2026-09-13
+
+### Fixed / 修复
+
+- **下载内核并发竞态（数据损坏）**：多分片下载某片失败时，`Promise.all` 一有 reject 就进入清理分支删分片文件，而其余在途分片仍握着同名 fd 继续 append —— 两轮布局交错写同一个 `.partN`，装配出内容偏移的坏文件。改为 `Promise.allSettled`：轮次收尾前绝不动磁盘与 sidecar。CI（较慢的 macOS runner）上偶现、本地全绿的三个 downloader 用例即此因；对应地给测试假服务器加了 `chunkDelayMs` 节流，让「下载到一半 abort」的前提稳定成立。
+- **`omi memory` / `omi benchmark` 读到空库**：商业化把规范库名从 `omni-studio.db` 改成 `llama-desk.db`，但 CLI 的 memory / benchmark 进程内兜底路径仍指旧名 —— `bun:sqlite` 的 `create: true` 会静默开一个全新空库，命令「成功」却全是空数据（比报错更隐蔽）。改回规范名；`backup/index.ts` 的 `resolveDbPath` 现先认 `llama-desk.db`，旧安装的 `omni-studio.db` 仅作回退。
+- **CI / 发布**：`release.yml` 的 release job 缺 `actions/checkout`，导致从 CHANGELOG 提取发布说明的 awk 读不到文件、回退成自动生成——补上 checkout（v0.0.8 正文已手工修好）；备份冒烟脚本的造数据与「坏库对照」检查改用规范库名，并修正远端列表断言的品牌前缀；`docs/omi-cli.md` 重新生成为 LlamaDesk 品牌。
+
+## [0.0.8] - 2026-09-13
+
+### Fixed / 修复
+
+- **对话 / 智能体「停止生成」**：生成过程中新增停止按钮，后端配套 abort RPC 中断推理流——此前小模型复读时全部控件禁用，只能干等或强杀应用。
+- **模型翻译超时与报错**：改为流式聚合并关闭 Bun fetch 的 300 秒默认空闲超时（长文翻译不再中途掐断）；自动剥离 `<think>` 推理段；英文原文报错（"The operation timed out."）换成友好中文提示。
+- **知识库嵌入失败提示**：推理服务不支持向量嵌入时（对话模型返回 HTTP 501/404/401），给可行动中文提示「当前推理服务不支持向量嵌入（只加载了对话模型）。请下载并启动一个嵌入模型…」，不再裸抛 HTTP 错误码。
+- **默认模型面板选择本地模型后自动启动推理服务**：文案承诺与实际行为对齐（此前只记选择、不启动服务，对话页模型选择器看不到 stopped 实例）。
+- **基准测试上下文档位**：按推理服务实际 `SERVER_CTX_SIZE` 截断，超限档位前端禁用——8k 上限的服务不再硬扫 16.4k/32.8k 必失败。
+- **修复 2 个过时断言的存量测试**：备份文件名格式断言（真机产物一直是正确的 `LlamaDesk-YYYYMMDD-HHMMSS.omnibackup`）、下载面板 14 条记录整份渲染断言。
+
+## [0.0.7] - 2026-09-12
+
+（新条目写在这里，发布时整体归入下一个版本小节。）
 
 ## [0.0.9-canary.0] - 2026-09-14
 

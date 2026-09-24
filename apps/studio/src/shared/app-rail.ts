@@ -46,6 +46,9 @@ export type AppId = (typeof APP_RAIL_IDS)[number];
 /** 设置键：左侧一级菜单的顺序与显示 / 隐藏。 */
 export const APP_RAIL_LAYOUT_KEY = "APP_RAIL_LAYOUT";
 
+/** 设置键：侧边栏是否展开（显示文字标签）。"1" = 展开，"" = 收起（默认）。 */
+export const APP_RAIL_EXPANDED_KEY = "APP_RAIL_EXPANDED";
+
 export type RailLayoutEntry = { id: AppId; hidden: boolean };
 
 export function defaultRailLayout(): RailLayoutEntry[] {

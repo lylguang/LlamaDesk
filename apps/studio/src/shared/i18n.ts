@@ -502,6 +502,8 @@ const zh: Record<string, string> = {
   "common.off": "关",
   // Sidebar
   "nav.settings": "设置",
+  "nav.toggleRail": "展开/收起侧边栏",
+  "nav.collapseRail": "收起侧边栏",
   "nav.search": "搜索文档…",
   // Chat
   "chat.title": "LlamaDesk 对话",
@@ -4171,6 +4173,8 @@ const en: Record<string, string> = {
   "common.on": "On",
   "common.off": "Off",
   "nav.settings": "Settings",
+  "nav.toggleRail": "Toggle sidebar",
+  "nav.collapseRail": "Collapse sidebar",
   "nav.search": "Search documents…",
   "chat.title": "LlamaDesk Chat",
   "chat.aimStudio": "LlamaDesk",

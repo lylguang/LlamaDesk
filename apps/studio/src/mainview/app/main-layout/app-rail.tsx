@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useCallback, type ReactNode } from "react";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   MessageCircleDashedIcon,
   SquareTerminalIcon,
@@ -17,6 +17,8 @@ import {
   GaugeIcon,
   LayoutGridIcon,
   SlidersHorizontalIcon,
+  PanelLeftIcon,
+  PanelLeftCloseIcon,
 } from "lucide-react";
 
 import { rpcClient } from "@lib/rpc";
@@ -27,7 +29,12 @@ import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { cn } from "@/mainview/lib/utils";
-import { APP_RAIL_LAYOUT_KEY, resolveRailLayout, visibleRailEntries } from "@/shared/app-rail";
+import {
+  APP_RAIL_EXPANDED_KEY,
+  APP_RAIL_LAYOUT_KEY,
+  resolveRailLayout,
+  visibleRailEntries,
+} from "@/shared/app-rail";
 
 // 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标。
 // 导出给设置 → 外观 的菜单配置卡复用 —— 配置里看到的图标必须就是菜单里那个。
@@ -56,11 +63,13 @@ function RailButton({
   active,
   label,
   onClick,
+  expanded,
   children,
 }: {
   active: boolean;
   label: string;
   onClick: () => void;
+  expanded: boolean;
   children: ReactNode;
 }) {
   return (
@@ -71,18 +80,22 @@ function RailButton({
           aria-label={label}
           onClick={onClick}
           className={cn(
-            "flex size-10 items-center justify-center rounded-xl transition-colors",
+            "flex h-10 items-center gap-2.5 rounded-xl transition-colors",
+            expanded ? "w-full px-3" : "size-10 justify-center",
             active
               ? "bg-primary/10 text-primary"
               : "text-muted-foreground hover:bg-muted hover:text-foreground",
           )}
         >
           {children}
+          {expanded && <span className="flex-1 truncate text-left text-sm">{label}</span>}
         </button>
       </TooltipTrigger>
-      <TooltipContent side="right" sideOffset={8}>
-        {label}
-      </TooltipContent>
+      {!expanded && (
+        <TooltipContent side="right" sideOffset={8}>
+          {label}
+        </TooltipContent>
+      )}
     </Tooltip>
   );
 }
@@ -93,6 +106,7 @@ export function AppRail() {
   const setRoute = useRouter((s) => s.setRoute);
   const activeApp = useAppStore((s) => s.activeApp);
   const setActiveApp = useAppStore((s) => s.setActiveApp);
+  const queryClient = useQueryClient();
 
   // 顺序与显示 / 隐藏由「设置 → 外观 → 左侧一级菜单」决定（`APP_RAIL_LAYOUT`）。
   // 设置页改完 invalidate 这个 query，菜单立刻跟着变，不需要重启。
@@ -101,12 +115,12 @@ export function AppRail() {
     queryFn: () => rpcClient.getSettings(undefined),
   });
   const items = visibleRailEntries(resolveRailLayout(data?.settings?.[APP_RAIL_LAYOUT_KEY]));
+  const expanded = data?.settings?.[APP_RAIL_EXPANDED_KEY] === "1";
 
   const onMainRoute = route.path === "index" || route.path === "chat";
   const inSettings = route.path === "settings";
 
   const handleSelect = (app: AppId) => {
-    // 左侧面板永远展开，点击已激活的图标不做任何操作
     if (onMainRoute && activeApp === app) return;
     setActiveApp(app);
     useChatStore.getState().setActiveConversation(null);
@@ -116,11 +130,21 @@ export function AppRail() {
     setRoute({ path: "index" });
   };
 
+  const toggleExpanded = useCallback(() => {
+    const next = expanded ? "" : "1";
+    rpcClient.updateSettings({ settings: { [APP_RAIL_EXPANDED_KEY]: next } }).then(() => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    });
+  }, [expanded, queryClient]);
+
   return (
     <TooltipProvider delayDuration={300}>
       <nav
         aria-label="App rail"
-        className="flex w-12 shrink-0 flex-col items-center gap-1.5 border-r bg-muted/40 pb-3"
+        className={cn(
+          "flex shrink-0 flex-col items-center gap-1.5 border-r bg-muted/40 pb-3 transition-[width] duration-200 ease-out",
+          expanded ? "w-[200px] px-2" : "w-12 px-0",
+        )}
       >
         <div className="electrobun-webkit-app-region-drag h-10 w-full shrink-0" />
         {items.map(({ id: app }) => (
@@ -129,6 +153,7 @@ export function AppRail() {
             active={onMainRoute && activeApp === app}
             label={t(`apps.${app}`)}
             onClick={() => handleSelect(app)}
+            expanded={expanded}
           >
             {APP_ICONS[app]}
           </RailButton>
@@ -138,9 +163,26 @@ export function AppRail() {
             active={inSettings}
             label={t("nav.settings")}
             onClick={() => setRoute({ path: "settings" })}
+            expanded={expanded}
           >
             <SlidersHorizontalIcon className="size-5" />
           </RailButton>
+          <button
+            type="button"
+            aria-label={t("nav.toggleRail")}
+            onClick={toggleExpanded}
+            className={cn(
+              "flex h-9 items-center gap-2.5 rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+              expanded ? "w-full px-3" : "size-9 justify-center",
+            )}
+          >
+            {expanded ? (
+              <PanelLeftCloseIcon className="size-4" />
+            ) : (
+              <PanelLeftIcon className="size-4" />
+            )}
+            {expanded && <span className="flex-1 truncate text-left text-xs">{t("nav.collapseRail")}</span>}
+          </button>
         </div>
       </nav>
     </TooltipProvider>

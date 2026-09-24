@@ -60,6 +60,7 @@ let storedSettings: Record<string, string> = {};
 mock.module("@lib/rpc", () => ({
   rpcClient: {
     getSettings: async () => ({ settings: storedSettings }),
+    updateSettings: async () => ({ ok: true }),
   },
 }));
 
@@ -104,9 +105,9 @@ async function renderRail() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  const labels = [...document.querySelectorAll('nav[aria-label="App rail"] button')].map(
-    (button) => button.getAttribute("aria-label"),
-  );
+  const labels = [...document.querySelectorAll('nav[aria-label="App rail"] button[aria-label]')]
+    .map((button) => button.getAttribute("aria-label"))
+    .filter((label) => label !== null && label !== zh("nav.toggleRail"));
   return {
     labels,
     cleanup: async () => {

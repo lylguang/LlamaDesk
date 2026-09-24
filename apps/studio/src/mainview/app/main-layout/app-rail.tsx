@@ -36,6 +36,46 @@ import {
   visibleRailEntries,
 } from "@/shared/app-rail";
 
+/** 侧边栏展开/收起的切换按钮（放在左上角拖拽区，macOS 窗口控制按钮右侧）。 */
+export function RailToggleButton() {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["settings"],
+    queryFn: () => rpcClient.getSettings(undefined),
+  });
+  const expanded = data?.settings?.[APP_RAIL_EXPANDED_KEY] === "1";
+
+  const toggle = useCallback(() => {
+    const next = expanded ? "" : "1";
+    rpcClient.updateSettings({ settings: { [APP_RAIL_EXPANDED_KEY]: next } }).then(() => {
+      queryClient.invalidateQueries({ queryKey: ["settings"] });
+    });
+  }, [expanded, queryClient]);
+
+  return (
+    <Tooltip>
+      <TooltipTrigger asChild>
+        <button
+          type="button"
+          aria-label={t("nav.toggleRail")}
+          onClick={toggle}
+          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+        >
+          {expanded ? (
+            <PanelLeftCloseIcon className="size-4" />
+          ) : (
+            <PanelLeftIcon className="size-4" />
+          )}
+        </button>
+      </TooltipTrigger>
+      <TooltipContent side="bottom" sideOffset={4}>
+        {t("nav.toggleRail")}
+      </TooltipContent>
+    </Tooltip>
+  );
+}
+
 // 抽象几何风格图标，区别于参考原型（气泡/麦克风/风景画）的具象图标。
 // 导出给设置 → 外观 的菜单配置卡复用 —— 配置里看到的图标必须就是菜单里那个。
 export const APP_ICONS: Record<AppId, ReactNode> = {
@@ -146,7 +186,20 @@ export function AppRail() {
           expanded ? "w-[200px] px-2" : "w-12 px-0",
         )}
       >
-        <div className="electrobun-webkit-app-region-drag h-10 w-full shrink-0" />
+        <div className="electrobun-webkit-app-region-drag flex h-10 w-full shrink-0 items-center justify-end pr-2">
+          <button
+            type="button"
+            aria-label={t("nav.toggleRail")}
+            onClick={toggleExpanded}
+            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          >
+            {expanded ? (
+              <PanelLeftCloseIcon className="size-4" />
+            ) : (
+              <PanelLeftIcon className="size-4" />
+            )}
+          </button>
+        </div>
         {items.map(({ id: app }) => (
           <RailButton
             key={app}
@@ -167,22 +220,6 @@ export function AppRail() {
           >
             <SlidersHorizontalIcon className="size-5" />
           </RailButton>
-          <button
-            type="button"
-            aria-label={t("nav.toggleRail")}
-            onClick={toggleExpanded}
-            className={cn(
-              "flex h-9 items-center gap-2.5 rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-              expanded ? "w-full px-3" : "size-9 justify-center",
-            )}
-          >
-            {expanded ? (
-              <PanelLeftCloseIcon className="size-4" />
-            ) : (
-              <PanelLeftIcon className="size-4" />
-            )}
-            {expanded && <span className="flex-1 truncate text-left text-xs">{t("nav.collapseRail")}</span>}
-          </button>
         </div>
       </nav>
     </TooltipProvider>

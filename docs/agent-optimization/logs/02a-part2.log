@@ -1,0 +1,88 @@
+## 交付汇报
+
+### 1 改了什么
+
+只改了 `apps/studio/src/bun/agent-sandbox.ts` 两处（测试文件这轮没动，`agent-sandbox.ts` 之外也没碰任何文件）：
+
+1. **`bwrapArgs` 的参数类型**：加了可选字段 `blankFile?: string`。
+2. **挂凭据路径那一段**（原第 391-394 行）：从「一律 `--tmpfs`」改成按目录/文件分流。关键几行：
+
+```ts
+const blankFile = opts.blankFile ?? "/dev/null";
+for (const target of existingCredentialPaths()) {
+  let isDir = false;
+  try {
+    isDir = statSync(target).isDirectory();
+  } catch {
+    isDir = false;
+  }
+  if (isDir) args.push("--tmpfs", target);
+  else args.push("--ro-bind", blankFile, target);
+}
+```
+
+配套：文件顶部 `fs` import 补了 `statSync`；原注释更新为说明「文件不能用 tmpfs（挂载点必须是目录，对着普通文件挂 bwrap 直接启动失败，报 `Can't mkdir …: Not a directory`），取不到状态就保守当文件走 `--ro-bind`」。
+
+### 2 先红后绿的证据
+
+红（改源码前，`bun test src/bun/agent-sandbox.test.ts`，输出原样摘取自实际运行）：
+
+```
+(fail) Linux（bwrap） > argv：凭据**文件**（.npmrc）用 --ro-bind 盖住，而不是 --tmpfs（对着文件挂 tmpfs 会让 bwrap 起不来） [0.57ms]
+(fail) Linux（bwrap） > argv：blankFile 可自定义文件类凭据的覆盖源，缺省是 /dev/null [0.36ms]
+
+ 36 pass
+ 2 fail
+ 297 expect() calls
+Ran 38 tests across 1 file. [433.00ms]
+```
+
+（typecheck 当时同样红：`src/bun/agent-sandbox.test.ts(316,9): error TS2353: Object literal may only specify known properties, and 'blankFile' does not exist in type …`，实测确认。）
+
+绿（源码改完后，同一命令）：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 38 pass
+ 0 fail
+ 307 expect() calls
+Ran 38 tests across 1 file. [438.00ms]
+```
+
+typecheck 转绿：`tsc --noEmit` 无任何错误输出。
+
+另外我按第 7 条规则自己又验了一遍「回退即红」：把 `agent-sandbox.ts` 临时还原成 HEAD 版本后重跑，上面那 2 条用例立刻变红（36 pass / 2 fail）；恢复我的改动后又变绿（38 pass / 0 fail）。用例确实咬住了这次改动。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-sandbox.test.ts`：这轮**没有编辑**，编辑前 38 个 `test(` → 编辑后 38 个（与上一轮结束时一致，只增不减）。gate 的基线核对也通过：`baseline=39 now=42`（42 含 3 个 `describe`，对应 38 条用例）。
+
+### 4 验收门输出
+
+```
+GATE: id=02a-bwrap-cred-files mode=self head=d03f63a
+GATE: out-of-bounds none
+GATE: size source-lines=18 limit=30
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=39 now=42)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (38 pass)
+GATE: RESULT PASS id=02a-bwrap-cred-files
+```
+
+### 5 逐项自检
+
+- [x] `blankFile` 加成了可选参数，默认 `/dev/null` —— 完成（`opts.blankFile ?? "/dev/null"`）
+- [x] 文件类凭据走 `--ro-bind`，目录类仍走 `--tmpfs` —— 完成（`statSync(target).isDirectory()` 分流）
+- [x] `statSync` 包了 try/catch，异常时按文件处理 —— 完成（catch 里 `isDir = false` → `--ro-bind`）
+- [x] `bwrapArgs` 仍是纯函数 —— 完成（除 `statSync` 这一次必要的目录/文件判断外，没有新增读设置、起进程；`statSync` 仅探测路径类型，不读内容、不读 settings）
+- [x] 「不要做的事」一条都没做 —— 完成（`sandboxCredentialPaths` 清单、`existingCredentialPaths`、`wrapShellCommand` 均未动；`agent-sandbox.test.ts` 本轮未碰；`git status` 里除两个白名单文件和 docs/agent-optimization 下的任务/日志文件外无其它改动）
+- [x] typecheck 由红转绿 —— 完成（改前 1 条 TS2353，改后 `tsc --noEmit` 干净）
+- [x] 那 2 条红用例转绿，其余 40 条仍绿 —— 完成（38 pass / 0 fail；2 条红是 .npmrc 用 `--ro-bind`、blankFile 自定义/缺省，其余 36 条保持绿）
+- [x] 源码改动不超过 30 行 —— 完成（`git diff --numstat`：`agent-sandbox.ts` 15 增 + 3 删 = 18 行，gate 报 `size source-lines=18 limit=30`）
+
+### 6 我拿不准的地方
+
+无。

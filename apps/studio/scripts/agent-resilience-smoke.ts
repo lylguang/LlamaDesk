@@ -8,13 +8,14 @@
  * ```
  *   用户：resilience-task：统计一下这批日志，写份报告
  *     ├─ 传输层：前两次请求被 503 打回（模型还在加载）→ 内核重试
- *     ├─ 工具：bash `seq 1 30000` → 输出 17 万字符 → 截断 + 转存
+ *     ├─ 工具：bash `seq 1 30000` → 输出 17 万字符 → 截断（6144 上限）+ 转存
  *     ├─ 回合中途流被掐断（有半截正文）→ 摘掉空壳 + continue() 重发
  *     ├─ 空回合（服务端给了个空消息）→ harness 提醒
  *     ├─ 模型照着提示里的路径 read_file 读回转存的原文（分页读到第 3 万行）
+ *     ├─ 两条 head（各 210k / 120k 字符）→ 与前面累积把 8k 窗口顶穿 → 触发压缩
  *     ├─ 派一个子智能体（只读）→ 子智能体也遇到空回合 → 同样被提醒
  *     ├─ 写报告到工作区（产出物登记）
- *     └─ 上下文中途触发过压缩（大输出把 8k 窗口顶穿）
+ *     └─ 收尾
  * ```
  *
  * 这个脚本真正要证明的四条性质（单点场景看不出来的）：
@@ -25,10 +26,20 @@
  *
  * 跑法：`bun run scripts/agent-resilience-smoke.ts`（已接进 test:smoke）。
  * 全程用内置脚本化桩服务，确定性、不依赖任何真实推理服务。
+ *
+ * 压缩断言（第 7 节）为什么靠「累积」而不是「单条大输出」：单条工具结果的上限
+ * 是按上下文窗口的 25% 算的（`agent-spill.ts` 的 `toolOutputCharLimit`，随窗口等比缩放），
+ * 8k 窗口下约 6144 字符 / 约 1500–2000 token —— 单条顶不穿 60% 的压缩预算，
+ * 把窗口调小也没用（上限等比缩小）。真实的压力是多条大输出叠加：这条任务里
+ * 三截被截断的 bash 结果（`seq` + 两条 `head`）加 read_file / 子智能体 / 写文件，
+ * 累积超过预算，压缩才在中途触发。这正是压缩机制要对付的情形，而不是靠
+ * 改 `AGENT_COMPACT_MODE` / `SERVER_CTX_SIZE` / 模型 id 去凑。
  */
-import { existsSync, mkdtempSync, rmSync } from "fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
 import { tmpdir } from "os";
 import path from "path";
+
+import { sseChunk, startStubLlm, textChunks, toolCallChunks } from "../src/bun/test-stub-llm";
 
 const dataDir = mkdtempSync(path.join(tmpdir(), "omni-resilience-"));
 process.env.OMNI_DATA_DIR = dataDir;
@@ -37,60 +48,6 @@ const workspace = mkdtempSync(path.join(tmpdir(), "omni-resilience-ws-"));
 // ---------------------------------------------------------------------------
 // 脚本化桩服务
 // ---------------------------------------------------------------------------
-function sseChunk(
-  model: string,
-  delta: Record<string, unknown>,
-  finish: string | null = null,
-): string {
-  return `data: ${JSON.stringify({
-    id: "chatcmpl-stub",
-    object: "chat.completion.chunk",
-    created: Math.floor(Date.now() / 1000),
-    model,
-    choices: [{ index: 0, delta, finish_reason: finish }],
-  })}\n\n`;
-}
-
-function toolCallChunks(model: string, name: string, args: unknown): string[] {
-  const json = JSON.stringify(args);
-  const chunks = [
-    sseChunk(model, {
-      role: "assistant",
-      content: "",
-      tool_calls: [
-        { index: 0, id: `call_${name}`, type: "function", function: { name, arguments: "" } },
-      ],
-    }),
-  ];
-  for (let i = 0; i < json.length; i += 24) {
-    chunks.push(
-      sseChunk(model, {
-        tool_calls: [{ index: 0, function: { arguments: json.slice(i, i + 24) } }],
-      }),
-    );
-  }
-  chunks.push(sseChunk(model, {}, "tool_calls"));
-  return chunks;
-}
-
-function textChunks(model: string, text: string): string[] {
-  const chunks = [sseChunk(model, { role: "assistant", content: "" })];
-  for (let i = 0; i < text.length; i += 8) {
-    chunks.push(sseChunk(model, { content: text.slice(i, i + 8) }));
-  }
-  chunks.push(
-    `data: ${JSON.stringify({
-      id: "chatcmpl-stub",
-      object: "chat.completion.chunk",
-      created: Math.floor(Date.now() / 1000),
-      model,
-      choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-      usage: { prompt_tokens: 200, completion_tokens: 60, total_tokens: 260 },
-    })}\n\n`,
-  );
-  return chunks;
-}
-
 /**
  * 被掐断的流：有正文增量、但既没有 `finish_reason` 也没有 `[DONE]`。
  * 真实世界的样子是网关 / 服务端中途断开 —— pi-ai 会把它变成
@@ -145,6 +102,11 @@ const seen = {
    * 任务描述、时间提醒、召回记忆、附件路径会整段翻倍。
    */
   firstRequestTaskRepeats: 0,
+  /**
+   * 两次 `head -c` 各自读取的字节数（断言用）：桩在发出 head 工具调用时填写，
+   * 汇报与断言都从这个数说话，而不是靠「命令看起来长」。
+   */
+  headLines: [] as number[],
 };
 
 /**
@@ -179,6 +141,19 @@ function protocolViolation(
 }
 
 /**
+ * 生成「带编号的行」形式的超长命令输出（`seq 1 30000` / `grep -n` 的样子）。
+ * 每条 = 5 位数字 + `|` + 50 个字母 = 60 字符 / 15 token（英文口径，`shared/token-estimate.ts`），
+ * 所以 n 行 ≈ 60n 字符 / 15n token。取 n = 3500 与 2000 两条，各自 ≈ 210k / 120k 字符，
+ * 被 `toolOutputCharLimit`（8k 窗口 → 6144 字符）截断后，每条 ≈ 6000 字符 / 1500 token；
+ * 三截 bash + read_file + 子智能体 + 写文件，累积远超预算（8k 窗口 × 60% ≈ 4915 token）。
+ */
+function longLines(n: number): string {
+  let s = "";
+  for (let i = 1; i <= n; i++) s += `${String(i).padStart(5, "0")}|${"abcdefg".repeat(8)}\n`;
+  return s;
+}
+
+/**
  * 内存里的 AgentMessage 换写成线上协议形状，好让同一个校验器也能检查**压缩结果**。
  *
  * 两种形状不一样是刻意的（`toolResult` vs `tool`、内容块 vs `tool_calls` 字段），
@@ -204,23 +179,9 @@ function toWireShape(
   });
 }
 
-const stub = Bun.serve({
-  port: 0,
-  async fetch(request) {
-    const url = new URL(request.url);
-    if (url.pathname.endsWith("/models")) {
-      return Response.json({
-        object: "list",
-        data: [{ id: "stub-model", object: "model", created: Date.now(), owned_by: "stub" }],
-      });
-    }
-    const body = (await request.json()) as {
-      model?: string;
-      messages?: { role: string; content?: unknown; tool_calls?: unknown }[];
-      tools?: { function?: { name?: string } }[];
-    };
-    const model = body.model ?? "stub-model";
-    const messages = body.messages ?? [];
+const stub = startStubLlm({
+  respond: async (request) => {
+    const { model, messages } = request;
     const system = messages.find((message) => message.role === "system")?.content;
     const systemText = typeof system === "string" ? system : "";
     const lastUser = messages.filter((message) => message.role === "user").pop()?.content;
@@ -364,8 +325,33 @@ const stub = Bun.serve({
     }
 
     if (seen.emittedToolCalls === 2) {
-      // 7. 派一个只读子智能体（它自己会遇到空回合并被提醒）。
+      // 7. 再跑一条输出巨大的命令（head 读日志文件 a，210k 字符）：单条顶不穿窗口（上限是窗口的 25%），
+      //    但与前面的 seq / read_file 叠加后就把预算顶穿了（第 7 节压缩断言依赖这条累积）。
+      //    用 `head -c`（普通命令，走 stub 的 chat/completions 一个端点），不额外请求 stub。
       seen.emittedToolCalls = 3;
+      seen.headLines.push(210000);
+      return stream(
+        toolCallChunks(model, "bash", {
+          command: "head -c 210000 logs/a.log",
+        }),
+      );
+    }
+
+    if (seen.emittedToolCalls === 3) {
+      // 8. 再来一条大输出（不同的命令与不同的文件，120k 字符）：
+      //    累积继续增长，这一步之后的下一次请求会把预算顶穿、触发压缩。
+      seen.emittedToolCalls = 4;
+      seen.headLines.push(120000);
+      return stream(
+        toolCallChunks(model, "bash", {
+          command: "head -c 120000 logs/b.log",
+        }),
+      );
+    }
+
+    if (seen.emittedToolCalls === 4) {
+      // 9. 派一个只读子智能体（它自己会遇到空回合并被提醒）。
+      seen.emittedToolCalls = 5;
       return stream(
         toolCallChunks(model, "task", {
           description: "确认报告该写在哪",
@@ -375,9 +361,9 @@ const stub = Bun.serve({
       );
     }
 
-    if (seen.emittedToolCalls === 3) {
-      // 8. 把报告写进工作区（产出物面板据此登记）。
-      seen.emittedToolCalls = 4;
+    if (seen.emittedToolCalls === 5) {
+      // 10. 把报告写进工作区（产出物面板据此登记）。
+      seen.emittedToolCalls = 6;
       return stream(
         toolCallChunks(model, "write_file", {
           path: "reports/log-report.md",
@@ -387,7 +373,7 @@ const stub = Bun.serve({
       );
     }
 
-    // 9. 收尾。
+    // 11. 收尾。
     return stream(
       textChunks(
         model,
@@ -398,6 +384,12 @@ const stub = Bun.serve({
 });
 
 const base = `http://127.0.0.1:${stub.port}/v1`;
+
+// head 的数据源（写盘，`head -c` 是普通命令）：3500 / 2000 行 × 60 字符
+// ≈ 210k / 120k 字节 —— 远超一条工具结果的上限（8k 窗口下 6144 字符）。
+mkdirSync(path.join(workspace, "logs"), { recursive: true });
+writeFileSync(path.join(workspace, "logs", "a.log"), longLines(3500));
+writeFileSync(path.join(workspace, "logs", "b.log"), longLines(2000));
 
 // ---------------------------------------------------------------------------
 // 准备设置并跑这一条任务
@@ -413,13 +405,16 @@ updateSettings({
   VLLM_API_BASE: base,
   VLLM_API_KEY: "EMPTY",
   // 云端模式下窗口跟着模型 id 走（chat-context.ts）：`-8k` 后缀把窗口钉在 8192，
-  // 第 7 节"大输出把 8k 窗口顶穿"的压缩断言依赖这个数字。
+  // 第 7 节“多条大输出累积把 8k 窗口顶穿”的压缩断言依赖这个数字。
+  // （单条顶不穿：一条工具结果的上限是窗口的 25%，随窗口等比缩放，调小窗口没用。）
   VLLM_MODEL_NAME: "stub-model-8k",
   CHAT_MODEL: "stub-model-8k",
   SERVER_CTX_SIZE: "8192",
   /** auto：这条任务不该被授权弹窗打断（授权链路由 live-check 专门验）。 */
   AGENT_APPROVAL_MODE: "auto",
-  AGENT_MAX_STEPS: "12",
+  // 步数上限提到 20：压缩场景需要“多条大输出累积”（3 条 bash + read_file + task + write_file）
+  // + 503/空回合/重发的重试余量，12 步不够。
+  AGENT_MAX_STEPS: "20",
   MEMORY_ENABLED: "0",
   AGENT_RETRY_MAX: "2",
   // 压缩保持默认的 summary：这条任务本来就会把窗口顶穿，摘要路径要被真的走到。
@@ -538,9 +533,9 @@ check(
 // 3. 重发不重复副作用：已经跑成功的工具不会因为重发再跑一遍
 // ---------------------------------------------------------------------------
 check(
-  "重发没有重跑已经成功的工具（bash 只执行了 1 次）",
-  toolStarts("bash") === 1,
-  `bash tool_start = ${toolStarts("bash")}`,
+  "重发没有重跑已经成功的工具（seq 命令只执行了 1 次）",
+  toolStarts("bash") === 3 && seen.headLines.length === 2,
+  `bash tool_start = ${toolStarts("bash")}（期望 3：seq × 1 + head × 2），headLines = ${seen.headLines.length}（期望 2）`,
 );
 check(
   "重发是「接着发」而不是重开一轮：请求里仍然带着刚跑完的那条工具结果",
@@ -625,7 +620,7 @@ check(
 );
 
 // ---------------------------------------------------------------------------
-// 7. 上下文压缩确实在中途发生过（大输出把 8k 窗口顶穿）
+// 7. 上下文压缩确实在中途发生过（多条大输出累积把 8k 窗口顶穿）
 // ---------------------------------------------------------------------------
 check(
   "任务中途触发过上下文压缩（摘要或裁剪）",
@@ -714,7 +709,7 @@ console.log(`\n最终回答：${finalText.slice(0, 200)}\n`);
 // ---------------------------------------------------------------------------
 Agent.deleteConversationEvents(conversation.id);
 Agent.stopAgentRun(conversation.id);
-stub.stop(true);
+stub.stop();
 rmSync(dataDir, { recursive: true, force: true });
 rmSync(workspace, { recursive: true, force: true });
 

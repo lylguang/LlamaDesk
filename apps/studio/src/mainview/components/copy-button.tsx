@@ -18,6 +18,7 @@ export function CopyButton({
   size = "sm",
   iconOnly = false,
   title,
+  tooltip,
   className,
 }: {
   text: string;
@@ -27,9 +28,11 @@ export function CopyButton({
   copiedLabel?: string;
   variant?: React.ComponentProps<typeof Button>["variant"];
   size?: React.ComponentProps<typeof Button>["size"];
-  /** 只显示图标（用于代码行 / 卡片角标等紧凑位置），此时靠 title 提供提示。 */
+  /** 只显示图标（用于代码行 / 卡片角标等紧凑位置），此时靠 title / tooltip 提供提示。 */
   iconOnly?: boolean;
   title?: string;
+  /** 悬浮提示（iconOnly 时给出按钮的作用）。 */
+  tooltip?: string;
   className?: string;
 }) {
   const t = useT();
@@ -41,6 +44,7 @@ export function CopyButton({
       size={size}
       disabled={!text}
       title={title}
+      tooltip={tooltip}
       className={className}
       onClick={() => {
         void navigator.clipboard?.writeText(text).catch(() => undefined);

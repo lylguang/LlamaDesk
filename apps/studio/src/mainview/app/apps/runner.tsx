@@ -20,6 +20,7 @@ import {
   NotebookPenIcon,
   PenLineIcon,
   RotateCwIcon,
+  ScanSearchIcon,
   ScissorsIcon,
   SparklesIcon,
   StickerIcon,
@@ -55,6 +56,7 @@ const ICONS: Record<MiniAppIcon, React.ReactNode> = {
   grid: <Grid3x3Icon className="size-4" />,
   notebook: <NotebookPenIcon className="size-4" />,
   sticker: <StickerIcon className="size-4" />,
+  scanSearch: <ScanSearchIcon className="size-4" />,
 };
 
 /** 能力缺口的文案：`图像修图（未配置）`。 */
@@ -79,6 +81,9 @@ const CAPABILITY_SETTINGS_TAB: Record<MiniAppCapability, { tab: string; sub?: st
   // 本地抠图的权重在小应用里就能下，本来不该走到"去设置"这一步；真要走也送它去
   // 模型云服务（那里能配云端修图当替代路径）。类型要求每个 key 都在，别删。
   bgRemove: CLOUD_SETTINGS,
+  // 本地超分与抠图同路：权重在小应用里就能下，本来不该走到"去设置"；真要走也送
+  // 它去模型云服务当替代路径。类型要求每个 key 都在，别删。
+  upscale: CLOUD_SETTINGS,
   // 纯本机能力（马赛克）永远就绪，不会出现在 missing 里；留着 key 只为满足类型。
   local: CLOUD_SETTINGS,
 };

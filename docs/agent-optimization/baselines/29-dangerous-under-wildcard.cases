@@ -1,0 +1,58 @@
+apps/studio/src/bun/agent-tools.bash.test.ts::describe|bash 工具
+apps/studio/src/bun/agent-tools.bash.test.ts::test|resolveCommandTimeout：参数夹在 [1000, 600000]，非法值退回 ctx / 默认
+apps/studio/src/bun/agent-tools.bash.test.ts::test|传了 timeout_ms 就按它来，不再写死 120 秒
+apps/studio/src/bun/agent-tools.bash.test.ts::test|后台进程占着 stdout 时也立刻返回，不等管道 EOF
+apps/studio/src/bun/agent-tools.bash.test.ts::test|普通命令照常返回输出与退出码
+apps/studio/src/bun/agent-tools.bash.test.ts::test|用户点停止：命令被终止并在结果里说明
+apps/studio/src/bun/agent-tools.bash.test.ts::test|超时终止整条进程组：后台孙进程不会变成孤儿
+apps/studio/src/bun/permissions.test.ts::describe|evaluate
+apps/studio/src/bun/permissions.test.ts::describe|isDangerousCommand
+apps/studio/src/bun/permissions.test.ts::describe|matchesPermissionPattern
+apps/studio/src/bun/permissions.test.ts::describe|parseRuleList
+apps/studio/src/bun/permissions.test.ts::describe|permissionRequestForTool
+apps/studio/src/bun/permissions.test.ts::describe|winningRule
+apps/studio/src/bun/permissions.test.ts::describe|命令归一化
+apps/studio/src/bun/permissions.test.ts::describe|工作区外的读写分权（写 = external_write，读 = external_directory）
+apps/studio/src/bun/permissions.test.ts::describe|权限名清单
+apps/studio/src/bun/permissions.test.ts::describe|沙箱升级权限
+apps/studio/src/bun/permissions.test.ts::describe|路径工具
+apps/studio/src/bun/permissions.test.ts::test|
+apps/studio/src/bun/permissions.test.ts::test|bash 用命令原文作为模式
+apps/studio/src/bun/permissions.test.ts::test|humanPermissionLabel 有中文说明，未知权限名原样返回
+apps/studio/src/bun/permissions.test.ts::test|isDangerousCommand 也看归一化形式
+apps/studio/src/bun/permissions.test.ts::test|isInsideWorkspace / displayPath
+apps/studio/src/bun/permissions.test.ts::test|manual 全部询问，auto 全部放行，strict 全部拒绝
+apps/studio/src/bun/permissions.test.ts::test|smart / manual 下询问；auto / strict 下默认拒绝
+apps/studio/src/bun/permissions.test.ts::test|smart 默认放行普通命令，拦截危险命令
+apps/studio/src/bun/permissions.test.ts::test|不碰工作区的内置工具不该被当成外部工具（goal / write_plan / think）
+apps/studio/src/bun/permissions.test.ts::test|中文标签与权限摘要探针补上 external_write
+apps/studio/src/bun/permissions.test.ts::test|会话规则可以覆盖默认策略（用户点了「本会话总是」）
+apps/studio/src/bun/permissions.test.ts::test|写工作区外的文件 → external_write（write_file 与 edit_file 各断言一次）
+apps/studio/src/bun/permissions.test.ts::test|只读工具与待办 / 提问类工具完全不参与授权
+apps/studio/src/bun/permissions.test.ts::test|四个档位都有 external_write 默认条目，动作与同档 external_directory 一致
+apps/studio/src/bun/permissions.test.ts::test|子任务派发带上子智能体类型，便于「总是允许 explore」
+apps/studio/src/bun/permissions.test.ts::test|工作区内写入是 edit（相对路径），工作区外是 external_directory
+apps/studio/src/bun/permissions.test.ts::test|工作区内读取不需要授权，工作区外需要
+apps/studio/src/bun/permissions.test.ts::test|工作区外的 apply_patch → external_write
+apps/studio/src/bun/permissions.test.ts::test|工具调用翻译：带上命令原文与沙箱输出，模式用归一化后的命令
+apps/studio/src/bun/permissions.test.ts::test|工具输出的转存目录不算「工作区之外」：读回超限输出不该再弹一次授权
+apps/studio/src/bun/permissions.test.ts::test|已存的 external_directory 允许规则不再放行写（本次修复的缺陷）
+apps/studio/src/bun/permissions.test.ts::test|折叠空白、剥引号与转义，但保留引号内的空白
+apps/studio/src/bun/permissions.test.ts::test|普通命令不会被归一化误伤
+apps/studio/src/bun/permissions.test.ts::test|普通命令不误报
+apps/studio/src/bun/permissions.test.ts::test|最后命中者生效
+apps/studio/src/bun/permissions.test.ts::test|未命中返回 null
+apps/studio/src/bun/permissions.test.ts::test|未知工具（MCP 等）按 mcp 权限处理，模式是工具名
+apps/studio/src/bun/permissions.test.ts::test|未知权限名默认 ask（不默认放行）
+apps/studio/src/bun/permissions.test.ts::test|「本会话总是」存的是归一化命令，之后的等价写法同样命中
+apps/studio/src/bun/permissions.test.ts::test|正则元字符按字面量处理
+apps/studio/src/bun/permissions.test.ts::test|生图 / 生视频的参考图：工作区外的路径要授权，素材库引用与区内文件照旧
+apps/studio/src/bun/permissions.test.ts::test|生效权限摘要里能一眼看到它是询问还是拒绝
+apps/studio/src/bun/permissions.test.ts::test|用户可以显式放行（设置页加一条规则就够）
+apps/studio/src/bun/permissions.test.ts::test|等价写法不再绕过危险命令规则（smart 模式）
+apps/studio/src/bun/permissions.test.ts::test|设置页下拉包含联网搜索与重复调用保护（曾漏掉）
+apps/studio/src/bun/permissions.test.ts::test|识别破坏性命令
+apps/studio/src/bun/permissions.test.ts::test|读工作区外的文件仍是 external_directory（read_file / glob / grep）
+apps/studio/src/bun/permissions.test.ts::test|路径里的分隔符统一按 / 处理
+apps/studio/src/bun/permissions.test.ts::test|过滤非法条目
+apps/studio/src/bun/permissions.test.ts::test|非 JSON 内容返回空数组

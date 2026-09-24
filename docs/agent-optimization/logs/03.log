@@ -1,0 +1,83 @@
+Warning: No project session found with id 'omni-agent-03'; creating a new session with that id.
+Done. The task is complete — here is the delivery report in the required format:
+
+## 交付汇报
+
+### 1 改了什么
+
+- `apps/studio/src/bun/agent.ts` — `drainQueuedMessages`（原第 3191 行）：把单行的 `runAgentTurn({ conversationId, content: next!, workspace })` 调用展开，补上 `insertUserMessage: false`，并在上方加一行注释说明这条消息入队时（`followUpAgentMessage`）已经落库、出队时再插就会双写。其余一律未动（入队插库、`pendingMessages` 出队、`if (!result.ok) return;`、steer 分支、非运行的直接跑分支）。
+- `apps/studio/src/bun/agent-queue.test.ts` — 新建。照 `agent-turn.test.ts` 的写法：`startStubLlm` 起桩 + `updateSettings` + `Chat.createConversation` + `Agent.runAgentTurn`。桩第一轮请求前等一个它自己控制的闸门（不开固定 sleep），闸门打开前调 `followUpAgentMessage`（等 `isAgentRunning` 置位后才调，确保走 queue 分支，断言 `queued: true`），随后第一轮结束、排队轮 fire-and-forget 跑起来。断言两条：「第二条」用户消息库里恰有一条；助手回复恰有两条且措辞不同（第一轮答复 vs 排队轮答复），证明第二轮真的发过请求。
+
+### 2 先红后绿的证据
+
+红（源码未改，`bun test --parallel apps/studio/src/bun/agent-queue.test.ts`）：
+
+```
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+apps/studio/src/bun/agent-queue.test.ts:
+125 |     expect(result.ok).toBe(true);
+126 | 
+127 |     const history = Chat.getHistory(conversation.id);
+128 |     const secondUser = history.filter((m) => m.role === "user" && m.content === "第二条");
+129 |     // 缺陷：入队插一次 + 出队跑回合又插一次 = 两条一模一样的用户气泡。
+130 |     expect(secondUser.length).toBe(1);
+                                    ^
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 2
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-queue.test.ts:130:31)
+(fail) 运行中排队的用户消息 > 库里只有一条，且排队那一轮真的跑起来了 [80.96ms]
+
+ 0 pass
+ 1 fail
+ 5 expect() calls
+Ran 1 test across 1 file. [452.00ms]
+```
+
+绿（源码改完后，同一命令）：
+
+```
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+ 1 pass
+ 0 fail
+ 8 expect() calls
+Ran 1 test across 1 file. [446.00ms]
+```
+
+另复跑 5 次均 `1 pass / 0 fail`，时序稳定。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-queue.test.ts`：0（新建）→ 1
+- `apps/studio/src/bun/agent-turn.test.ts`、`apps/studio/src/bun/agent-history.test.ts`：未编辑
+
+### 4 验收门输出
+
+```
+GATE: id=03-queued-message-double-insert mode=self head=ec9f637
+GATE: out-of-bounds none
+GATE: size source-lines=8 limit=8
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=31 now=33)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (26 pass, 4s)
+GATE: RESULT PASS id=03-queued-message-double-insert
+```
+
+### 5 逐项自检
+
+- 第 3191 行补上 `insertUserMessage: false` 并加注释说明理由 — **完成**（注释按第 3270 行那段口径，说明入队已落库、再插即双写）。
+- 入队那次插库仍然保留 — **完成**（`followUpAgentMessage` 未动）。
+- `pendingMessages` 出队逻辑、`if (!result.ok) return;`、`steer` 那一支都没动 — **完成**（`git diff` 只含 drain 调用处 7 增 1 删）。
+- 用例证明排队那一轮真的跑了（非假绿）— **完成**（断言两条措辞不同的助手回复，第二条为桩对第二次请求的应答；若排队轮没发请求，该断言与等待都会失败）。
+- 还原 `agent.ts` 后第 1 条用例会变红 — **完成**（已实测：还原后 `Expected: 1 / Received: 2`，fail）。
+- 源码改动不超过 8 行 — **完成**（7 增 + 1 删 = 8）。
+
+### 6 我拿不准的地方
+
+一处与任务说明的字面不符：说明建议「`runAgentTurn(...)` 拿到句柄后再调 `followUpAgentMessage`，最后一起 await」，但实测 `runAgentTurn` 是在**起会话的 await 之后**才登记运行态（`setAgentRunning` 在 `getOrCreateSession` 之后），fire-and-forget 后立刻调 `followUpAgentMessage` 会看到 `isAgentRunning === false`，从而走「没在跑、直接跑一轮」分支而不是 queue 分支（跟进消息不排队、也不经 drain）。因此测试里在调 `followUpAgentMessage` 之前多等了一步 `isAgentRunning === true`（10ms 一拍的轮询，不是固定 sleep；这是桩可控节奏之外的唯一等待点，由被测系统的状态翻转驱动，上限 10s 超时抛错）。其余节奏全部由桩闸门控制，无固定 sleep 赌时序。若调度方认为这属于偏离，请告知。

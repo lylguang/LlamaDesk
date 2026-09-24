@@ -412,7 +412,7 @@ function useMessageActions({
 
   // 「撤销本轮」要先预览再执行：确认弹窗在这里构造，由调用方渲染一次（操作条里）。
   const revertDialog =
-    isAssistant && snapshot ? (
+    isAssistant && snapshot && revertOpen ? (
       <RevertTurnDialog
         open={revertOpen}
         onOpenChange={setRevertOpen}
@@ -427,7 +427,7 @@ function useMessageActions({
     ) : null;
 
   // 「回退对话到这里」：同样先确认再执行（它删的是历史，撤销不回来）。
-  const conversationRevertDialog = (
+  const conversationRevertDialog = conversationRevertOpen ? (
     <ConversationRevertDialog
       open={conversationRevertOpen}
       onOpenChange={setConversationRevertOpen}
@@ -440,7 +440,7 @@ function useMessageActions({
         invalidate();
       }}
     />
-  );
+  ) : null;
 
   return { actions, revertDialog, conversationRevertDialog };
 }

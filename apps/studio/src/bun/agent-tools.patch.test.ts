@@ -192,7 +192,7 @@ describe("权限翻译", () => {
     expect(request?.detail["文件"]).toContain("src/b.ts");
   });
 
-  test("补丁里只要有一个文件在工作区外，就按 external_directory 询问", () => {
+  test("补丁里只要有一个文件在工作区外，就按 external_write 询问（写独立一档，不再是 external_directory）", () => {
     const request = permissionRequestForTool({
       toolName: "apply_patch",
       workspace,
@@ -204,7 +204,7 @@ describe("权限翻译", () => {
         ),
       },
     });
-    expect(request?.permission).toBe("external_directory");
+    expect(request?.permission).toBe("external_write");
     expect(request?.detail["文件"]).toContain("/tmp/evil.sh");
   });
 

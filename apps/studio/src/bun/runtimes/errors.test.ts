@@ -70,3 +70,17 @@ test("extractStartupError 的既有行为不变（它只在进程退出 / 超时
     "unknown model architecture",
   );
 });
+
+test("llama.cpp 读不到 GGUF 魔数时，报根因那一行而不是收尾的「模型加载错误」", () => {
+  // 实测日志（把 GGUF 仓库目录当成 -m 传进去）：根因在前，收尾句在最后。
+  const log = [
+    "0.00.119.883 I srv    load_model: loading model '/models/Qwopus3.5-4B-Coder-MTP-GGUF'",
+    "0.00.120.730 E gguf_init_from_reader: failed to read magic",
+    "0.00.121.070 E llama_model_load: error loading model: llama_model_loader: failed to load model from /models/Qwopus3.5-4B-Coder-MTP-GGUF",
+    "0.00.121.142 E llama_model_load_from_file_impl: failed to load model",
+    "0.00.145.643 E srv  llama_server: exiting due to model loading error",
+  ].join("\n");
+  const message = extractStartupError(log, "fallback");
+  expect(message).toContain("failed to read magic");
+  expect(message).not.toContain("exiting due to model loading error");
+});

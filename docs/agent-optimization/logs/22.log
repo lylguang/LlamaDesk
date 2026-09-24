@@ -1,0 +1,88 @@
+Warning: No project session found with id 'omni-agent-22'; creating a new session with that id.
+All done. Source diff is 9 code insertions + 2 deletions = 11 lines total (under the 15-line limit). The gate passes with `RESULT PASS`.
+
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/mainview/app/agent/conversation.tsx`**（只改了「追平」的 `useEffect`，约 207–234 行）：
+- 追平的 `catchUp` 内部，`afterId` 的算法从 `known.length > 0 ? known[last].id : 0` 改成：`known` 为空时**直接 `return` 不发请求**，非空时 `afterId = known[known.length - 1]!.id`。
+- effect 依赖数组 `[running, conversationId]` → 加上 `eventsQuery.data`（首次全量落地后 effect 才会重跑，那时 store 才有已知事件，追平才开始）。
+- 更新了那段注释，说明「为什么 store 空时不追平」。
+
+关键几行：
+```ts
+const catchUp = async () => {
+  const known = useAgentStore.getState().events;
+  if (known.length === 0) return;                       // 新增：空 store 不发全量
+  const afterId = known[known.length - 1]!.id;         // 原：known.length>0 ? ... : 0
+  ...
+};
+...
+}, [running, conversationId, eventsQuery.data]);       // 加 eventsQuery.data
+```
+
+**`apps/studio/src/mainview/app/agent/conversation.test.tsx`**（新建）：脚手架照抄 `composer-slash.test.tsx` 第 1–101 行（happy-dom 全局注入 + 记录调用的 Proxy + afterAll/afterEach 清理）。`listAgentEvents` 的 mock：不带 `afterId` 返回两条真实事件（id=1/2），带 `afterId` 返回空。两条用例：①打开会话后全量请求只发一次；②全量落地后追平发出带 `afterId=2` 的增量请求。
+
+### 2 先红后绿的证据
+
+红（源码是 HEAD 原版，两条都失败）：
+```
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 2
+
+      at <anonymous> (.../conversation.test.tsx:215:38)
+(fail) 打开会话：不带 afterId 的全量请求只发生一次（不是首次查询 + 追平各一遍） [52.77ms]
+error: expect(received).toBeGreaterThan(expected)
+
+Expected: > 0
+Received: 0
+
+      at <anonymous> (.../conversation.test.tsx:226:45)
+(fail) 首次全量落地之后，追平仍然会发生（带 afterId 的增量请求） [29.25ms]
+
+ 0 pass
+ 2 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [317.00ms]
+```
+
+绿（源码改完后，两条都通过）：
+```
+ 2 pass
+ 0 fail
+ 3 expect() calls
+Ran 2 tests across 1 file. [317.00ms]
+```
+
+### 3 用例数量
+- `conversation.test.tsx`：新建，编辑前 0 个 → 编辑后 **2** 个。
+- 另两个既有测试文件（`composer-slash.test.tsx` / `message.test.tsx`）本次未编辑，数量不变（合计 27，门基线一致）。
+
+### 4 验收门输出
+```
+GATE: id=22-events-double-load mode=self head=cbafc6a
+GATE: out-of-bounds none
+GATE: size source-lines=11 limit=15
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=27 now=29)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (29 pass, 3s)
+GATE: RESULT PASS id=22-events-double-load
+```
+
+### 5 逐项自检
+- **首次全量落地之前不发追平请求** — 完成。`catchUp` 在 store 为空时直接 return，红/绿证据显示原代码发 2 次全量、改后只发 1 次。
+- **落地之后追平照常工作（含 4 秒轮询那条路）** — 完成。用例 2 断言全量落地后发出带 `afterId=2` 的增量请求；4 秒轮询路径由 `running=true` 分支保留，未改动（`if (!running) ... else setInterval 4000`）。注：用例 2 直接验证的是「落地后追平发增量」，没有专门跑满 4 秒轮询断言第二次 tick（轮询分支与一次性分支共用同一个 `catchUp`，逻辑等价；详见第 6 节）。
+- **`afterId` 的算法没动** — 完成。非空时仍是「取最后一条事件的 id」，只是把「空时算 0」的分支换成了「空时不发」。任务说明本身要求挡住「空 store 先发全量」，这个分支调整是达成该目标所必需的最小改动。
+- **`eventsQuery` / `setEvents` / `mergeEvents` / 间隔 / 清理逻辑都没动** — 完成。均保持原样。
+- **新测试文件能跑，且不依赖真实网络** — 完成。`@lib/rpc` 被 `mock.module` 替换成记录调用的 Proxy，无网络。
+- **把 `conversation.tsx` 改动还原后第 1 条用例会变红（自己先试一遍）** — 完成。已实际验证：还原源码后两条用例都红（第 1 条 Expected 1 Received 2；第 2 条 Expected >0 Received 0）。
+- **源码改动不超过 15 行** — 完成。`git diff --numstat` 报 11 行（9 增 2 删），门里 `size source-lines=11 limit=15`。
+
+### 6 我拿不准的地方
+- **用例 2 没跑满 4 秒轮询去断言「第二次 tick 也发增量」**，只验证了「全量落地后追平发了一次增量」。原因是 happy-dom + 真定时器下精确卡 4 秒边界较脆（轮询 tick 落在 4000ms，act/setTimeout 边界易抖动），而一次性分支与 4 秒轮询分支调用的是**同一个** `catchUp`，所以「落地后追平发增量」这条语义对两条路径都成立。如果任务方希望用例 2 显式覆盖「轮询中某次 tick」，我可以在 mock 里注入一个可控定时器或用 `setTimeout` 拉到 >4s 来补一条，但那会拉长测试时长（门有 60s 慢用例守卫）。请指示是否要补。
+- **`afterId` 那一行的写法**：任务说「`afterId` 的算法不要动」，但严格不改它（保留 `: 0`）就无法挡住「空 store 先发全量」——这正是缺陷本身。我把它改成「空时直接 return」，等价地保留了「有事件时取最后一条 id」的算法，只是不再在空时产生 `afterId=0` 的请求。若任务方对「算法」有别的字面理解，请指正。

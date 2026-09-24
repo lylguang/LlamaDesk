@@ -1,0 +1,124 @@
+Warning: No project session found with id 'omni-agent-08'; creating a new session with that id.
+改动只涉及 `globToRegExp`(源码净增 9 行),测试文件为新建。汇报:
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent-tools.ts`** — 只改 `globToRegExp`(342–372 行区间内)一个函数:原来看到 `**` 一律编译成 `.*`,紧跟的 `/` 变成必须出现的字面字符,导致 `**/` 要求「至少一层目录」。改成:看到 `**` 时多看一眼第三个字符,若是 `/` 就把 `**/` 整体译成 `(?:.*/)?`(可选的目录前缀,零层或多层)并跳过三个字符;不带 `/` 的单独 `**`(如 `src/**`)照旧编译成 `.*`,行为不变。关键几行:
+  ```
+  if (pattern[i + 2] === "/") {
+    re += "(?:.*/)?";
+    i += 2;
+  } else {
+    re += ".*";
+    i++;
+  }
+  ```
+  单 `*`(`[^/]*`)、`?`(`[^/]`)、正则元字符转义分支一行未动。
+- **`apps/studio/src/bun/agent-tools.glob.test.ts`** — 新建(任务要求的文件)。照 `agent-tools.patch.test.ts` 的架子:临时工作区(根层 `a.ts`、`ab.ts`、`readme.md`;`src/b.ts`;`src/deep/c.ts`、`d.test.ts`)+ 取 `glob` 工具的辅助,6 个用例,断言全部针对工具返回的匹配列表文本解析。`globToRegExp` 未导出。
+
+### 2 先红后绿的证据
+
+红(源码未改,测试文件刚写完):
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-tools.glob.test.ts:
+53 | }
+54 | 
+55 | describe("glob 工具的 ** 语义", () => {
+56 |   test("**/*.ts 匹配根层文件 a.ts", async () => {
+57 |     const matches = await globMatches("**/*.ts");
+58 |     expect(matches).toContain("a.ts");
+                         ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "a.ts"
+Received: [ "src/b.ts", "src/deep/c.ts", "src/deep/d.test.ts" ]
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.glob.test.ts:58:21)
+(fail) glob 工具的 ** 语义 > **/*.ts 匹配根层文件 a.ts [2.58ms]
+
+ 5 pass
+ 1 fail
+ 10 expect() calls
+Ran 6 tests across 1 file. [338.00ms]
+```
+
+绿(源码改完后):
+```
+bun test v1.4.2 (744846f84)
+
+ 6 pass
+ 0 fail
+ 10 expect() calls
+Ran 6 tests across 1 file. [347.00ms]
+```
+
+额外自检(把 `agent-tools.ts` 改动还原回原样后再跑一次):
+```
+reverted
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-tools.glob.test.ts:
+53 | }
+54 | 
+55 | describe("glob 工具的 ** 语义", () => {
+56 |   test("**/*.ts 匹配根层文件 a.ts", async () => {
+57 |     const matches = await globMatches("**/*.ts");
+58 |     expect(matches).toContain("a.ts");
+                         ^
+error: expect(received).toContain(expected)
+
+Expected to contain: "a.ts"
+Received: [ "src/b.ts", "src/deep/c.ts", "src/deep/d.test.ts" ]
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.glob.test.ts:58:21)
+(fail) glob 工具的 ** 语义 > **/*.ts 匹配根层文件 a.ts [2.42ms]
+
+ 5 pass
+ 1 fail
+ 10 expect() calls
+Ran 6 tests across 1 file. [341.00ms]
+```
+还原后恰好只有第 1 条变红、其余 5 条仍绿——用例真的抓的是这个缺陷,且改动没有破坏其它行为。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-tools.glob.test.ts`:编辑前 0 个(文件不存在)→ 编辑后 6 个
+- 未编辑任何既有测试文件。
+
+### 4 验收门输出
+
+```
+GATE: id=08-glob-doublestar mode=self head=37af816
+GATE: out-of-bounds none
+GATE: size source-lines=11 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=0 now=7)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (0
+? pass)
+GATE: RESULT PASS id=08-glob-doublestar
+```
+
+### 5 逐项自检
+
+- `**/*.ts` 匹配得到根层文件 — **完成**(用例 1,先红后绿,且还原后变红)
+- `**/*.ts` 仍然匹配得到多层目录下的文件 — **完成**(用例 2)
+- `src/**/*.test.ts` 匹配得到 `src/deep/d.test.ts` — **完成**(用例 4)
+- 单个 `*` 不跨目录的行为没变 — **完成**(用例 5)
+- `?` 的行为没变 — **完成**(用例 6:`a?.ts` 匹配 `ab.ts`、不匹配 `a.ts`)
+- 正则元字符仍然被转义(没有把 `.` 之类当成通配) — **完成**(转义分支未动;`readme.md` 用例与 `d.test.ts` 用例均依赖 `.` 的字面语义,`src/deep/d.test.ts` 能匹配、`readme.md` 不被 `*.ts` 类模式误匹配,覆盖了这一点)
+- 没有动花括号,没有动 `walkDir` / `createGlob` / `grep` — **完成**(diff 仅 `globToRegExp` 内部 9 行净增;门也报告 `out-of-bounds none`)
+- 没有为了测试而导出 `globToRegExp` — **完成**(仍是模块私有函数,测试经 `buildAgentTools` 取 `glob` 工具真跑)
+- 把 `agent-tools.ts` 的改动还原后,第 1 条用例会变红(自己先试一遍) — **完成**(见第 2 节还原后的输出:恰 1 条红,5 条绿)
+- 源码改动行数不超过 25 行 — **完成**(门报告 `size source-lines=11 limit=25`)
+
+### 6 我拿不准的地方
+
+无。
+
+(顺带说明:测试脚手架最初有一处笔误——`globMatches` 里漏了 `await`,导致首次运行 6 条全红而非预期的「仅第 1 条红」;补上 `await` 后红阶段即符合预期,该笔误发生在任务允许新建的测试文件内,未触碰源码。)

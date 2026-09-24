@@ -134,6 +134,15 @@ export const MINIAPP_RUNTIME_SCRIPT = `
       download: function (model) { return call('bg.download', { model: model }); },
       run: function (params) { return call('bg.run', params); }
     },
+    // 本地 AI 超分（放大糊图 / 老照片）。模型在主进程里跑（Real-ESRGAN 的 ONNX，
+    // 与抠图同一份 WASM 运行时），图片不出本机、不需要任何云端配置。
+    // run 一次把源图放大 scale 倍并返回放大后的图片 URL；下载进度靠轮询 status（小应用
+    // 收不到宿主推送，清单里带本地字节数）。
+    upscale: {
+      status: function () { return call('upscale.status'); },
+      download: function (model) { return call('upscale.download', { model: model }); },
+      run: function (params) { return call('upscale.run', params); }
+    },
     audio: {
       transcribe: function (params) { return call('audio.transcribe', params); },
       // 录音由宿主采集：小应用跑在不透明源的 sandbox iframe 里，那里
@@ -674,6 +683,86 @@ async function runAction(
         width: result.width ?? 0,
         height: result.height ?? 0,
         model: result.model ?? "",
+        inferenceMs: result.inferenceMs ?? 0,
+        totalMs: result.totalMs ?? 0,
+      };
+    }
+
+    case "upscale.status": {
+      const result = await deps.call<{
+        models?: {
+          id: string;
+          bytes: number;
+          ready: boolean;
+          tier: string;
+          license: string;
+          localBytes?: number;
+        }[];
+        defaultModel?: string;
+        ready?: string | null;
+        progress?: { done: number; total: number } | null;
+      }>("upscaleModels", {});
+      // 与抠图同一规矩：localBytes 必须递过去 —— 小应用收不到宿主推送，下载进度靠
+      // 轮询这个字段算出来。progress 同理（正在跑时的块数）。
+      return {
+        models: (result?.models ?? []).map((m) => ({
+          id: m.id,
+          bytes: m.bytes,
+          localBytes: m.localBytes ?? 0,
+          ready: m.ready,
+          tier: m.tier,
+          license: m.license,
+        })),
+        defaultModel: result?.defaultModel ?? "",
+        ready: result?.ready ?? null,
+        progress: result?.progress ?? null,
+      };
+    }
+
+    case "upscale.download": {
+      const model = str(params.model, 64).trim();
+      if (!model) throw new Error("缺少模型名");
+      const result = await deps.call<{ ok: boolean; error?: string }>("upscaleDownloadModel", {
+        model,
+      });
+      if (!result?.ok) throw new Error(result?.error || "模型下载失败");
+      return { ok: true };
+    }
+
+    case "upscale.run": {
+      const path = str(params.path, 4096).trim();
+      if (!path) throw new Error("缺少图片路径");
+      // 源图先落进 images/ 才能拿到 iframe 可加载的 URL（也是路径校验的那一步）。
+      const staged = await deps.call<{ ref?: string; url?: string; error?: string }>(
+        "upscaleStageSource",
+        { path },
+      );
+      if (staged?.error) throw new Error(staged.error);
+      if (!staged?.ref || !staged?.url) throw new Error("图片暂存失败");
+      const model = str(params.model, 64).trim();
+      const result = await deps.call<{
+        out?: { ref: string; url: string; dataUrl?: string };
+        width?: number;
+        height?: number;
+        model?: string;
+        scale?: number;
+        inferenceMs?: number;
+        totalMs?: number;
+        error?: string;
+      }>("upscaleRun", {
+        ref: staged.ref,
+        model: model || undefined,
+      });
+      if (result?.error) throw new Error(result.error);
+      if (!result?.out) throw new Error("没有拿到放大结果");
+      return {
+        source: { ref: staged.ref, url: staged.url },
+        // dataUrl 与 url 都给：媒体端口被别的实例占着时，页面靠内联的这份照样能预览/保存。
+        out: { ref: result.out.ref, url: result.out.url, dataUrl: result.out.dataUrl ?? "" },
+        width: result.width ?? 0,
+        height: result.height ?? 0,
+        model: result.model ?? "",
+        scale: result.scale ?? 4,
         inferenceMs: result.inferenceMs ?? 0,
         totalMs: result.totalMs ?? 0,
       };

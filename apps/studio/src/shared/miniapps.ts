@@ -17,7 +17,7 @@ export type MiniAppCategory = "image" | "audio" | "text";
 export const MINIAPP_CATEGORIES: MiniAppCategory[] = ["image", "audio", "text"];
 
 /** 运行小应用需要的主进程能力；缺哪个就在卡片上标出来（而不是进去才报错）。 */
-export type MiniAppCapability = "image" | "imageEdit" | "chat" | "asr" | "bgRemove" | "local";
+export type MiniAppCapability = "image" | "imageEdit" | "chat" | "asr" | "bgRemove" | "upscale" | "local";
 
 /** 卡片图标：只存名字，UI 侧映射成 lucide 组件（shared 不能 import JSX）。 */
 export type MiniAppIcon =
@@ -28,7 +28,8 @@ export type MiniAppIcon =
   | "penLine"
   | "grid"
   | "notebook"
-  | "sticker";
+  | "sticker"
+  | "scanSearch";
 
 /**
  * 卡片封面的配色：同样只存名字。
@@ -199,6 +200,32 @@ export const MINIAPPS: MiniAppSpec[] = [
       "animated",
     ],
   },
+  {
+    id: "upscale",
+    nameKey: "miniapps.upscale.name",
+    descKey: "miniapps.upscale.desc",
+    category: "image",
+    icon: "scanSearch",
+    accent: "indigo",
+    // 本地 AI 超分：Real-ESRGAN 模型在主进程里跑（ONNX WASM），图片不出本机，
+    // 不需要任何云端厂商配置 —— 缺的只是权重，而权重能在这个页面里下载。
+    requires: ["upscale"],
+    keywords: [
+      "超分",
+      "放大",
+      "高清",
+      "老照片",
+      "糊图",
+      "清晰",
+      "修图",
+      "upscale",
+      "super resolution",
+      "enlarge",
+      "enhance",
+      "realesrgan",
+      "old photo",
+    ],
+  },
 ];
 
 export function miniAppById(id: string): MiniAppSpec | undefined {
@@ -212,6 +239,7 @@ export const MINIAPP_CAPABILITY_LABEL_KEY: Record<MiniAppCapability, string> = {
   chat: "miniapps.cap.chat",
   asr: "miniapps.cap.asr",
   bgRemove: "miniapps.cap.bgRemove",
+  upscale: "miniapps.cap.upscale",
   local: "miniapps.cap.local",
 };
 
@@ -239,6 +267,9 @@ export type MiniAppAction =
   | "bg.status"
   | "bg.download"
   | "bg.run"
+  | "upscale.status"
+  | "upscale.download"
+  | "upscale.run"
   | "audio.record"
   | "audio.transcribe"
   | "text.complete"
@@ -326,6 +357,9 @@ export const MINIAPP_ACTIONS: Record<MiniAppAction, string> = {
   "bg.status": "本地抠图：模型清单与下载状态",
   "bg.download": "本地抠图：下载某个模型的权重（首次使用需要）",
   "bg.run": "本地抠图：跑一次去背景，返回剪切图与掩膜 URL（源图必须是 files.pick 选出来的路径）",
+  "upscale.status": "本地超分：模型清单与下载状态",
+  "upscale.download": "本地超分：下载某个模型的权重（首次使用需要）",
+  "upscale.run": "本地超分：把一张图 AI 放大 scale 倍，返回放大后的图 URL（源图必须是 files.pick 选出来的路径）",
   "audio.record": "麦克风录音（宿主采集，op = start / stop / cancel；沙箱页本身拿不到麦克风）",
   "audio.transcribe": "语音转文字（可带说话人分段）",
   "text.complete": "一次性文本补全（总结 / 改写 / 起标题）",

@@ -20,6 +20,7 @@ import { ensureServerReady, getChatBaseUrl, maxOutputTokens } from "./chat";
 import { getChatModelLabel, getChatProviderLabel, getChatRequestModelId } from "./chat-model";
 import { getImageGenConfig } from "./image-gen";
 import { anyReadyModel } from "./bg-remove";
+import { anyReadyUpscaleModel } from "./upscale";
 import { resolveCloudProvider } from "./cloud-providers";
 import { getASRProviderConfig, listAsrModels } from "./asr";
 import { logEvent } from "./app-log";
@@ -86,6 +87,9 @@ export function getMiniAppCapabilities(): MiniAppCapabilitySnapshot {
     // 若按"权重已下载"判定 ready，没下过模型的用户会在应用中心就被拦在门外，
     // 而门里正是那个下载按钮。
     bgRemove: state(true, bgRemoveLabel()),
+    // 本地超分：与抠图同一套 —— 引擎（ONNX WASM）随应用一起发，缺的只是权重文件，
+    // 而权重能在小应用里自己下载，所以这里**永远 ready**，label 只回答"模型在不在本地"。
+    upscale: state(true, upscaleLabel()),
     // 纯本机处理（马赛克）：没有模型、没有厂商，也就没有"未配置"这回事。
     local: state(true, ""),
   };
@@ -95,6 +99,12 @@ export function getMiniAppCapabilities(): MiniAppCapabilitySnapshot {
 /** 本地抠图能力的说明文案：就绪时显示用的是哪个模型，否则说明可以进去下。 */
 function bgRemoveLabel(): string {
   const ready = anyReadyModel();
+  return ready ? `本地 · ${ready}` : "本地引擎 · 进入后可下载模型";
+}
+
+/** 本地超分能力的说明文案：就绪时显示用的是哪个模型，否则说明可以进去下。 */
+function upscaleLabel(): string {
+  const ready = anyReadyUpscaleModel();
   return ready ? `本地 · ${ready}` : "本地引擎 · 进入后可下载模型";
 }
 

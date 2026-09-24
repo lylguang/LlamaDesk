@@ -11,6 +11,7 @@ import { useRouter } from "@stores/router";
 import { SettingsScreen } from "./settings";
 import { ChatWindow } from "../chat";
 import { AgentWindow } from "../agent";
+import { JevScreen } from "../jev";
 import { VoiceCallWindow } from "../voice-call-screen";
 import { VoiceScreen } from "../voice";
 import { ImageScreen } from "../image";
@@ -39,6 +40,8 @@ const renderActiveApp = (activeApp: AppId): ReactNode => {
   switch (activeApp) {
     case "agent":
       return <AgentWindow />;
+    case "jev":
+      return <JevScreen />;
     case "voicecall":
       return <VoiceCallWindow />;
     case "ocr":
@@ -102,6 +105,7 @@ export function MainLayout() {
   // 设置页是全新的一级页面，不显示左侧对话菜单；
   // Agent 页自带会话侧栏（置顶 / 归档 / 工作区分组），全局侧栏会重复列出同一批会话；
   // 应用中心是"小应用自己的入口"，侧栏里的会话列表在这里没有对应物。
+  // JEV 页保留侧栏：那里放的是示例清单（不是会话列表），见 app-sidebar 的分发。
   const showSidebar =
     route.path !== "settings" && activeApp !== "agent" && activeApp !== "apps";
 

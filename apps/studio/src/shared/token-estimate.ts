@@ -62,7 +62,20 @@ function textOf(message: MessageLike): string {
         const candidate = part as { text?: unknown; type?: unknown };
         if (typeof candidate.text === "string") return candidate.text;
         // 工具调用 / 工具结果也占上下文，用类型名占位，估算不至于漏掉它们。
-        return typeof candidate.type === "string" ? `[${candidate.type}]` : "";
+        const placeholder = typeof candidate.type === "string" ? `[${candidate.type}]` : "";
+        if (candidate.type === "toolCall") {
+          // 真实开销是「工具名 + 参数序列化」，写文件这类调用参数可达上千 token。
+          // 序列化可能抛错（估算路径绝不能把回合搞挂），退回只计占位。
+          const part = candidate as { type?: unknown; name?: unknown; arguments?: unknown };
+          const args = typeof part.arguments === "object" && part.arguments !== null ? part.arguments : {};
+          try {
+            const serialized = JSON.stringify(args);
+            return (typeof part.name === "string" ? part.name : "") + " " + serialized;
+          } catch {
+            return placeholder;
+          }
+        }
+        return placeholder;
       })
       .join(" ");
   }

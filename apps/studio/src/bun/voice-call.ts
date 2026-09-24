@@ -3,7 +3,10 @@ import path from "path";
 
 import { db } from "./db";
 import { conversations, messages } from "./db/schema";
+import { getSetting } from "./db/settings";
 import { transcribeAudio, getAsrStatus, getASRProviderConfig, resolveModelPath } from "./asr";
+import { omniUntypedUserText } from "../shared/voice-call-omni";
+import { getOmniCallConfig, streamOmniCall, OMNI_NOT_CONFIGURED } from "./omni-call";
 import { DEFAULT_ASR_MODEL_FILE } from "../shared/modelscope";
 import { getTTSProviderConfig, synthesizeCallSpeech } from "./voice";
 import { isTtsLocalActive } from "./tts-local";
@@ -61,7 +64,12 @@ export type VoiceCallPreflight = {
   model: { available: boolean; detail: string };
   asr: { available: boolean; detail: string };
   tts: { available: boolean; detail: string };
-  provider: { mode: VoiceCallProvider; cloudConfigured: boolean; detail: string };
+  provider: {
+    mode: VoiceCallProvider;
+    cloudConfigured: boolean;
+    omniConfigured: boolean;
+    detail: string;
+  };
 };
 
 type Listener = (msg: VoiceCallOutgoing) => void;
@@ -139,10 +147,18 @@ const PARTIAL_DEBOUNCE_MS = 320;
 type Session = {
   conversationId: number;
   active: boolean;
-  /** local = 本地 ASR+LLM+TTS 三段管线；cloud = Qwen Realtime 全双工。 */
+  /** local = 本地 ASR+LLM+TTS 三段管线；cloud = 实时语音全双工；omni = 音频直送多模态模型。 */
   provider: VoiceCallProvider;
   /** 云端实时客户端（仅 cloud 模式持有）。 */
   realtime: RealtimeVoiceClient | null;
+  /**
+   * 是否对用户语音做增量 / 端句转写。
+   *
+   * local 模式必须有（转写就是它的输入）；**omni 模式是可选的** —— 模型直接听音频，
+   * 转写只用来给通话记录补一条用户消息和实时字幕。没配 ASR 时置 false，否则每次
+   * 增量转写都在日志里刷一条失败（用户什么都没做错，只是没装 whisper）。
+   */
+  asrEnabled: boolean;
   /** 当前阶段（用于给前端推送状态；本地跟随，跨调用保持）。 */
   phase: VoiceCallPhase | "listening";
   /** 当前这段话音的完整 16k PCM WAV（前端每次整段重发，因此这里整体替换）。 */
@@ -389,8 +405,18 @@ function kickSpeak(session: Session, turn: number): void {
 // Agent 回合（聊天管线流式正文 + 逐句朗读）
 // ---------------------------------------------------------------------------
 
-async function runGeneration(session: Session, text: string): Promise<void> {
-  const { conversationId } = session;
+/**
+ * 一个助手回合的公共骨架：复位回合状态 → 由 `source` 流式产出正文 → 收尾朗读。
+ *
+ * 两种"正文来源"共用它：local 走对话管线（`streamChatTurn`），omni 走多模态模型
+ * （整段音频直送）。句子切分、Markdown 剥离、逐句 TTS、抢话打断判定都在这里 ——
+ * 只有"文字从哪来"不同。各自写一份的话，以后改朗读逻辑（比如调切句阈值）就得记得
+ * 改两处，漏掉的那条路会以"另一种模式偶尔少念一句"的形式回归。
+ */
+async function runTurn(
+  session: Session,
+  source: (onDelta: (delta: string) => void, signal: AbortSignal) => Promise<void>,
+): Promise<void> {
   // 防御：上一轮还在生成（例如打断信号丢失）则先中止再开新回合。
   if (session.generation) {
     session.ctrl?.abort();
@@ -410,28 +436,22 @@ async function runGeneration(session: Session, text: string): Promise<void> {
   session.ctrl = ctrl;
   setPhase(session, "thinking");
 
-  const promise = streamChatTurn({
-    conversationId,
-    content: text,
-    signal: ctrl.signal,
-    // 语音通话：注入语音助手系统提示 + 关闭思考模式，让首字出来快、内容适合朗读。
-    extraSystem: VOICE_CALL_SYSTEM_PROMPT,
-    disableThinking: true,
-    onDelta: (delta) => {
-      if (session.ttsTurn !== turn || !session.active) return;
-      session.sayBuf += delta;
-      const { sentences, rest } = splitSentences(session.sayBuf);
-      session.sayBuf = rest;
-      for (const s of sentences) {
-        if (!session.active) break;
-        // 剥掉 Markdown 只念正文；纯空白/纯标点碎片不合成（否则 TTS 会对着符号瞎编）。
-        const clean = stripMarkdownText(s);
-        if (!hasSpeakableText(clean)) continue;
-        session.speakQueue.push(clean);
-      }
-      kickSpeak(session, turn);
-    },
-  });
+  const onDelta = (delta: string) => {
+    if (session.ttsTurn !== turn || !session.active) return;
+    session.sayBuf += delta;
+    const { sentences, rest } = splitSentences(session.sayBuf);
+    session.sayBuf = rest;
+    for (const s of sentences) {
+      if (!session.active) break;
+      // 剥掉 Markdown 只念正文；纯空白/纯标点碎片不合成（否则 TTS 会对着符号瞎编）。
+      const clean = stripMarkdownText(s);
+      if (!hasSpeakableText(clean)) continue;
+      session.speakQueue.push(clean);
+    }
+    kickSpeak(session, turn);
+  };
+
+  const promise = source(onDelta, ctrl.signal);
   session.generation = promise;
   try {
     await promise;
@@ -444,6 +464,131 @@ async function runGeneration(session: Session, text: string): Promise<void> {
       kickSpeak(session, turn);
     }
   }
+}
+
+/** local 模式的回合：文本走对话管线（本地推理服务器或云端对话模型）。 */
+async function runGeneration(session: Session, text: string): Promise<void> {
+  const { conversationId } = session;
+  await runTurn(session, async (onDelta, signal) => {
+    await streamChatTurn({
+      conversationId,
+      content: text,
+      signal,
+      // 语音通话：注入语音助手系统提示 + 关闭思考模式，让首字出来快、内容适合朗读。
+      extraSystem: VOICE_CALL_SYSTEM_PROMPT,
+      disableThinking: true,
+      onDelta,
+    });
+  });
+}
+
+/**
+ * omni 模式的回合：把这段语音本身交给多模态模型，正文流式回来照常逐句朗读。
+ *
+ * `history` 由调用方在**插入本轮用户消息之前**取好 —— 否则刚写进去的那条用户文本
+ * （可能是"（语音输入）"占位）会和音频一起发过去，模型先读到一句没信息量的话，
+ * 再听到同一段音频。
+ *
+ * 与 local 的差别不只是"正文从哪来"：local 那条路是 `streamChatTurn`，它自己负责
+ * 插入助手消息、推 chatChunk / chatDone。omni 直接打 HTTP，没有那层，所以**占位消息、
+ * 流式回填、定稿落库都得自己做** —— 漏掉的表现是"听得到回答、消息列表里却一直是空的"，
+ * 声音一过就再也看不到刚才说了什么。
+ */
+async function runOmniGeneration(
+  session: Session,
+  wavBase64: string,
+  history: { role: "user" | "assistant"; content: string }[],
+): Promise<void> {
+  const { conversationId } = session;
+  const row = db
+    .insert(messages)
+    .values({ conversationId, role: "assistant", content: "" })
+    .returning({ id: messages.id })
+    .get();
+  const messageId = row.id;
+  let full = "";
+  try {
+    await runTurn(session, async (onDelta, signal) => {
+      const res = await streamOmniCall({
+        wavBase64,
+        instructions: VOICE_CALL_SYSTEM_PROMPT,
+        history,
+        signal,
+        onDelta: (delta) => {
+          full += delta;
+          // 与云端路径的 partial 同一条通道：界面据此把气泡流式写出来。
+          emit({ type: "assistantPartial", conversationId, messageId, text: delta });
+          onDelta(delta);
+        },
+      });
+      // 打断（抢话 / 挂断）不算失败：已经拿到的正文照常念完。
+      if (!res.ok && session.active && !res.aborted) {
+        callLogFailure("omni.turn_failed", res.error ?? "omni 回合失败", { conversationId });
+        emit({ type: "error", conversationId, message: `omni 通话失败：${res.error ?? ""}` });
+      }
+    });
+  } finally {
+    // 定稿：与云端路径的 turnEnd 对称（正文落库 + 通知界面收尾）。被抢话打断时落的是
+    // 已念出的那半句 —— 和用户实际听到的内容一致，而不是一句都没留下。
+    const text = full.trim();
+    db.update(messages).set({ content: text }).where(eq(messages.id, messageId)).run();
+    if (session.active) emit({ type: "assistantDone", conversationId, messageId, text });
+  }
+}
+
+/**
+ * omni 模式的一段话音结束：整段音频直送多模态模型。
+ *
+ * 与 local 的关键差别是**转写不再是必经环节** —— 模型听的是音频本身，所以拿不到
+ * 转写也照常回合（用户没配 ASR 时 `asrEnabled` 为 false，这里连试都不试）。转写
+ * 拿到的文本只用于两件事：通话记录里那条用户消息，以及下一轮回放给模型的上下文。
+ * 两者都没有时写一句占位，好过让通话记录里凭空少一轮用户发言。
+ */
+async function endOmniUtterance(
+  session: Session,
+): Promise<{ ok: boolean; text?: string; error?: string }> {
+  await settleAsr(session);
+  const utterance = session.utterance;
+  const total = utterance.length;
+  let text = session.liveText.trim();
+  if (total >= MIN_UTTERANCE_BYTES && session.asrEnabled) {
+    try {
+      const res = await transcribeAudio({ wavBase64: pcm16ToWav(utterance).toString("base64") });
+      const finalText = res.text.trim();
+      if (finalText) text = finalText;
+    } catch (e) {
+      callLogFailure("asr.utterance_failed", `端句转写失败：${(e instanceof Error ? e.message : String(e))}`, {
+        conversationId: session.conversationId,
+        bytes: total,
+      });
+    }
+  }
+  if (session.utterance === utterance) session.utterance = Buffer.alloc(0);
+  session.liveText = "";
+  if (total < MIN_UTTERANCE_BYTES) {
+    // 太短（约 40ms 以下）当误触发：没有可听的音频，不浪费一次调用。
+    setPhase(session, "listening");
+    return { ok: true, text: "" };
+  }
+
+  const wavBase64 = pcm16ToWav(utterance).toString("base64");
+  // 上下文必须在插入本轮用户消息**之前**取：模型要的是"之前聊过什么"，
+  // 这一轮的输入就是音频本身。
+  const history = getCloudHistory(session.conversationId);
+  const userText = text || omniUntypedUserText(getSetting("UI_LANG"));
+  const inserted = db
+    .insert(messages)
+    .values({ conversationId: session.conversationId, role: "user", content: userText })
+    .returning({ id: messages.id })
+    .get();
+  emit({
+    type: "utterance",
+    conversationId: session.conversationId,
+    messageId: inserted.id,
+    text: userText,
+  });
+  void runOmniGeneration(session, wavBase64, history);
+  return { ok: true, text: userText };
 }
 
 // ---------------------------------------------------------------------------
@@ -601,6 +746,21 @@ function onRealtimeEvent(session: Session, ev: RealtimeVoiceEvent): void {
 // 对外 API（RPC handlers 直接调用）
 // ---------------------------------------------------------------------------
 
+/**
+ * 本机是否配好了语音识别（本地 whisper 引擎 + 模型，或远程 ASR 地址）。
+ *
+ * 与 preflight 里那段判据同源，抽出来是因为 omni 模式在拨号时也要问一次：
+ * 那里决定了这一通电话要不要跑增量 / 端句转写。
+ */
+async function isAsrReady(): Promise<boolean> {
+  try {
+    const status = await getAsrStatus();
+    return (status.engineInstalled && !!resolveModelPath()) || !!getASRProviderConfig().base;
+  } catch {
+    return false;
+  }
+}
+
 export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
   return (async () => {
     const modelLabel = getChatModelLabel();
@@ -645,15 +805,23 @@ export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
         : { available: true, detail: "Edge TTS（在线，免密钥）" };
 
     const rtc = getRealtimeProviderConfig();
+    const omni = getOmniCallConfig();
+    const mode = rtc.provider;
+    const detail =
+      mode === "cloud"
+        ? rtc.configured
+          ? `已就绪：${rtc.model}（音色 ${rtc.voice}）`
+          : "云端模式未配置 API Key"
+        : mode === "omni"
+          ? omni.configured
+            ? `已就绪：${omni.providerName} · ${omni.model}`
+            : OMNI_NOT_CONFIGURED
+          : "本地模式（whisper 转写 + 本地/远程模型 + TTS）";
     const provider: VoiceCallPreflight["provider"] = {
-      mode: rtc.provider,
+      mode,
       cloudConfigured: rtc.configured,
-      detail:
-        rtc.provider === "cloud"
-          ? rtc.configured
-            ? `已就绪：${rtc.model}（音色 ${rtc.voice}）`
-            : "云端模式未配置 API Key"
-          : "本地模式（whisper 转写 + 本地/远程模型 + TTS）",
+      omniConfigured: omni.configured,
+      detail,
     };
 
     return { model, asr, tts, provider };
@@ -669,7 +837,7 @@ export function voiceCallPreflight(): Promise<VoiceCallPreflight> {
  */
 export async function startVoiceCall(opts: {
   conversationId?: number;
-  provider?: "local" | "cloud";
+  provider?: VoiceCallProvider;
 }): Promise<{ ok: boolean; conversation?: Conversation; error?: string }> {
   const provider = opts.provider ?? getVoiceCallProvider();
   if (provider === "cloud" && !getRealtimeProviderConfig().configured) {
@@ -677,6 +845,13 @@ export async function startVoiceCall(opts: {
     callLogFailure("start.not_configured", "云端模式未配置 API Key，拨号被拒绝");
     return { ok: false, error: "云端模式未配置 API Key，请先在通话界面的「云端配置」中填写" };
   }
+  if (provider === "omni" && !getOmniCallConfig().configured) {
+    callLogFailure("start.omni_not_configured", "omni 模式未配置厂商 / API Key，拨号被拒绝");
+    return { ok: false, error: OMNI_NOT_CONFIGURED };
+  }
+  // omni 不需要 ASR 就能通话，所以这里只决定"要不要转写用户的话"（通话记录 + 字幕）；
+  // local 模式转写是输入本身，必然要跑。
+  const asrEnabled = provider === "omni" ? await isAsrReady() : true;
 
   let conv: Conversation;
   if (opts.conversationId) {
@@ -699,6 +874,7 @@ export async function startVoiceCall(opts: {
     active: true,
     provider,
     realtime: null,
+    asrEnabled,
     phase: "listening",
     utterance: Buffer.alloc(0),
     asrInFlight: null,
@@ -737,8 +913,8 @@ export async function startVoiceCall(opts: {
 }
 
 /**
- * 用户说话期间推音频帧。本地模式推整段 16k WAV（后端做增量转写）；
- * 云端模式推增量 PCM16 16k（或兼容 wav，后端剥头后追加给实时模型）。
+ * 用户说话期间推音频帧。本地 / omni 模式推增量 PCM16 16k（后端累积成整段）；
+ * 云端模式推增量 PCM16（按厂商采样率，后端剥头后追加给实时模型）。
  */
 export function pushVoiceCallAudio(opts: {
   conversationId: number;
@@ -753,7 +929,8 @@ export function pushVoiceCallAudio(opts: {
     session.realtime?.appendAudio(pcm);
     return { ok: true };
   }
-  // 本地模式：前端按增量推裸 PCM16 16k，这里累积成整段（端句时整段转写拿准确文本）。
+  // 本地 / omni：前端按增量推裸 PCM16 16k，这里累积成整段（端句时整段使用：
+  // local 拿去转写，omni 拿去当音频输入发给模型）。
   const raw = Buffer.from(opts.wavBase64, "base64");
   const pcm = opts.format === "wav" ? wavToPcm16(raw) : raw;
   if (pcm.length) {
@@ -765,13 +942,17 @@ export function pushVoiceCallAudio(opts: {
     void endVoiceCallUtterance({ conversationId: session.conversationId });
     return { ok: true };
   }
-  schedulePartial(session);
+  // omni 模式下转写只是为了字幕 / 通话记录，没配 ASR 就不跑（跑必然失败并刷日志）。
+  if (session.asrEnabled) schedulePartial(session);
   return { ok: true };
 }
 
 /**
- * 一段话音结束（VAD 静音 / 用户停止说话）：整段重新转写拿到准确文本，
- * 落库为用户消息并触发对话回合（正文流式回来、逐句 TTS 播放）。
+ * 一段话音结束（VAD 静音 / 用户停止说话）：落库为用户消息并触发助手回合
+ * （正文流式回来、逐句 TTS 播放）。
+ *
+ * 三种模式在这里分岔：cloud 只发一个"缓冲可落定"信号（断句在服务端），
+ * omni 把整段音频送给多模态模型，local 先整段转写再走对话管线。
  */
 export async function endVoiceCallUtterance(opts: {
   conversationId: number;
@@ -783,6 +964,7 @@ export async function endVoiceCallUtterance(opts: {
     session.realtime?.commit();
     return { ok: true };
   }
+  if (session.provider === "omni") return endOmniUtterance(session);
   await settleAsr(session);
 
   // 先引用当前这段话的音频；转写 await 期间用户可能又开始说新一段，
@@ -895,6 +1077,10 @@ export function stopVoiceCall(conversationId: number): { ok: boolean } {
 export function isVoiceCallActive(conversationId: number): boolean {
   return sessions.get(conversationId)?.active ?? false;
 }
+
+// omni 模式的配置读写直接转出去：RPC 层不必知道它住在哪个模块
+// （与实时语音的 RealtimeVoice.getRealtimeProviderConfig 对称）。
+export { getOmniCallConfig, saveOmniCallConfig, testOmniCallConnection } from "./omni-call";
 
 /** 配置引导里的「测试连接」：用给定（或已保存）的配置开一条真实 WS 验证。 */
 export { testRealtimeConnection } from "./realtime-voice";

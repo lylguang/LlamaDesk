@@ -1,0 +1,42 @@
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::describe|压缩流水线
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网之后新增的内容接在结论后面，再被后续裁剪正常处理
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网之后照样走裁剪：上下文回到窗口之内（不是「收网完就再也不压了」）
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网只在执行轨迹里记一条（按步记会刷出一整列重复行）
+apps/studio/src/bun/agent-compaction.test.ts::describe|compactMessages
+apps/studio/src/bun/agent-compaction.test.ts::describe|estimateTokens
+apps/studio/src/bun/agent-compaction.test.ts::describe|pruneSupersededReads
+apps/studio/src/bun/agent-compaction.test.ts::test|不同路径 / 不同工具之间互不取代
+apps/studio/src/bun/agent-compaction.test.ts::test|中文按字、英文按字符比例估算
+apps/studio/src/bun/agent-compaction.test.ts::test|任务陈述后面不会跟着被裁断的工具结果（先剥尾部再插任务陈述）
+apps/studio/src/bun/agent-compaction.test.ts::test|分块 content 也会被算进去（工具调用块不能漏）
+apps/studio/src/bun/agent-compaction.test.ts::test|分页读在前、全量读在后：旧的分页结果可以省
+apps/studio/src/bun/agent-compaction.test.ts::test|同一路径的旧读取被最新的整份读取取代
+apps/studio/src/bun/agent-compaction.test.ts::test|同样拦住 AgentMessage 形态的工具结果（transformContext 里角色叫 toolResult）
+apps/studio/src/bun/agent-compaction.test.ts::test|多轮会话长回合时，当前这轮的任务陈述不会被裁掉
+apps/studio/src/bun/agent-compaction.test.ts::test|尾部不会以工具结果开头（否则真实服务会 400）
+apps/studio/src/bun/agent-compaction.test.ts::test|最新一次只是分页读取时，绝不丢旧的全量结果
+apps/studio/src/bun/agent-compaction.test.ts::test|消息很少时不动（避免刚开会话就触发压缩）
+apps/studio/src/bun/agent-compaction.test.ts::test|混合内容比纯英文更贵（同样长度下中文占比越高 token 越多）
+apps/studio/src/bun/agent-compaction.test.ts::test|省下的量太小就不动手（占位文本自己也要花 token）
+apps/studio/src/bun/agent-compaction.test.ts::test|至少保留最后 4 条（预算再紧也不把最近的上下文清空）
+apps/studio/src/bun/agent-compaction.test.ts::test|裁剪时 messages[0] 仍保留、占位消息仍在第 2 位
+apps/studio/src/bun/agent-compaction.test.ts::test|超预算时保留任务陈述与最近消息，中间换成占位说明
+apps/studio/src/bun/agent-compaction.test.ts::test|预算充足时原样返回
+apps/studio/src/bun/agent-compaction.test.ts::test|预算内裁剪；预算小到放不下最小保留量时以「保留最近 4 条」为准
+apps/studio/src/bun/agent-compaction.test.ts::test|预算卡在任务陈述刚好放下时，任务陈述只出现一次（而不是补插两遍）
+apps/studio/src/bun/agent-summary.test.ts::describe|buildSummaryPrompt
+apps/studio/src/bun/agent-summary.test.ts::describe|findSummaryCut
+apps/studio/src/bun/agent-summary.test.ts::describe|isTurnStart
+apps/studio/src/bun/agent-summary.test.ts::describe|summaryMessageText
+apps/studio/src/bun/agent-summary.test.ts::test|keepRecent 大到能装下全部历史时不摘要（没有可摘的部分）
+apps/studio/src/bun/agent-summary.test.ts::test|保留尾部不少于 minKeep 条，且不会切到只剩最后一条
+apps/studio/src/bun/agent-summary.test.ts::test|写明条数、来源，并提醒摘要可能遗漏细节
+apps/studio/src/bun/agent-summary.test.ts::test|切点落在一轮的起点（user 消息）上
+apps/studio/src/bun/agent-summary.test.ts::test|历史太短不动手
+apps/studio/src/bun/agent-summary.test.ts::test|只有 user 消息算一轮的起点
+apps/studio/src/bun/agent-summary.test.ts::test|带召回记忆时标明是参考资料（不是指令）
+apps/studio/src/bun/agent-summary.test.ts::test|手动压缩与自动压缩的措辞不同（用户看得到区别）
+apps/studio/src/bun/agent-summary.test.ts::test|整段历史里没有干净的回合边界时返回 null（交给确定性裁剪兜底）
+apps/studio/src/bun/agent-summary.test.ts::test|空白的上一版摘要 / 记忆不会产生空段落
+apps/studio/src/bun/agent-summary.test.ts::test|续写：把已有摘要带进来，并要求更新而不是重写
+apps/studio/src/bun/agent-summary.test.ts::test|首次摘要：带转录与输出格式，不含系统提示（系统提示单独传）

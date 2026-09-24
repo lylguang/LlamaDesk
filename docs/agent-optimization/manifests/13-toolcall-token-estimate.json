@@ -1,0 +1,30 @@
+{
+  "id": "13-toolcall-token-estimate",
+  "allowed_files": [
+    "apps/studio/src/shared/token-estimate.ts",
+    "apps/studio/src/shared/token-estimate.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/shared/token-estimate.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/shared/token-estimate.test.ts",
+    "apps/studio/src/bun/agent-compaction.test.ts",
+    "apps/studio/src/bun/agent-summary.test.ts"
+  ],
+  "max_source_lines": 20,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "只计工具名、不计参数（大参数仍被严重低估）",
+      "file": "apps/studio/src/shared/token-estimate.ts",
+      "find": "JSON.stringify",
+      "replace": "String"
+    }
+  ]
+}

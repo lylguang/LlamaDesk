@@ -59,6 +59,8 @@ const MAX_CONTEXT_TOTAL = 16 * 1024;
 const MAX_STDERR_CHARS = 2000;
 /** 超时后从 SIGTERM 升级到 SIGKILL 的宽限：给正常进程留出清理时间，又不至于卡住回合。 */
 const HOOK_KILL_GRACE_MS = 2000;
+/** 单个环境变量有长度上限（Linux 实测 128KB 处抛 E2BIG）。留一半余量。 */
+const MAX_PAYLOAD_ENV_BYTES = 64 * 1024;
 
 /**
  * 事件名归一化：Codex 文档里是 `UserPromptSubmit`（PascalCase），
@@ -146,7 +148,10 @@ export async function runHook(
       env: {
         ...process.env,
         OMNI_HOOK_EVENT: hook.event,
-        OMNI_HOOK_PAYLOAD: serialized,
+        // 负载太大（Linux 单个 env 串上限 128KB）就只传字节数：完整内容已经在 stdin 里，
+        // env 这一路会炸（E2BIG）且是唯一会炸的那一路，不能让它把钩子整条拖死。
+        ...(Buffer.byteLength(serialized, "utf8") <= MAX_PAYLOAD_ENV_BYTES ? { OMNI_HOOK_PAYLOAD: serialized } : {}),
+        OMNI_HOOK_PAYLOAD_BYTES: String(Buffer.byteLength(serialized, "utf8")),
       },
       cwd: typeof payload.workspace === "string" && payload.workspace ? payload.workspace : process.cwd(),
       stdout: "pipe",

@@ -1,0 +1,57 @@
+Warning: No project session found with id 'omni-agent-24b'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+`apps/studio/src/mainview/app/agent/message.tsx` — `useMessageActions` 里两个弹窗的构造条件：
+
+- `revertDialog`：`isAssistant && snapshot` → `isAssistant && snapshot && revertOpen`（开着才构造）
+- `conversationRevertDialog`：无条件构造 → `conversationRevertOpen ? (...) : null`
+
+共 4 行源码改动，props、回调、`invalidateQueries` 参数全部原样未动。
+
+### 2 先红后绿的证据
+
+任务说明明确本次是纯懒构造、行为零变化，**不要求写新测试**，验收靠既有用例全绿 + 读 diff。
+
+绿（`bun run test`，工作树根目录，改后全量）：
+```
+ 2377 pass
+ 3 skip
+ 0 fail
+ 14116 expect() calls
+Ran 2380 tests across 236 files. [11.23s]
+```
+
+### 3 用例数量
+
+本次没有编辑任何测试文件。`message.test.tsx` 现有 19 个用例（任务说明写的「20 条」与仓库实际数量不符，见第 6 节），编辑前后均为 19。
+
+### 4 验收门输出
+
+```
+GATE: id=24b-lazy-dialogs mode=self head=f4a777b
+GATE: out-of-bounds none
+GATE: size source-lines=6 limit=10
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=26 now=26)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (26 pass, 3s)
+GATE: RESULT PASS id=24b-lazy-dialogs
+```
+
+### 5 逐项自检
+
+- [x] 两个弹窗都改成「开着才构造」 — 完成
+- [x] props、回调、`invalidateQueries` 参数一字未动 — 完成（diff 只动了条件表达式）
+- [x] 三个 `useMutation` 没动 — 完成
+- [x] 两个弹窗组件文件没动 — 完成（`revert-dialog.tsx` / `conversation-revert-dialog.tsx` 未触碰）
+- [x] 操作条渲染位置没动 — 完成
+- [x] 全量测试全绿 — 完成（2377 pass / 0 fail）
+- [x] 源码改动不超过 10 行 — 完成（4 行）
+
+### 6 我拿不准的地方
+
+- 任务说明称 `message.test.tsx` 有 20 条用例，仓库实际是 19 条（门里 manifest 的 26 是包含该文件在内的 manifest 指定用例集合，baseline=26 now=26 一致）。未改任何测试，只作记录。
+- 自检未发现 Radix `Dialog` 以 `open={true}` 直接挂载时的进场动画/焦点异常迹象（既有 19 条用例全部通过），无法在纯 CLI 环境实机验证动画，特此说明。

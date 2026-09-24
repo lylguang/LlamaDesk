@@ -21,6 +21,17 @@ export const DEFAULT_REALTIME_BASE_URL = "wss://dashscope.aliyuncs.com/api-ws/v1
 export const DEFAULT_REALTIME_MODEL = "qwen-audio-3.0-realtime-plus";
 export const DEFAULT_REALTIME_VOICE = "longanqian";
 
+/**
+ * 百炼的两套地址：国内 `dashscope.aliyuncs.com`，国际站 `dashscope-intl.aliyuncs.com`
+ * （qwencloud.com 的密钥只在国际站有效）。端点路径一致，只有主机不同。
+ */
+const DASHSCOPE_HOSTS = /^(dashscope|bailian)[a-z0-9-]*\.aliyuncs\.com$/i;
+
+/** 百炼系主机 → 它的实时端点（两家 / 国内外共用同一条路径规则）。 */
+export function dashscopeRealtimeUrl(host: string): string {
+  return `wss://${host}/api-ws/v1/realtime`;
+}
+
 /** 阶跃星辰（StepFun）实时语音模型：`stepaudio-3-realtime-preview` 是限免预览版。 */
 export const STEPFUN_REALTIME_MODELS = [
   "stepaudio-3-realtime-preview",
@@ -62,7 +73,7 @@ export function realtimeDialectFor(opts: {
       host = "";
     }
     if (/\.stepfun\.com$/i.test(host)) return "stepfun";
-    if (/^(dashscope|bailian)\.aliyuncs\.com$/i.test(host)) return "dashscope";
+    if (DASHSCOPE_HOSTS.test(host)) return "dashscope";
   }
   const model = (opts.model ?? "").trim().toLowerCase();
   if (/stepaudio|step-audio|step-1o-audio/.test(model)) return "stepfun";
@@ -89,20 +100,28 @@ export function realtimeBaseUrlForProvider(providerBaseUrl: string | null | unde
     return null;
   }
   if (/\.stepfun\.com$/i.test(host)) return STEPFUN_REALTIME_BASE_URL;
-  if (!/^(dashscope|bailian)\.aliyuncs\.com$/i.test(host)) return null;
-  return `wss://${host}/api-ws/v1/realtime`;
+  // 主机原样带过来：国际站（qwencloud.com）是 `dashscope-intl.…`，路径与国内一致，
+  // 写死国内主机等于把国际站用户挡在"必须手填 wss 地址"那一档。
+  if (!DASHSCOPE_HOSTS.test(host)) return null;
+  return dashscopeRealtimeUrl(host);
 }
 
 /**
  * 这个模型名看着像实时语音模型吗（用来把厂商清单里混进来的对话 / 生图模型挡在下拉外）。
  *
- * 实时接口只吃 realtime / omni 两族，加上"独立一段 audio"的老型号
- * （`step-1o-audio`、`step-audio-2`）—— 注意是整段 audio，`stepaudio-3-tts` 这种
- * 拼在词里的不算（那是 TTS，不是实时语音）。把对话 / 生图模型一起列出来，用户选了之后
- * 只会等到连接时报一句看不懂的错。
+ * 实时接口只吃 realtime 族，加上"独立一段 audio"的老型号（`step-1o-audio`、
+ * `step-audio-2`）—— 注意是整段 audio，`stepaudio-3-tts` 这种拼在词里的不算
+ * （那是 TTS，不是实时语音）。把对话 / 生图模型一起列出来，用户选了之后只会等到
+ * 连接时报一句看不懂的错。
+ *
+ * **`omni` 不再单独放行**：实时 omni 模型的名字里都带 `realtime`
+ * （`qwen3.5-omni-flash-realtime`），所以收紧了也漏不掉任何一个；而 `qwen3.8-omni-flash`
+ * 这种**非实时**的 omni 是走 Chat Completions 的普通对话模型（音频进、文字出），
+ * 按名字放行的话它会同时出现在实时下拉里（选了连不上）和从对话模型清单里消失。
  */
 export function isRealtimeModelId(id: string): boolean {
-  return /realtime|omni|(^|[-_])audio([-_]|$)/i.test(id);
+  if (/realtime/i.test(id)) return true;
+  return /(^|[-_])audio([-_]|$)/i.test(id);
 }
 
 /** 上行音频采样率（PCM16）：两家不同，喂错会被当成另一种语速。 */
@@ -134,10 +153,22 @@ export function realtimeBaseUrl(dialect: RealtimeDialect): string {
  * 用来判断存下来的地址还算不算数：切换厂商后必须跟着换地址，但**只看是否等于百炼的
  * 默认值时，从阶跃切到百炼会把阶跃的 wss 地址当成"用户自填"保留** —— 界面显示新厂商、
  * 实际连的还是上一家。所以预设端点是一个集合，不是单个默认值。
+ *
+ * 按形状判而不是按常量逐个比：百炼有国内 / 国际两套主机（后者用 `dashscope-intl.`），
+ * 再添一个地址就要记得回来加一个常量，漏掉的那套会被当成"用户自填"而永远不跟随厂商。
  */
 export function isPresetRealtimeEndpoint(url: string | null | undefined): boolean {
   const v = (url ?? "").trim();
-  return v === DEFAULT_REALTIME_BASE_URL || v === STEPFUN_REALTIME_BASE_URL;
+  if (!v) return false;
+  if (v === STEPFUN_REALTIME_BASE_URL) return true;
+  let host: string;
+  try {
+    host = new URL(v.replace(/^ws/i, "http")).host;
+  } catch {
+    return false;
+  }
+  if (!DASHSCOPE_HOSTS.test(host)) return false;
+  return v === dashscopeRealtimeUrl(host);
 }
 
 /** 方言的模型候选（厂商清单里一条实时模型都没有时，至少能选到这几个）。 */

@@ -1,0 +1,33 @@
+{
+  "id": "26-symlink-containment",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent-tools.path.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-tools.path.test.ts",
+    "apps/studio/src/bun/agent-tools.patch.test.ts",
+    "apps/studio/src/bun/agent-tools.edit.test.ts",
+    "apps/studio/src/bun/agent-tools.glob.test.ts",
+    "apps/studio/src/bun/agent-tools.bash.test.ts",
+    "apps/studio/src/bun/agent-spill.test.ts"
+  ],
+  "max_source_lines": 40,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "退回字面前缀判断（区内软链指向区外又会被放行）",
+      "file": "apps/studio/src/bun/agent-tools.ts",
+      "find": "function isReallyUnder(root: string, target: string): boolean {",
+      "replace": "function isReallyUnder(root: string, target: string): boolean {\n  { const r = path.resolve(root), t = path.resolve(target); return t === r || t.startsWith(r + path.sep); }"
+    }
+  ]
+}

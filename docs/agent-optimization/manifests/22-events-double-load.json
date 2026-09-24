@@ -1,0 +1,36 @@
+{
+  "id": "22-events-double-load",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/conversation.tsx",
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/conversation.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-slash.test.tsx",
+    "apps/studio/src/mainview/app/agent/message.test.tsx"
+  ],
+  "max_source_lines": 15,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "去掉首次落地的守卫（又变回开会话拉两遍全量）",
+      "file": "apps/studio/src/mainview/app/agent/conversation.tsx",
+      "find": "if (!eventsQuery.isSuccess) return;",
+      "replace": "if (false) return;"
+    },
+    {
+      "name": "守卫改成「store 里没事件就返回」（空会话彻底失去追平）",
+      "file": "apps/studio/src/mainview/app/agent/conversation.tsx",
+      "find": "const afterId = known.length > 0 ? known[known.length - 1]!.id : 0;",
+      "replace": "if (known.length === 0) return;\n      const afterId = known[known.length - 1]!.id;"
+    }
+  ]
+}

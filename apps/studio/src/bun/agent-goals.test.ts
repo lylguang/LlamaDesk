@@ -160,4 +160,28 @@ describe("注入与文案", () => {
     expect(described).toContain("2 分钟");
     expect(described).toContain("1 / 6");
   });
+
+  test("用量变化不改变目标段落（系统提示必须逐字节稳定，否则前缀缓存每轮全作废）", () => {
+    createGoal(CONVERSATION, { objective: "把导出功能做完", acceptance: "能导出 csv" });
+    const before = goalPromptSection(CONVERSATION)!;
+    addGoalUsage(CONVERSATION, { tokens: 3_210, seconds: 95, continuation: true });
+    expect(goalPromptSection(CONVERSATION)).toBe(before);
+  });
+
+  test("目标段落不含易变字样（tokens / 分钟 / 自动续跑都挪去续跑消息）", () => {
+    createGoal(CONVERSATION, { objective: "x" });
+    addGoalUsage(CONVERSATION, { tokens: 777, seconds: 120, continuation: true });
+    const section = goalPromptSection(CONVERSATION)!;
+    expect(section).not.toContain("tokens");
+    expect(section).not.toContain("分钟");
+    expect(section).not.toContain("自动续跑");
+  });
+
+  test("续跑消息里带上进度（用量数字与续跑次数）", () => {
+    createGoal(CONVERSATION, { objective: "把导出做完", acceptance: "能导出 csv" });
+    addGoalUsage(CONVERSATION, { tokens: 2_500, seconds: 90, continuation: true });
+    const text = goalContinuationText(getGoal(CONVERSATION)!);
+    expect(text).toContain("2500 tokens");
+    expect(text).toContain("1 / 6");
+  });
 });

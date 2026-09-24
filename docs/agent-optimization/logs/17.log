@@ -1,0 +1,134 @@
+Warning: No project session found with id 'omni-agent-17'; creating a new session with that id.
+---
+
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent-instructions.ts`** — 只改了 `truncateInstructions` 一个函数（+15 / −7 行 = 22 行，≤25）：
+- 分配阶段从 `for (const file of files)` 改为 `for (let i = files.length - 1; i >= 0; i -= 1)`（倒着遍历，最具体层先吃预算）
+- `kept` 从数组改为 `Set<number>`（记录索引），另加 `keptFiles: Map<number, InstructionFile>` 存截断后的副本
+- 返回时按索引升序排回原顺序：`[...kept].sort((a,b)=>a-b).map(i => keptFiles.get(i) ?? files[i]!)`
+- 多字节截断逻辑原样保留；`truncated` 语义不变；`maxBytes <= 0` 早退不变
+- 函数注释从 1 行扩为 4 行，说明新语义
+
+**`apps/studio/src/bun/agent-instructions.test.ts`** — 在 `describe("体积上限与拼装")` 里追加 4 个 test（+53 行，无删除）：
+1. 泛层超大时，最具体那层仍完整保留
+2. 分配倒着走，输出仍按原顺序
+3. 预算够时三份都在，顺序、内容与原来一致
+4. 预算卡在半个多字节字符处，最具体那层截断也不留替换字符
+
+### 2 先红后绿的证据
+
+**红**（源码未改，只加了测试）：
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-instructions.test.ts:
+146 |       { path: "/ws", contents: "w".repeat(200), source: "project" as const },
+147 |     ];
+148 |     const { files: kept, truncated } = truncateInstructions(files, 1000);
+149 |     expect(truncated).toBe(true);
+150 |     const ws = kept.find((file) => file.path === "/ws");
+151 |     expect(ws).toBeDefined();
+                     ^
+error: expect(received).toBeDefined()
+
+Received: undefined
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-instructions.test.ts:151:16)
+(fail) 体积上限与拼装 > 预算从最具体的层开始分配：泛层超大时，最具体那层仍完整保留 [0.19ms]
+162 |       { path: "/repo", contents: "r".repeat(50000), source: "project" as const },
+163 |       { path: "/ws", contents: "w".repeat(200), source: "project" as const },
+164 |     ];
+165 |     const { files: kept } = truncateInstructions(files, 1000);
+166 |     // 保留下来的顺序必须是 [user, repo, ws]（与传入顺序一致），不能倒过来。
+167 |     expect(kept.map((file) => file.path)).toEqual(["/user", "/repo", "/ws"]);
+                                                ^
+error: expect(received).toEqual(expected)
+
+@@ -3,3 +3,2 @@
+    "/repo",
+-   "/ws",
+  ]
+
+- Expected  - 1
++ Received  + 0
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-instructions.test.ts:167:43)
+(fail) 体积上限与拼装 > 分配倒着走，输出仍按原顺序（泛在前、具体在后） [0.13ms]
+
+ 19 pass
+ 2 fail
+ 55 expect() calls
+Ran 21 tests across 1 file. [41.00ms]
+```
+
+**绿**（源码改完后）：
+```
+(fail) 体积上限与拼装 > 超限时截断并标记；上限为 0 表示不限 [0.35ms]
+
+ 20 pass
+ 1 fail
+ 56 expect() calls
+Ran 21 tests across 1 file. [40.00ms]
+```
+> 4 条新用例全绿。唯一失败的是**原有** test「超限时截断并标记；上限为 0 表示不限」的第 105 行——该用例断言的是旧语义（`files[0]` 截断为 5 字符），新语义下 `files[0]` 是完整的 10 字符、`files[1]` 被截断为 5。这不是我的改动导致的回归，而是旧测试编码了本次要修掉的 bug。
+
+### 3 用例数量
+
+`apps/studio/src/bun/agent-instructions.test.ts`：编辑前 17 个 → 编辑后 21 个（+4，无删无改）
+
+### 4 验收门输出
+
+```
+GATE: id=17-instructions-budget mode=self head=c787396
+GATE: out-of-bounds none
+GATE: size source-lines=20 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=21 now=25)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests FAIL
+GATE:   bun test v1.4.2 (744846f84) 32x PARALLEL
+GATE:
+GATE:   apps/studio/src/bun/agent-instructions.test.ts:
+GATE:   100 |     expect(truncateInstructions(files, 100).files).toHaveLength(2);
+GATE:   101 |
+GATE:   102 |     const capped = truncateInstructions(files, 15);
+GATE:   103 |     expect(capped.truncated).toBe(true);
+GATE:   104 |     expect(capped.files).toHaveLength(2);
+GATE:   105 |     expect(capped.files[0]!.contents).toBe("x".repeat(10));
+GATE:                                               ^
+GATE:   error: expect(received).toBe(expected)
+GATE:
+GATE:   Expected: "xxxxxxxxxx"
+GATE:   Received: "xxxxx"
+GATE:
+GATE:         at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-instructions.test.ts:105:39)
+GATE:   (fail) 体积上限与拼装 > 超限时截断并标记；上限为 0 表示不限 [0.35ms]
+GATE:
+GATE:    20 pass
+GATE:    1 fail
+GATE:    56 expect() calls
+GATE:   Ran 21 tests across 1 file. [40.00ms]
+GATE: RESULT FAIL id=17-instructions-budget
+```
+
+### 5 逐项自检
+
+- [x] 预算按「越具体越优先」分配 — **完成**
+- [x] 输出顺序仍是原顺序（泛在前、具体在后） — **完成**
+- [x] `truncated` 语义不变 — **完成**
+- [x] `maxBytes <= 0` 不限的行为不变 — **完成**
+- [x] 多字节截断的处理没被改坏 — **完成**
+- [x] 没有动 `discoverInstructionFiles` / 段落去重 / 默认上限 / 截断文案 — **完成**
+- [ ] 现有 20 条用例一条没删没改，全绿 — **未完成**。条数没删没改（17→21 纯增），但原有 test「超限时截断并标记；上限为 0 表示不限」在源码改后变红（line 105 断言 `files[0].contents === "x".repeat(10)`，新语义下 `files[0]` 完整、`files[1]` 截断）。该断言编码的是本次要修掉的旧 bug，无法在新语义下保持通过。任务禁止修改现有用例，我未改它。
+- [x] 把 `agent-instructions.ts` 的改动还原后，第 1 条用例会变红 — **完成**（已实际验证：还原后 test 1 和 test 2 都变红，19 pass / 2 fail）
+- [x] 源码改动不超过 25 行 — **完成**（14+6 = 20 行，gate 确认）
+
+### 6 我拿不准的地方
+
+1. **Gate FAIL 的根因是任务约束冲突**：任务说"现有 20 条用例一条都不许删、不许改"，但 line 105 的断言 `files[0].contents === "x".repeat(10)` 在新语义下必然失败（两个等长文件，最具体的 `/b` 先吃满 10 字节，`/a` 只分得到 5 字节）。不改这条 = gate 挂；改这条 = 违反"不许改"约束。我选了不改、照实汇报。如果调度方认为"修正断言方向"算允许的微调（只改 `files[0]` → `files[1]`、`"y".repeat(5)` → `"x".repeat(5)`），我可以补上，但需要你明确放行。
+
+2. **Baseline 文件记录 21 行（17 tests + 4 describes）**，任务描述写"现有 20 条"——差 3 条，应该是任务描述笔误（或包含了 3 个 describe 块）。不影响 gate 判定（gate 比的是 baseline 文件里的 case 名是否丢失，结果 `cases-missing none`）。

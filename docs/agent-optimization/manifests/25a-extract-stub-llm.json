@@ -1,0 +1,25 @@
+{
+  "id": "25a-extract-stub-llm",
+  "allowed_files": [
+    "apps/studio/src/bun/test-stub-llm.ts",
+    "apps/studio/scripts/agent-resilience-smoke.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/test-stub-llm.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-spill.test.ts",
+    "apps/studio/src/bun/agent-compaction.test.ts",
+    "apps/studio/src/bun/agent-history.test.ts"
+  ],
+  "max_source_lines": 220,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "from \"\\./agent\""
+  ],
+  "revert_red": false,
+  "revert_red_reason": "纯搬家：没有新用例，验收锚点是端到端冒烟仍然 29 个 ✓ / 0 个 ✗（退回本模块会让冒烟 import 失败，那一层已由 smoke-resilience 覆盖）"
+}

@@ -13,6 +13,10 @@ import type { ModelPurpose, ServedModelInfo, ServedModelStatus } from "../../sha
  *   3. 无实例时直连行不消失，显示「未运行」且复制按钮禁用；
  *   4. 代理行恒在（不受实例有无影响）。
  *
+ * 「端点列表」小节 ——
+ *   SystemOne / JEV（`/v1/systemone`）必须在列表里且可复制：后端早已支持这条路由，
+ *   列表漏掉它，用户会以为网关不支持 JEV。
+ *
  * 「API Key」小节 ——
  *   1. 密钥默认**掩码**展示 —— 列表里不能出现明文；
  *   2. 新建要先填名字，并且新建 / 停用 / 删除都写回主进程（不经过「保存并重启」）。
@@ -337,6 +341,31 @@ test("网关代理行恒在：地址为 {网关地址}/v1/embeddings，不随实
   const proxy = `${GATEWAY_URL}/v1/embeddings`;
   expect(view.text).toContain(proxy);
   expect(copyButton(view.container, proxy).disabled).toBe(false);
+  await view.unmount();
+});
+
+// ---------------------------------------------------------------------------
+// SystemOne / JEV 端点
+// ---------------------------------------------------------------------------
+
+test("端点列表含 SystemOne / JEV（/v1/systemone），标签说清它不是对话模型", async () => {
+  const view = await renderGateway();
+  expect(view.errors).toEqual([]);
+
+  // 后端一直支持这条路由（gateway.systemone.test.ts），列表漏了它，用户就只能看到
+  // 一串 OpenAI 兼容端点、以为网关不支持 JEV。
+  const url = `${GATEWAY_URL}/v1/systemone`;
+  expect(view.text).toContain(url);
+  expect(view.text).toContain(zh("settings.gateway.endpoints.systemone"));
+  expect(view.text).toContain(zh("settings.gateway.systemone.hint"));
+
+  const button = copyButton(view.container, url);
+  expect(button.disabled).toBe(false);
+  await act(async () => {
+    button.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  expect(copied).toEqual([url]);
   await view.unmount();
 });
 

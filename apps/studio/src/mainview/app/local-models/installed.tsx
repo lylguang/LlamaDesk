@@ -20,6 +20,7 @@ import { useServedStore } from "@stores/served";
 import { useT } from "@stores/ui-lang";
 import { fileKind, engineSupports, type InferenceEngine, type ModelCategory, type ModelOrigin, type ModelSource } from "@/shared/modelscope";
 import { serverErrorHint } from "@/mainview/lib/server-error";
+import { AgentDiagnoseButton } from "@/mainview/components/agent-diagnose-button";
 import { StartFailureDetails } from "@components/start-failure-details";
 import { cn } from "@/mainview/lib/utils";
 import { formatBytes } from "./parts";
@@ -201,6 +202,21 @@ function InstalledModelRow({
               engine={engine}
               model={model}
               servedId={servedForModel?.id}
+            />
+            <AgentDiagnoseButton
+              size="xs"
+              intro={t("agent.diagnose.localModel")}
+              error={startError}
+              context={[
+                `引擎：${engine}`,
+                `模型：${model.runtimeTarget ?? model.path}`,
+                ...(startErrorHint ? [`界面给出的判断：${startErrorHint}`] : []),
+              ]}
+              logs={
+                servedForModel
+                  ? async () => (await rpcClient.getServedModelLogs({ id: servedForModel.id })).logs.split("\n")
+                  : undefined
+              }
             />
           </div>
         )}

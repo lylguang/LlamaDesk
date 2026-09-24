@@ -4,7 +4,9 @@ import { ENGINE_IDS, ENGINE_SPECS, EMBEDDING_PORT_BASE } from "../../shared/engi
 import { db } from "./index";
 import { settings as settingsTable } from "./schema";
 import { DEFAULT_ASR_MODEL_FILE } from "../../shared/modelscope";
+import { LOCAL_CTX_DEFAULT } from "../../shared/model-context";
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
+import { VOICE_CALL_OMNI_DEFAULT_MODEL } from "../../shared/voice-call-omni";
 import { encryptSecret, isEncryptedSecret, tryDecryptSecret } from "../secrets";
 import { logEvent } from "../app-log";
 
@@ -26,6 +28,9 @@ export type SettingsKey =
   | "MODEL_DIRS"
   | "UPDATE_CHANNEL"
   | "AUTO_UPDATE"
+  // 上一次成功启动时的版本（形如 `0.1.2` 或 `0.1.2 (canary)`）。只用来在 app.log 里
+  // 区分"这一版是刚升上来的"还是"一直在跑"，见 bun/updates.ts 的 recordBootVersion。
+  | "LAST_RUN_VERSION"
   | "FAVORITE_MODELS"
   | "LAUNCHER_CLAUDE_MODE"
   | "LAUNCHER_CLAUDE_OPUS"
@@ -51,10 +56,23 @@ export type SettingsKey =
   | "SERVER_GPU_LAYERS"
   | "SERVER_CACHE_TYPE_K"
   | "SERVER_CACHE_TYPE_V"
+  // llama.cpp 自动启动参数（T4）：总开关，默认关（行为与关闭前逐字节一致，见
+  // bun/runtimes/llama.ts 的 buildArgs / launch-plan.ts）。
+  | "SERVER_AUTO_TUNE"
+  /** 自动推算时上下文的下限（token），低于这个值不如不跑。 */
+  | "SERVER_AUTO_TUNE_MIN_CTX"
   // 模型加载模式（llama.cpp 的 mmap / mlock 取舍，PERF-02）：auto 之外的取值按
   // llama-server 是 `--load-mode`（新版）还是 `--mlock`（旧版）折算，见
   // bun/runtimes/llama-load-mode.ts。合法取值在 set 时校验，非法值直接拒。
   | "SERVER_LOAD_MODE"
+  // Flash attention 三态（llama-server 的 --flash-attn on|off|auto）：auto 是 llama.cpp
+  // 自己的默认（N 卡上自动开），也是应用默认 —— 未改过的用户在老 build（探测不到）上
+  // 行为与从前逐字节一致。"off"/"on" 才真正改 argv，见 bun/runtimes/llama-flash-attn.ts。
+  | "SERVER_FLASH_ATTN"
+  // 上次启动时 llama.cpp **实际**用了什么（程序写、用户不填）：""=从没启动过（未知）、
+  // "on"/"off"。auto 模式规划时用它计价（见 llama.ts 的 LaunchPlanKey）。不进
+  // updateSettings 的枚举白名单，程序侧走 setServerFlashAttnEffective 直接写。
+  | "SERVER_FLASH_ATTN_EFFECTIVE"
   | "CUSTOM_HF_MODEL"
   | "LOCAL_MODEL_PATH"
   | "LOCAL_MODEL_NAME"
@@ -241,6 +259,10 @@ export type SettingsKey =
   | "VOICE_CALL_REALTIME_BASE_URL"
   | "VOICE_CALL_REALTIME_MODEL"
   | "VOICE_CALL_REALTIME_VOICE"
+  /** omni 模式（音频直送多模态模型）选中的厂商：API Key 与 Base URL 都从厂商行取。 */
+  | "VOICE_CALL_OMNI_PROVIDER_ID"
+  /** omni 模式使用的模型 id（默认 qwen3.8-omni-flash）。 */
+  | "VOICE_CALL_OMNI_MODEL"
   // Skills 管理（参照 skills-manager 移植）
   | "SKILLS_CENTRAL_PATH"
   | "SKILLS_SYNC_MODE"
@@ -284,7 +306,32 @@ export type SettingsKey =
   // 唯一读取点见 bun/embeddings.ts 的 globalEmbeddingDefaults()。
   | "EMBEDDING_MODEL"
   | "EMBEDDING_BASE"
-  | "EMBEDDING_API_KEY";
+  | "EMBEDDING_API_KEY"
+  // SystemOne / JEV（类型化判定：choice / score / noul）。本地与云端两个后端，
+  // 协议与 TypeSafe 官方逐字段对齐（见 shared/systemone.ts），网关在 /v1/systemone
+  // 暴露出去，外部 agent 换 Base URL + Key 即可接入。价格恒为 0：免费。
+  /** local（只用本地）/ cloud（只用云端）；auto（默认）只在用户没选过后端时兜底。
+   *  JEV 页左栏「判定引擎」的 tab 直接写这里，所以它同时是"用户选了哪条路"的记录。 */
+  | "SYSTEMONE_BACKEND"
+  /** 云端 Base URL，默认 TypeSafe 官方 https://api.typesafe.ai。 */
+  | "SYSTEMONE_CLOUD_BASE_URL"
+  | "SYSTEMONE_CLOUD_API_KEY"
+  /** 云端默认模型（官方别名 jev-latest）。 */
+  | "SYSTEMONE_CLOUD_MODEL"
+  /** 自建 / 局域网内的 TypeSafe 兼容服务地址（例：http://127.0.0.1:8100）。 */
+  | "SYSTEMONE_LOCAL_BASE_URL"
+  | "SYSTEMONE_LOCAL_API_KEY"
+  /** 本地默认模型：目录里的 laya-* 名字，或直接填 Hugging Face repo id。 */
+  | "SYSTEMONE_LOCAL_MODEL"
+  /** 本地运行时（laya-mlx）的精度：float16（默认）/ float32。 */
+  | "SYSTEMONE_LOCAL_DTYPE"
+  /** 云端 / 本地服务（HTTP）的单次超时。 */
+  | "SYSTEMONE_TIMEOUT_MS"
+  /**
+   * 本地运行时（laya-mlx worker）的单次超时，默认 600s —— 比 HTTP 那条宽得多，
+   * 因为**第一次调用还要把权重下下来**（几百 MB，取决于网速）。
+   */
+  | "SYSTEMONE_LOCAL_TIMEOUT_MS";
 
 const DEFAULTS: Record<SettingsKey, string> = {
   SETUP_COMPLETE: "",
@@ -305,6 +352,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   UPDATE_CHANNEL: "stable",
   // 启动时自动检查并下载新 release（"0" 关闭，仅手动检查）。
   AUTO_UPDATE: "1",
+  LAST_RUN_VERSION: "",
   FAVORITE_MODELS: "[]",
   LAUNCHER_CLAUDE_MODE: "local",
   LAUNCHER_CLAUDE_OPUS: "",
@@ -316,7 +364,7 @@ const DEFAULTS: Record<SettingsKey, string> = {
   LAUNCHER_HERMES_MODEL: "",
   LAUNCHER_PI_MODEL: "",
   LAUNCHER_COPILOT_MODEL: "",
-  SERVER_CTX_SIZE: "8192",
+  SERVER_CTX_SIZE: String(LOCAL_CTX_DEFAULT),
   SERVER_IMAGE_MAX_TOKENS: "2048",
   SERVER_BATCH_SIZE: "256",
   SERVER_UBATCH_SIZE: "64",
@@ -333,8 +381,16 @@ const DEFAULTS: Record<SettingsKey, string> = {
   SERVER_GPU_LAYERS: "-1",
   SERVER_CACHE_TYPE_K: "q8_0",
   SERVER_CACHE_TYPE_V: "q8_0",
+  // 默认关：启动参数全部走设置里的现值，开「自动推算」是显式选择。
+  SERVER_AUTO_TUNE: "0",
+  // 上下文下限 4096（与 launch-planner 的 MIN_FIT_CTX 同一量级，设置里可再调低）。
+  SERVER_AUTO_TUNE_MIN_CTX: "4096",
   // auto = 不传参数（llama.cpp 自己的默认：能用 mmap 就用）。
   SERVER_LOAD_MODE: "auto",
+  // 默认 auto = 听 llama.cpp 自己的默认；探测到三态开关后才可能真正发参数。
+  SERVER_FLASH_ATTN: "auto",
+  // "" = 从没启动过（未知）：auto 模式下规划按「关」保守计价。
+  SERVER_FLASH_ATTN_EFFECTIVE: "",
   CUSTOM_HF_MODEL: "",
   LOCAL_MODEL_PATH: "",
   LOCAL_MODEL_NAME: "",
@@ -521,6 +577,9 @@ const DEFAULTS: Record<SettingsKey, string> = {
   VOICE_CALL_REALTIME_BASE_URL: "wss://dashscope.aliyuncs.com/api-ws/v1/realtime",
   VOICE_CALL_REALTIME_MODEL: "qwen-audio-3.0-realtime-plus",
   VOICE_CALL_REALTIME_VOICE: "longanqian",
+  // omni 模式：厂商留空 = 未配置（页面引导用户选一个），模型有个能直接用的默认值。
+  VOICE_CALL_OMNI_PROVIDER_ID: "",
+  VOICE_CALL_OMNI_MODEL: VOICE_CALL_OMNI_DEFAULT_MODEL,
   // Skills 管理默认值
   SKILLS_CENTRAL_PATH: "",
   SKILLS_SYNC_MODE: "symlink",
@@ -563,6 +622,20 @@ const DEFAULTS: Record<SettingsKey, string> = {
   EMBEDDING_MODEL: "",
   EMBEDDING_BASE: "",
   EMBEDDING_API_KEY: "",
+  // SystemOne / JEV：默认 auto —— 它只代表"用户还没选过后端"（本地能用就用本地，
+  // 否则云端）。JEV 页左栏的「判定引擎」一切 tab 就把这里改写成 local / cloud，
+  // 之后那一侧是硬选择，另一侧不再兜底。云端地址预填官方，
+  // Key 留空（没 Key 时 auto 会如实报"没有可用后端"而不是偷偷失败）。
+  SYSTEMONE_BACKEND: "auto",
+  SYSTEMONE_CLOUD_BASE_URL: "https://api.typesafe.ai",
+  SYSTEMONE_CLOUD_API_KEY: "",
+  SYSTEMONE_CLOUD_MODEL: "jev-latest",
+  SYSTEMONE_LOCAL_BASE_URL: "",
+  SYSTEMONE_LOCAL_API_KEY: "",
+  SYSTEMONE_LOCAL_MODEL: "laya-latest",
+  SYSTEMONE_LOCAL_DTYPE: "float16",
+  SYSTEMONE_TIMEOUT_MS: "60000",
+  SYSTEMONE_LOCAL_TIMEOUT_MS: "600000",
 };
 
 /**
@@ -610,6 +683,9 @@ export const ENCRYPTED_SETTINGS_KEYS: readonly SettingsKey[] = [
   "SKILLS_GIT_PAT",
   "BACKUP_REMOTE_ACCESS_KEY",
   "BACKUP_REMOTE_SECRET_KEY",
+  // SystemOne / JEV 的两把 Key（云端 TypeSafe、自建本地服务）：同样属于"拿到就能替你花钱"。
+  "SYSTEMONE_CLOUD_API_KEY",
+  "SYSTEMONE_LOCAL_API_KEY",
 ];
 
 /**
@@ -671,6 +747,16 @@ export function getNumericSetting(key: SettingsKey): number {
   return Number(getSetting(key));
 }
 
+/**
+ * 程序侧写 SERVER_FLASH_ATTN_EFFECTIVE（用户面不填）：复用 updateSettings 的加密/缓存路径，
+ * 值先收进白名单（非 ""/"on"/"off" 一律拒掉，见 updateSettings），所以任何调用方
+ * 都写不进别的值。
+ */
+export function setServerFlashAttnEffective(value: EffectiveFlashAttn): void {
+  updateSettings({ SERVER_FLASH_ATTN_EFFECTIVE: value });
+}
+
+
 export function getAllSettings(): Record<string, string> {
   const rows = db.select().from(settingsTable).all();
   const result: Record<string, string> = { ...DEFAULTS };
@@ -696,6 +782,26 @@ export const EMBEDDING_POOLING_VALUES = ["last", "mean", "none", "cls"] as const
  */
 export const LOAD_MODE_SETTING_VALUES = ["auto", "mmap", "mlock", "mmap+mlock", "none", "dio"] as const;
 
+/**
+ * 上次启动时 llama.cpp 实际用到的 flash attention 状态（"" = 从没启动过）。
+ */
+export type EffectiveFlashAttn = "" | "on" | "off";
+
+/** 允许落库的全部值（含 ""=未知）；别处（RPC/CLI）要写这个键时用它收口。 */
+const EFFECTIVE_FLASH_ATTN_VALUES: readonly string[] = ["", "on", "off"];
+
+/**
+ * llama.cpp `--flash-attn` 的合法取值（`--help` 原文：`[on|off|auto]`）。非法值直接拒
+ * —— 与 LOAD_MODE 同理，它最终会进 argv。
+ */
+export const FLASH_ATTN_SETTING_VALUES = ["auto", "on", "off"] as const;
+
+/**
+ * llama.cpp 自动启动参数总开关：只接受 "0" / "1"（与 AUTO_START_SERVER 同一套 0/1 约定）。
+ * 非法值直接拒 —— 它门控的是「用推算值改写 --ctx-size / --batch-size」，读侧只认 "1"。
+ */
+export const AUTO_TUNE_SETTING_VALUES = ["0", "1"] as const;
+
 export function updateSettings(values: Record<string, string>) {
   for (const [key, value] of Object.entries(values)) {
 // EMBEDDING_POOLING 只认枚举值：非法值直接跳过（静默拒掉，读侧回落默认 last）。
@@ -710,6 +816,22 @@ export function updateSettings(values: Record<string, string>) {
       key === "SERVER_LOAD_MODE" &&
       !(LOAD_MODE_SETTING_VALUES as readonly string[]).includes(value)
     ) {
+      continue;
+    }
+    // 自动启动参数总开关只认 0/1（读侧只认 "1"，其余一律当关）。
+    if (key === "SERVER_AUTO_TUNE" && !(AUTO_TUNE_SETTING_VALUES as readonly string[]).includes(value)) {
+      continue;
+    }
+    // flash attention 只认三态（读侧回落默认 auto）。
+    if (
+      key === "SERVER_FLASH_ATTN" &&
+      !(FLASH_ATTN_SETTING_VALUES as readonly string[]).includes(value)
+    ) {
+      continue;
+    }
+    // SERVER_FLASH_ATTN_EFFECTIVE 是程序状态（上次启动的实际值），不走枚举白名单，
+    // 也不该从用户面写进来：这里只收空串与 on/off，其余（包括枚举之外的值）拒掉。
+    if (key === "SERVER_FLASH_ATTN_EFFECTIVE" && !EFFECTIVE_FLASH_ATTN_VALUES.includes(value)) {
       continue;
     }
     const encrypted = maybeEncrypt(key as SettingsKey, value);

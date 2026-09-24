@@ -24,6 +24,21 @@ export const KB_IMAGE_EXT = ["pdf", "png", "jpg", "jpeg", "webp", "tiff", "bmp",
 export const KB_AUDIO_EXT = ["mp3", "wav", "flac", "m4a", "ogg", "opus", "aac"] as const;
 export const KB_VIDEO_EXT = ["mp4", "mov", "mkv", "webm", "avi", "m4v"] as const;
 
+/** 知识库可导入文件的完整白名单（目录导入 / 文件选择器校验共用，别处不要再写死名单）。 */
+export const KB_SUPPORTED_EXT = [
+  ...KB_TEXT_EXT,
+  ...KB_IMAGE_EXT,
+  ...KB_AUDIO_EXT,
+  ...KB_VIDEO_EXT,
+] as const;
+
+/** 文件名是否在知识库白名单内（大小写不敏感；无扩展名 / 只有扩展名的隐藏文件视为不支持）。 */
+export function kbFileSupported(fileName: string): boolean {
+  const dot = fileName.lastIndexOf(".");
+  if (dot <= 0) return false;
+  return (KB_SUPPORTED_EXT as readonly string[]).includes(fileName.slice(dot + 1).toLowerCase());
+}
+
 /**
  * 按文件名判断模态：图片=pdf+常见位图，音频/视频见扩展名常量，其余一律按 text。
  * UI（文件选择器 accept）与 bun（目录导入白名单 / 摄取路由）共用，别处不要再写死名单。

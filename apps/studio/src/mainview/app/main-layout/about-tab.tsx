@@ -62,6 +62,18 @@ export function AboutTab() {
     mutationFn: () => rpcClient.startAutoUpdate(),
   });
 
+  // 升级请求可能被拒（没有已下载好的更新）：以前这个调用没有返回，界面点下去
+  // 什么都不发生，用户只能再点一次。现在把原因显示出来。
+  const [applyError, setApplyError] = useState<string | null>(null);
+  const applyUpdateMutation = useMutation({
+    mutationFn: () => rpcClient.applyUpdate(),
+    onMutate: () => setApplyError(null),
+    onSuccess: (res) => {
+      if (res && res.ok === false) setApplyError(res.error ?? t("settings.aboutTab.downloadFailed"));
+    },
+    onError: (e) => setApplyError(String(e)),
+  });
+
   const openUrlMutation = useMutation({
     mutationFn: (url: string) => rpcClient.openGatewayDocs({ url }),
   });
@@ -196,7 +208,7 @@ export function AboutTab() {
                     {t("settings.aboutTab.downloading")}
                   </span>
                 ) : updaterReady ? (
-                  <Button size="sm" onClick={() => rpcClient.applyUpdate()}>
+                  <Button size="sm" onClick={() => applyUpdateMutation.mutate()}>
                     <DownloadIcon data-icon="inline-start" />
                     {t("settings.aboutTab.restartInstall")}
                   </Button>
@@ -222,6 +234,11 @@ export function AboutTab() {
               {updateState.status === "error" && (
                 <p className="mt-2 text-[11px] text-destructive">
                   {t("settings.aboutTab.downloadFailed")}
+                </p>
+              )}
+              {applyError && (
+                <p className="mt-2 text-[11px] text-destructive">
+                  {t("settings.aboutTab.applyFailed")}：{applyError}
                 </p>
               )}
             </div>

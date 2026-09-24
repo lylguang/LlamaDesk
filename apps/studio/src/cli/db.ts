@@ -1,4 +1,6 @@
 import { join } from "path";
+import { existsSync } from "fs";
+import { Database } from "bun:sqlite";
 import { findLiveDataDir, resolveDataDir } from "./data-dir";
 
 type AppModules = {
@@ -8,6 +10,38 @@ type AppModules = {
 };
 
 let loaded: AppModules | null = null;
+
+/**
+ * 跳过迁移后，"库还没建好"就不再被自动修好 —— 与其让调用方拿到一句
+ * `no such table: settings`，不如在这里说清楚该做什么。
+ */
+function assertDbReady(dataDir: string): void {
+  const dbFile = join(dataDir, "omni-studio.db");
+  if (!existsSync(dbFile)) {
+    throw new Error(
+      `这个数据目录还没有数据库：${dbFile}\n` +
+        `先启动一次 OmniStudio（数据库由应用创建并迁移），\`omi\` 不会替它建库。`,
+    );
+  }
+  let tables = 0;
+  try {
+    const probe = new Database(dbFile, { readonly: true });
+    const row = probe
+      .query("select count(*) as c from sqlite_master where type='table' and name='settings'")
+      .get() as { c?: number } | null;
+    tables = Number(row?.c ?? 0);
+    probe.close();
+  } catch {
+    // 打不开（被锁 / 损坏）时把问题留给后面的读取报错，这里不回滚成"没建库"。
+    return;
+  }
+  if (tables === 0) {
+    throw new Error(
+      `数据库还没有初始化（${dbFile}）。请先启动一次 OmniStudio 完成建库与迁移 —— ` +
+        `\`omi\` 只读这份库，不会替应用跑迁移。`,
+    );
+  }
+}
 
 /**
  * 应用未运行时的本地兜底：直接 import 主进程的 bun 模块读写同一份 SQLite。
@@ -21,7 +55,16 @@ async function appModules(): Promise<AppModules> {
   if (loaded) return loaded;
   const dataDir = (await findLiveDataDir()) ?? resolveDataDir();
   process.env.OMNI_DATA_DIR = dataDir;
-  process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
+process.env.OMNI_DB_PATH = join(dataDir, "llama-desk.db");
+  // 关键：CLI 只是"读设置 / 模型"，**不迁移**这个库。
+  // 迁移的判定标准是"库里已应用的 when" vs "当前构建 journal 的 when"，而同一个库会被
+  // 安装版和你仓库里这份源码分别打开，两份 journal 的时间戳并不一致（历史上有一批迁移
+  // 被写成伪造的递增戳）—— 任一方跑一次迁移，另一方下次启动就会重跑建表并崩在
+  // `table already exists`，也就是"跑过一次 omi / 更新完之后再也打不开"。
+  // 迁移与自愈是**应用**的职责（它知道自己是哪一版，起不来时也该由它提示）——
+  // 见 bun/db/index.ts 的 OMNI_SKIP_MIGRATIONS。
+  process.env.OMNI_SKIP_MIGRATIONS ??= "1";
+  assertDbReady(dataDir);
   const [modelStore, settings, cloudProviders] = await Promise.all([
     import("../bun/model-store"),
     import("../bun/db/settings"),

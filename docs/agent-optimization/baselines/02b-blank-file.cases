@@ -1,0 +1,49 @@
+apps/studio/src/bun/agent-sandbox.test.ts::describe|Linux（bwrap）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|Linux（Landlock 规则生成）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|端到端（真实 Seatbelt）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|策略与包装
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：blankFile 可自定义文件类凭据的覆盖源，缺省是 /dev/null
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：read-only 不挂工作区；联网开关 → --unshare-net
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据**文件**（.npmrc）用 --ro-bind 盖住，而不是 --tmpfs（对着文件挂 tmpfs 会让 bwrap 起不来）
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据目录（.ssh）仍走 --tmpfs，没被误改成 --ro-bind
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据目录用空 tmpfs 盖住（bwrap 没有按路径拒读的写法）
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：整体只读挂根，再把工作区/临时目录挂成可写
+apps/studio/src/bun/agent-sandbox.test.ts::test|handled 覆盖所有写位：Landlock 只处理你声明的权限，漏一位就是少拦一种
+apps/studio/src/bun/agent-sandbox.test.ts::test|Landlock 的前置条件：禁网与文件系统不兼容都要如实拦下，别硬上
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：只放行临时目录写，且不认已授权目录；网络按开关
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：工作区不给写；临时目录仍可写（与 Seatbelt / bwrap 口径一致）
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：工作区也写不了、临时目录可以写、读照常
+apps/studio/src/bun/agent-sandbox.test.ts::test|workspace-write：根目录只给读，可写目录单独给一组（Landlock 是叠加的允许集）
+apps/studio/src/bun/agent-sandbox.test.ts::test|wrapShellCommand：Linux + bwrap 可用 → 包 bwrap；不可用 → 降级并给出安装命令
+apps/studio/src/bun/agent-sandbox.test.ts::test|不存在的路径不生成规则（Landlock 对不存在路径加规则会 ENOENT）
+apps/studio/src/bun/agent-sandbox.test.ts::test|关掉沙箱后同一命令能写出去（确认拦截确实来自沙箱）
+apps/studio/src/bun/agent-sandbox.test.ts::test|关闭时原样执行，不引入任何包装
+apps/studio/src/bun/agent-sandbox.test.ts::test|凭据清单里的本应用数据目录是**真实路径**（写死名字等于什么都没拦）
+apps/studio/src/bun/agent-sandbox.test.ts::test|凭据目录读也被拒（工具层黑名单覆盖不到 bash）
+apps/studio/src/bun/agent-sandbox.test.ts::test|可写目录去重且带 realpath（/tmp 与 /private/tmp 是两条路径）
+apps/studio/src/bun/agent-sandbox.test.ts::test|后端偏好：默认 auto（bwrap 优先、Landlock 兜底），可显式指定
+apps/studio/src/bun/agent-sandbox.test.ts::test|后端按平台选：macOS 走 Seatbelt、Linux 走 bwrap、其它没有
+apps/studio/src/bun/agent-sandbox.test.ts::test|如实说明表达不了的部分：Landlock 是只允许模型，挖不掉凭据目录
+apps/studio/src/bun/agent-sandbox.test.ts::test|工作区内可写，工作区外不可写
+apps/studio/src/bun/agent-sandbox.test.ts::test|已授权目录只在 workspace-write 档可写；重复路径只出现一次
+apps/studio/src/bun/agent-sandbox.test.ts::test|开启后在支持的平台包上 sandbox-exec；不支持的平台降级并说明原因
+apps/studio/src/bun/agent-sandbox.test.ts::test|拦截解释认得 bwrap 的报错（只读挂载 / bwrap 前缀）
+apps/studio/src/bun/agent-sandbox.test.ts::test|无人值守（没注入升级回调）时如实报告被拦，不重跑
+apps/studio/src/bun/agent-sandbox.test.ts::test|普通命令失败（不是沙箱拦的）不会触发升级询问
+apps/studio/src/bun/agent-sandbox.test.ts::test|档位解析：三种值，非法值回落到 off
+apps/studio/src/bun/agent-sandbox.test.ts::test|沙箱升级：拒绝时不重跑，把拒绝原因一并交给模型
+apps/studio/src/bun/agent-sandbox.test.ts::test|沙箱升级：被拦后按次申请，允许则跳过沙箱重跑一次
+apps/studio/src/bun/agent-sandbox.test.ts::test|状态如实反映本机情况：非 Linux 明说不可用，Linux 才去编译与探测
+apps/studio/src/bun/agent-sandbox.test.ts::test|状态摘要如实反映平台与联网设置
+apps/studio/src/bun/agent-sandbox.test.ts::test|策略里包含工作区（含 realpath）、临时目录与已授权目录，并拒绝凭据路径
+apps/studio/src/bun/agent-sandbox.test.ts::test|联网开关 → network 字段与如实的能力提示（老内核没有 net 规则）
+apps/studio/src/bun/agent-sandbox.test.ts::test|规格 JSON：同一档位序列化完全一致，路径排序，版本可演进
+apps/studio/src/bun/agent-sandbox.test.ts::test|设备例外：/dev/null 等必须可写（否则 
+apps/studio/src/bun/agent-sandbox.test.ts::test|阻断说明只在真的像沙箱拦截时出现，并说清是哪一档
+apps/studio/src/bun/agent-tools.bash.test.ts::describe|bash 工具
+apps/studio/src/bun/agent-tools.bash.test.ts::test|resolveCommandTimeout：参数夹在 [1000, 600000]，非法值退回 ctx / 默认
+apps/studio/src/bun/agent-tools.bash.test.ts::test|传了 timeout_ms 就按它来，不再写死 120 秒
+apps/studio/src/bun/agent-tools.bash.test.ts::test|后台进程占着 stdout 时也立刻返回，不等管道 EOF
+apps/studio/src/bun/agent-tools.bash.test.ts::test|普通命令照常返回输出与退出码
+apps/studio/src/bun/agent-tools.bash.test.ts::test|用户点停止：命令被终止并在结果里说明
+apps/studio/src/bun/agent-tools.bash.test.ts::test|超时终止整条进程组：后台孙进程不会变成孤儿

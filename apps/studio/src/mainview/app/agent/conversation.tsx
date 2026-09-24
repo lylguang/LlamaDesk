@@ -12,6 +12,7 @@ import { useChatStore } from "@stores/chat";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { useServerMessageSync } from "@hooks/use-server-message-sync";
+import { useFollowScroll } from "./use-follow-scroll";
 import { AgentComposer } from "./composer";
 import { AgentAssistantMessage, AgentUserMessage } from "./message";
 import { artifactsByMessage as groupArtifactsByMessage, lastAssistantMessageId } from "./artifact-meta";
@@ -156,10 +157,11 @@ export function AgentConversation({
 
   // 新消息 / 新事件进来时贴到底。这里用 scrollTop 直接赋值而不是 scrollIntoView：
   // 后者会连带把外层容器也滚一下，工具条会跳。
+  // 跟随模式：用户往上翻了就别抢滚动条，距底 64px 内才继续跟着贴底（判据见 use-follow-scroll）。
   const lastForScroll = activeMessages[activeMessages.length - 1];
+  const { onScroll: followOnScroll, scrollToBottomIfFollowing } = useFollowScroll(scrollRef);
   useEffect(() => {
-    const el = scrollRef.current;
-    if (el) el.scrollTop = el.scrollHeight;
+    scrollToBottomIfFollowing();
   }, [activeMessages.length, lastForScroll?.content, lastForScroll?.reasoning, events.length]);
 
   /** 事件按所属消息预分组：原来在 messages.map 里逐个 filter 事件，消息一多就是 O(n×m)。 */
@@ -207,8 +209,16 @@ export function AgentConversation({
    * 看起来就是"执行到一半记录加不上"，而且不会再自己好（打开会话时的整份加载是唯一
    * 的补救）。所以跑动中每几秒按 id 只取新增的那几条并进列表，收尾（running 转 false）
    * 再补一次：正常情况下每次返回空数组，几乎不花钱。
+   *
+   * 首次打开会话时全量查询还没落地（store 里还没有事件），那时 `afterId` 会算成 0，
+   * 追平会变成又一次全量拉取（几千条轨迹的会话被完整拉两遍）—— 所以首次全量
+   * 查询落地（`eventsQuery.isSuccess`）之前不追平；落地后 effect 靠它重跑，追平才开始。
+   * `isSuccess` 用依赖而不是 `data`：前者从 false→true 只发生一次，effect 只多跑一次。
+   * 空会话从 0 追平是对的（返回空数组，很便宜）；`eventsQuery` 失败时不追平，
+   * 打开会话时的整份查询会再对齐一次。
    */
   useEffect(() => {
+    if (!eventsQuery.isSuccess) return;
     const catchUp = async () => {
       const known = useAgentStore.getState().events;
       const afterId = known.length > 0 ? known[known.length - 1]!.id : 0;
@@ -225,14 +235,14 @@ export function AgentConversation({
     }
     const timer = window.setInterval(() => void catchUp(), 4000);
     return () => window.clearInterval(timer);
-  }, [running, conversationId]);
+  }, [running, conversationId, eventsQuery.isSuccess]);
 
   // 只有最后一条助手消息在流式时才转圈：前面的消息早就结束了。
   const lastMessage = activeMessages[activeMessages.length - 1];
 
   return (
     <>
-      <div ref={scrollRef} className="thread-scroll">
+      <div ref={scrollRef} className="thread-scroll" onScroll={followOnScroll}>
         <div className="thread-content">
           {!hasMessages ? (
             <div className="thread-hero">

@@ -1,28 +1,29 @@
+// 必须最先导入：启动守卫要在任何会抛错的模块（尤其 ./db 的迁移）之前注册好监听器，
+// 否则一次迁移失败就是"图标闪一下、窗口都没出"——用户看不到任何原因。
+import "./startup-guard";
 // 必须最先导入：把 userData 目录写进 OMNI_DATA_DIR，供 ./db 定位数据库。
 import "./user-data";
 import "./canvas-polyfill";
 import Electrobun, { Utils } from "electrobun/bun";
-import { BrowserWindow, Updater } from "electrobun/bun";
+import { BrowserWindow } from "electrobun/bun";
 import "./db";
 import { startImageServer, onMediaServerStatusChange } from "./image-server";
-import { closeAllTerminals } from "./terminal-sessions";
 import { setWindowRef } from "./window";
-import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
+import { appRPC, initServerBroadcast, initModelDownloadBroadcast, initTTSModelDownloadBroadcast, initGatewayBroadcast, initTunnelBroadcast, initEngineInstallBroadcast, initMlxInstallBroadcast, initMlxModelDownloadBroadcast, initMediaSetupBroadcast, initPpOcrBroadcast, initTessInstallBroadcast, initSkillsBroadcast, initBackupBroadcast, initSystemOneBroadcast, broadcastCurrentStatus, dispatchRemoteRpc, initRemoteBroadcast, replayRemoteStatus } from "./rpc";
 import { installWebBridge } from "./gateway-web";
 import { seedIfNeeded } from "./prompt-library";
-import { initSkills, shutdownSkills } from "./skills";
+import { initSkills } from "./skills";
 import { APP_NAME } from "./config";
 import { createMenu } from "./menu";
-import { broadcastUpdateStatus, checkForUpdate, updateState } from "./updates";
+import { broadcastUpdateStatus, checkForUpdate, localVersionSafe, recordBootVersion, updateState } from "./updates";
+import { markStartupReady } from "./startup-guard";
+import { teardownServices, teardownServicesSync } from "./shutdown";
 import { isConfigured, getSetting } from "./db/settings";
 import * as ServerManager from "./server-manager";
-import { stopAllServed } from "./model-servers";
 import { healDriftedChatConfig } from "./model-store";
 import * as Gateway from "./gateway";
 import * as Tunnel from "./tunnel";
-import { stopAsr } from "./asr";
-import { stopPpOcr } from "./ppocr";
-import { startControlServer, stopControlServer } from "./control-server";
+import { startControlServer } from "./control-server";
 import { getAgentWorkspace } from "./agent";
 import { runMemoryMaintenance } from "./memory";
 import { runKbMaintenance } from "./knowledge";
@@ -40,7 +41,9 @@ installProxy();
 
 // Check if Vite dev server is running for HMR
 async function getMainViewUrl(): Promise<string> {
-  const channel = await Updater.localInfo.channel();
+  // 渠道读不出来时按打包版处理（views:// 一定可用）—— 这个查询是 cwd 相对读取
+  // version.json，升级后由 Updater 重新 open 时路径未必一致，不能让它把启动带崩。
+  const { channel } = await localVersionSafe();
   if (channel === "dev") {
     const DEV_SERVER_PORT = 5173;
     const DEV_SERVER_URL = `http://localhost:${DEV_SERVER_PORT}`;
@@ -107,6 +110,11 @@ try {
 }
 createMenu();
 
+// 先对齐"我这一版是几"，再打启动日志 —— 否则 app.start 里永远是 0.0.0（版本要等
+// checkForUpdate 才填），事后根本分不清是哪一版写的日志。顺带在版本变化时记一条
+// `update.applied from→to`，让"升级后起不来"这类问题能直接对上时间线。
+await recordBootVersion();
+
 logEvent({
   level: "info",
   source: "app",
@@ -152,6 +160,9 @@ initMlxInstallBroadcast(mainWindow);
 initMlxModelDownloadBroadcast(mainWindow);
 initMediaSetupBroadcast(mainWindow);
 initPpOcrBroadcast(mainWindow);
+// JEV 的安装日志 / 权重下载进度：**桌面窗口这一份别漏** —— 只接到网页端那份 fake window
+// 上时，桌面端点「下载」什么都看不到（状态查询是拉取、装完才知道，进度是推的）。
+initSystemOneBroadcast(mainWindow);
 initTessInstallBroadcast(mainWindow);
 initSkillsBroadcast(mainWindow);
 initBackupBroadcast(mainWindow);
@@ -177,6 +188,21 @@ void startControlServer();
 if (getSetting("AUTO_UPDATE") !== "0") {
   checkForUpdate();
 }
+
+// 受管子进程扫尾：上次进程被强杀（SIGKILL / 崩溃 / 任务管理器）时会把
+// llama.cpp / vLLM / SGLang / MLX / whisper / OCR 等推理进程留成带显存的孤儿，
+// 占端口、吃显存。这里在数据目录与日志就绪之后、启动推理服务之前，把上次
+// 遗留的受管子进程清掉（先核对身份再杀，核对不上宁可漏杀）。失败不挡启动。
+void import("./child-registry")
+  .then((m) => m.reapRecordedChildren())
+  .catch((e) => {
+    log.warn({
+      source: "app",
+      event: "child_reap.failed",
+      message: `启动扫尾失败（不影响启动）：${e instanceof Error ? e.message : String(e)}`,
+      detail: { error: e instanceof Error ? e.message : String(e) },
+    });
+  });
 
 // 自愈被老版本写脏的聊天活动状态（老版本启动嵌入模型曾把 LOCAL_MODEL_PATH /
 // CHAT_MODEL 写成嵌入模型）：三把键是 auto-start 找目标的依据，不清理的话会只
@@ -262,24 +288,13 @@ void Promise.resolve()
 
 // Handle window close
 mainWindow.on("close", async () => {
-  // 停掉**全部**已启动模型：推理进程是 detached 的，漏一个就留下占显存的孤儿。
-  // 隧道同理：漏掉就是留一条公开入口，所以先同步掐掉它（不等 cloudflared 优雅退出）。
-  Tunnel.stopTunnelSync();
-  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
-  // 侧边面板里的终端 shell：跟着窗口一起收掉，别留下没人管的会话。
-  closeAllTerminals();
-  shutdownSkills();
-  stopControlServer();
+  await teardownServices();
   Utils.quit();
 });
 
 // Cleanup on quit
 Electrobun.events.on("before-quit", async () => {
-  Tunnel.stopTunnelSync();
-  await Promise.all([stopAllServed(), stopAsr(), Gateway.stopGateway(), stopPpOcr()]);
-  closeAllTerminals();
-  shutdownSkills();
-  stopControlServer();
+  await teardownServices();
 });
 
 // Safety net for unexpected termination
@@ -290,10 +305,7 @@ process.on("SIGTERM", () => {
     event: "app.sigterm",
     message: "收到 SIGTERM，正在停止推理服务与子进程",
   });
-  ServerManager.forceKill();
-  Tunnel.stopTunnelSync();
-  void Gateway.stopGateway();
-  stopControlServer();
+  teardownServicesSync();
 });
 process.on("uncaughtException", (err) => {
   // 现场先落盘再退出：崩溃前最后一条 app.log 往往就是根因。
@@ -305,10 +317,7 @@ process.on("uncaughtException", (err) => {
     detail: { error: err, name: err instanceof Error ? err.name : undefined },
   });
   console.error("Uncaught exception:", err);
-  ServerManager.forceKill();
-  Tunnel.stopTunnelSync();
-  void Gateway.stopGateway();
-  stopControlServer();
+  teardownServicesSync();
 });
 // Bun 默认把未处理的 rejection 视为致命（打印后以非 0 退出）；这里显式接管，
 // 保持同样的退出语义，但先把现场写进统一日志 —— 否则打包应用里什么都看不到。
@@ -321,12 +330,13 @@ process.on("unhandledRejection", (reason) => {
     detail: { reason },
   });
   console.error("Unhandled rejection:", reason);
-  ServerManager.forceKill();
-  Tunnel.stopTunnelSync();
-  void Gateway.stopGateway();
-  stopControlServer();
+  teardownServicesSync();
   process.exit(1);
 });
+
+// 到这里启动已经走完：告诉启动守卫可以"交班"了 —— 之后再出异常由上面那几个
+// 处理器按运行时语义处理，不再当成"起不来"去弹框。
+markStartupReady();
 
 log.info({ source: "app", event: "app.ready", message: `${APP_NAME} 已就绪（窗口与后台服务已启动）` });
 console.log(`${APP_NAME} started!`);

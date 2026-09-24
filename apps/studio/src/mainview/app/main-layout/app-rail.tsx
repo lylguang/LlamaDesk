@@ -34,6 +34,8 @@ import { APP_RAIL_LAYOUT_KEY, resolveRailLayout, visibleRailEntries } from "@/sh
 export const APP_ICONS: Record<AppId, ReactNode> = {
   chat: <MessageCircleDashedIcon className="size-5" />,
   agent: <SquareTerminalIcon className="size-5" />,
+  // JEV：滑杆 == "在档位/选项上做判定"，与 Agent 的终端方块、其它具象图标区分开
+  jev: <SlidersHorizontalIcon className="size-5" />,
   voicecall: <PhoneIcon className="size-5" />,
   voice: <AudioWaveformIcon className="size-5" />,
   image: <ShapesIcon className="size-5" />,

@@ -9,6 +9,7 @@ import {
 import path from "path";
 import { logEvent } from "./app-log";
 import { getDataDir } from "./paths";
+import { removeManifest, writeManifest } from "./install-manifest";
 import { getSetting } from "./db/settings";
 
 /**
@@ -80,6 +81,15 @@ export const MLX_MODELS: MlxModelInfo[] = [
     modelArg: "dev",
     defaultSteps: 50,
     approxSizeGb: 24,
+  },
+  {
+    id: "qwen-image-2.1",
+    label: "Qwen-Image-2.1 (7B+VL)",
+    description: "阿里统一文生图 + 图像编辑模型，原生 2K、可出透明 PNG；BF16 全量约 31GB、峰值约 46GB，紧内存用 -q 8，默认 1024",
+    cmd: "mflux-generate-qwen-2.1",
+    modelArg: null,
+    defaultSteps: 40,
+    approxSizeGb: 31,
   },
 ];
 
@@ -272,6 +282,12 @@ export async function downloadMlxEngine(): Promise<{
     });
     return { ok: false, error: "MLX 引擎仅支持 Apple Silicon (arm64) 的 macOS" };
   }
+  // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+  if (!removeManifest(getEngineDir())) {
+    const error = `无法清除上次的安装记录，请检查 ${getEngineDir()} 是否被占用或只读`;
+    emitLog(error);
+    return { ok: false, error };
+  }
   const python = await findPython();
   if (!python) {
     logMlxFailure("image.mlx.install_failed", "未找到 python3", { stage: "find_python" });
@@ -359,6 +375,13 @@ export async function downloadMlxEngine(): Promise<{
 
   const version = await getMfluxVersion();
   emitLog(version ? `安装成功：mflux ${version}` : "安装成功");
+  writeManifest(getEngineDir(), {
+    engine: "mflux",
+    version: version ?? null,
+    platform: process.platform,
+    arch: process.arch,
+    steps: 2,
+  });
   return { ok: true, version: version ?? undefined };
 }
 
@@ -687,6 +710,7 @@ const MLX_MODEL_REPOS: Record<string, string> = {
   "flux-schnell": "black-forest-labs/FLUX.1-schnell",
   "flux2-klein-9b": "black-forest-labs/FLUX.2-klein-9B",
   "flux-dev": "black-forest-labs/FLUX.1-dev",
+  "qwen-image-2.1": "Qwen/Qwen-Image-2.1",
 };
 
 /** HF 仓库对应的本地缓存 snapshots 目录。 */

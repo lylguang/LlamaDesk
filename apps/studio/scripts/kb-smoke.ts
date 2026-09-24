@@ -89,7 +89,7 @@ try {
     ["# 保修条款", "整机保修一年，配件保修 90 天。", "进水、摔落等人为损坏不在保修范围内。"].join("\n\n"),
   );
   const files = K.addFileDocs(kb.id, [tmpFile]);
-  check("添加数据源", files.length === 1);
+  check("添加数据源", files.docs.length === 1);
 
   const docsReady = await waitFor(() => {
     const docs = K.listDocs(kb.id).docs;

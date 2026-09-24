@@ -92,8 +92,9 @@ function AddTabMenu({ onPick }: { onPick: (kind: (typeof ADDABLE_KINDS)[number])
  * 右侧工作面板（多页签）。
  *
  * 产出物 / 审查 / 文件 / 终端 / 浏览器 是常驻功能页，用「+」添加；产出物与工作区
- * 文件各占一个预览页签，HTML 直接当网页加载。页签用 28px 高的轻量胶囊 —— 面板里
- * 内容才是主体，头部只该提供"换一页"的能力。
+ * 文件各占一个预览页签，HTML 直接当网页加载。JEV 不在这里 —— 它有自己的一级菜单
+ * （`app/jev/`），那一页要的是整屏宽度（左编辑器 + 右概率分布）。页签用 28px 高的
+ * 轻量胶囊 —— 面板里内容才是主体，头部只该提供"换一页"的能力。
  */
 export function AgentRightPanel({ conversationId }: { conversationId: number }) {
   const t = useT();

@@ -30,6 +30,7 @@ const PERMISSION_LABEL_KEY: Record<string, string> = {
   edit: "agent.permLabel.edit",
   read: "agent.permLabel.read",
   external_directory: "agent.permLabel.external_directory",
+  external_write: "agent.permLabel.external_write",
   webfetch: "agent.permLabel.webfetch",
   websearch: "agent.permLabel.websearch",
   mcp: "agent.permLabel.mcp",

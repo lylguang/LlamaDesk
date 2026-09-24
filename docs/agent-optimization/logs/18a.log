@@ -1,0 +1,9 @@
+GATE: id=18a-truncate-head-tail mode=self head=9bee401
+GATE: out-of-bounds none
+GATE: size source-lines=15 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=18 now=25)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (21 pass, 0s)
+GATE: RESULT PASS id=18a-truncate-head-tail

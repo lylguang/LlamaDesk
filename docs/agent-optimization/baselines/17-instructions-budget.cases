@@ -1,0 +1,21 @@
+apps/studio/src/bun/agent-instructions.test.ts::describe|体积上限与拼装
+apps/studio/src/bun/agent-instructions.test.ts::describe|多层 AGENTS.md 的段落去重
+apps/studio/src/bun/agent-instructions.test.ts::describe|按工作区装载
+apps/studio/src/bun/agent-instructions.test.ts::describe|项目指令发现（对齐 Codex 的 AGENTS.md 语义）
+apps/studio/src/bun/agent-instructions.test.ts::test|代码围栏里的空行不切段（半截代码不会被当成独立段落比对）
+apps/studio/src/bun/agent-instructions.test.ts::test|只重复了一条：那条删掉，本层特有的内容一字不少
+apps/studio/src/bun/agent-instructions.test.ts::test|同目录下 AGENTS.override.md 优先于 AGENTS.md
+apps/studio/src/bun/agent-instructions.test.ts::test|向上找到 .git 作为项目根，不再往上翻
+apps/studio/src/bun/agent-instructions.test.ts::test|子层原样抄来的段落被省略，并留下说明
+apps/studio/src/bun/agent-instructions.test.ts::test|工作区里的 AGENTS.md 会进入系统提示段落
+apps/studio/src/bun/agent-instructions.test.ts::test|截断不切出半个多字节字符
+apps/studio/src/bun/agent-instructions.test.ts::test|拼出的段落写明文件来源；截断时说明后面还有内容
+apps/studio/src/bun/agent-instructions.test.ts::test|整份文件都是抄来的：留下说明而不是一个空段落
+apps/studio/src/bun/agent-instructions.test.ts::test|标题重复但正文是本层特有的：标题保留（删了会砍掉下面那段内容的归属）
+apps/studio/src/bun/agent-instructions.test.ts::test|没有文件时是空段（不会往系统提示里塞一个空标题）
+apps/studio/src/bun/agent-instructions.test.ts::test|用户级指令在最前，项目指令按根 → 工作区顺序拼接
+apps/studio/src/bun/agent-instructions.test.ts::test|目录链是「项目根 → 工作区」，没有标记时只看工作区
+apps/studio/src/bun/agent-instructions.test.ts::test|短行不参与去重（省不下什么，还容易误伤）
+apps/studio/src/bun/agent-instructions.test.ts::test|空文件与不存在的文件被忽略，读不出来不抛错
+apps/studio/src/bun/agent-instructions.test.ts::test|超限时截断并标记；上限为 0 表示不限
+apps/studio/src/bun/agent-instructions.test.ts::test|默认上限是 8KB（本地模型窗口小，不能照搬 Codex 的 32KB）

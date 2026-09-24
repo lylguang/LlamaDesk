@@ -3595,3 +3595,260 @@ button.pi-brand:hover {
     transition-duration: 0.01ms !important;
   }
 }
+
+/* ================================================================ */
+/* JEV / SystemOne 页（左侧一级菜单里的独立应用，见 app/jev/）        */
+/*                                                                  */
+/* 这一页要同时装下"请求编辑器"与"结构化答案"，所以自成一格：         */
+/* jev-card 是问题卡与答案卡共用的壳，jev-prob-* 是概率条。           */
+/* ================================================================ */
+.jev-results-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.jev-status-note {
+  min-width: 0;
+  flex: 1;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.jev-pill {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 999px;
+  padding: 1px 7px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.jev-pill.ok {
+  border-color: var(--ds-success);
+  color: var(--ds-success);
+}
+.jev-pill.warn {
+  border-color: var(--ds-error);
+  color: var(--ds-error);
+}
+.jev-pill.free {
+  border-color: var(--ds-accent);
+  color: var(--ds-accent);
+}
+
+.jev-note {
+  display: block;
+  border-radius: 6px;
+  background: var(--ds-bg-secondary);
+  padding: 5px 8px;
+  color: var(--ds-text-muted);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.jev-note.error {
+  background: color-mix(in srgb, var(--ds-error) 12%, transparent);
+  color: var(--ds-error);
+}
+.jev-note.ok {
+  background: color-mix(in srgb, var(--ds-success) 12%, transparent);
+  color: var(--ds-success);
+}
+
+.jev-log,
+.jev-code {
+  max-height: 180px;
+  overflow: auto;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 6px;
+  background: var(--ds-bg-under, var(--ds-bg-primary));
+  margin: 0;
+  padding: 6px 8px;
+  color: var(--ds-text-muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 10.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.jev-card {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  border: 1px solid var(--ds-border-subtle);
+  border-radius: 8px;
+  background: var(--ds-bg-secondary);
+  padding: 7px 8px;
+}
+.jev-card.answer {
+  background: var(--ds-bg-elevated);
+}
+.jev-card-head {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  color: var(--ds-text-primary);
+  padding: 0;
+  font-size: 12px;
+  text-align: left;
+}
+
+.jev-type-badge {
+  border-radius: 4px;
+  background: var(--ds-bg-chip);
+  padding: 0 5px;
+  color: var(--ds-text-muted);
+  font-size: 10px;
+  letter-spacing: 0.03em;
+}
+.jev-answer-name {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jev-answer-headline {
+  flex: none;
+  color: var(--ds-accent);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-weight: 600;
+}
+.jev-answer-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.jev-answer-meta {
+  color: var(--ds-text-muted);
+  font-size: 11px;
+}
+
+.jev-probs {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.jev-prob {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+}
+.jev-prob-label {
+  min-width: 0;
+  flex: 1;
+  overflow: hidden;
+  color: var(--ds-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.jev-prob-track {
+  flex: none;
+  /* 窄栏里（游乐场的运行日志）按比例收，宽栏仍是原来的 84px —— 固定宽度会把
+     标签挤成 "ri…"、"d…"，而这一列正是要读的"模型选了哪个方向"。 */
+  width: clamp(36px, 28%, 84px);
+  height: 5px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: var(--ds-bg-active);
+}
+.jev-prob-fill {
+  display: block;
+  height: 100%;
+  border-radius: 3px;
+  background: var(--ds-accent);
+}
+.jev-prob-value {
+  flex: none;
+  width: 44px;
+  color: var(--ds-text-primary);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  text-align: right;
+}
+
+.jev-footnote {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--ds-text-faint);
+  font-size: 10.5px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ---------------------------------------------------------------------------
+   游乐场 · 网格寻路的运行动画
+   一局跑下来最该看清的是"这一步动了没有"：走通了由棋子那段 transform 过渡负责，
+   走不通就靠下面这两个——棋子往目标方向顶一下，目标格亮一圈。
+   --------------------------------------------------------------------------- */
+
+/* 棋子常驻的光晕：跟着棋子走，一眼认得出"现在在这"。 */
+.jev-grid-halo {
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: jev-grid-halo 1.8s ease-out infinite;
+}
+@keyframes jev-grid-halo {
+  0% {
+    opacity: 0.5;
+    scale: 1;
+  }
+  70% {
+    opacity: 0;
+    scale: 1.45;
+  }
+  100% {
+    opacity: 0;
+    scale: 1.45;
+  }
+}
+
+/* 撞墙 / 撞边界：顶向目标格三分之一格再弹回。 */
+.jev-grid-bump {
+  animation: jev-grid-bump 260ms ease-out;
+}
+@keyframes jev-grid-bump {
+  0% {
+    translate: 0 0;
+  }
+  45% {
+    translate: var(--jev-bump-x, 0) var(--jev-bump-y, 0);
+  }
+  100% {
+    translate: 0 0;
+  }
+}
+
+/* 被撞到的那一格亮一圈。 */
+.jev-grid-hit {
+  stroke: var(--color-destructive);
+  animation: jev-grid-hit 420ms ease-out;
+}
+@keyframes jev-grid-hit {
+  0% {
+    opacity: 0.9;
+  }
+  100% {
+    opacity: 0;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jev-grid-halo,
+  .jev-grid-bump,
+  .jev-grid-hit {
+    animation: none;
+  }
+}

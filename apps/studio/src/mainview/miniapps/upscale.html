@@ -1,0 +1,431 @@
+<!doctype html>
+<html lang="zh">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>高清修复</title>
+<!--
+  小应用：高清修复（AI 超分）。放大糊照片、老照片，补充细节。
+
+  与抠图同一条路线：**模型在主进程里跑**（Real-ESRGAN 的 ONNX，onnxruntime-web 的
+  WASM 后端，见 src/bun/upscale.ts），图片不出本机、不上传、不需要任何云端厂商配置。
+  缺的只是权重文件 —— 而权重就在这个页面里下载（多源 + 断点续传）。
+
+  三个模型（都是 4×）：
+    realesrgan-x4plus       通用画质最好，适合老照片 / 糊照片，但最慢、权重最大；
+    realesrgan-x4plus-anime 动漫 / 插画，块数少，快很多（默认）；
+    realesr-animevideov3    最轻最快，动漫 / 插画够用（照片上会偏"插画感"）。
+
+  推理是切片做的：大图按 128px 的块逐个放大再拼回（见 bun/upscale.ts），所以超大
+  扫描件也能跑，代价是块数越多越慢。页面只报模型选择与是否跑，宿主做全部校验。
+
+  宿主注入：基础样式、window.omni 运行时、window.__OMNI_BOOT__。
+-->
+<style>
+  .models { display: flex; flex-direction: column; gap: 8px; }
+  .mrow {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 11px; border: 1px solid var(--line); border-radius: 10px;
+  }
+  .mrow[data-ready="true"] { border-color: color-mix(in srgb, var(--accent) 45%, var(--line)); }
+  .mname { font-size: 13px; font-weight: 500; }
+  .mmeta { font-size: 11px; color: var(--muted); }
+  .grow { flex: 1; min-width: 0; }
+
+  .stage { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  @media (max-width: 700px) { .stage { grid-template-columns: 1fr; } }
+  .stage figure { margin: 0; display: flex; flex-direction: column; gap: 6px; }
+  .stage figcaption { font-size: 11px; color: var(--muted); }
+  .stage img { width: 100%; max-height: 320px; object-fit: contain; border-radius: 12px; border: 1px solid var(--line); }
+
+  .options { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+  .options label { display: flex; flex-direction: column; gap: 5px; }
+  .stat { font-size: 11px; color: var(--muted); }
+</style>
+</head>
+<body>
+<div class="shell">
+  <div class="hd">
+    <h1 data-i18n="title"></h1>
+    <span class="sub" data-i18n="sub"></span>
+  </div>
+
+  <!-- 模型未就绪时才出现：权重可以在这里下，不用去设置页 -->
+  <div class="card col hidden" id="models">
+    <span class="lb" data-i18n="modelLabel"></span>
+    <span class="hint" data-i18n="modelNote"></span>
+    <div class="models" id="model-list"></div>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="pickLabel"></span>
+    <div class="zone">
+      <div class="drop grow" id="pick" data-i18n="pickHint"></div>
+      <img id="src" class="hidden" alt="source" style="width:76px;height:76px;object-fit:cover;border-radius:10px;border:1px solid var(--line)" />
+    </div>
+    <span class="hint" data-i18n="pickNote"></span>
+  </div>
+
+  <div class="card col">
+    <span class="lb" data-i18n="optLabel"></span>
+    <div class="options">
+      <label>
+        <span class="mmeta" data-i18n="optModel"></span>
+        <select class="field" id="opt-model"></select>
+      </label>
+    </div>
+    <span class="hint" data-i18n="optNote"></span>
+  </div>
+
+  <div class="row">
+    <button class="btn primary" id="run" disabled data-i18n="run"></button>
+    <span class="busy hidden" id="busy"><span class="spin"></span><span id="busy-text"></span></span>
+    <span class="err grow" id="err"></span>
+    <span class="ok grow hidden" id="ok"></span>
+  </div>
+
+  <div class="card col hidden" id="result">
+    <div class="row">
+      <span class="lb grow" data-i18n="resultLabel"></span>
+      <span class="stat" id="stat"></span>
+      <button class="btn sm" id="save" data-i18n="save"></button>
+    </div>
+
+    <div class="stage">
+      <figure>
+        <img id="before" alt="source" />
+        <figcaption data-i18n="before"></figcaption>
+      </figure>
+      <figure>
+        <img id="after" alt="upscaled" />
+        <figcaption data-i18n="after"></figcaption>
+      </figure>
+    </div>
+
+    <span class="hint" data-i18n="resultNote"></span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var DICT = {
+    zh: {
+      title: '高清修复',
+      sub: '本地 AI 超分：糊照片、老照片放大 4 倍并补细节，不上传、全程本机',
+      modelLabel: '超分模型',
+      modelNote: '权重只在第一次使用时下载，之后离线可用。模型在本机运行，图片不会上传到任何地方。',
+      pickLabel: '原始图片',
+      pickHint: '点击选择图片',
+      pickNote: '支持 PNG / JPG / WebP。放大 4 倍，文件也随之变大。',
+      optLabel: '运行参数',
+      optModel: '模型',
+      optNote: '动漫 / 插画用轻量模型更快；老照片、糊照片用 realesrgan-x4plus 画质最好（但最慢）。',
+      run: '开始放大',
+      save: '保存 PNG',
+      before: '原图',
+      after: '放大 4 倍后',
+      resultNote: '左键点按对比前后；图片只在本地处理。保存会回到原分辨率导出。',
+      resultLabel: '处理结果',
+      tierQuality: '画质最佳',
+      tierSpeed: '均衡',
+      tierFast: '最快',
+      download: '下载',
+      ready: '已就绪',
+      loading: '读取图片…',
+      working: '正在放大…',
+      workingElapsed: '正在放大… 已用 {s} 秒（本地推理，请勿关闭；大图要一两分钟）',
+      downloading: '下载模型 {done} / {total} MB',
+      saved: '已保存到「{name}」',
+      needPick: '请先选择一张图片',
+      needModel: '请先下载一个超分模型',
+      failed: '处理失败',
+      statLine: '{model} ×{scale} · {ms}s · {w}×{h}',
+    },
+    en: {
+      title: 'HD Upscale',
+      sub: 'Local AI upscaling: enlarge blurry and old photos 4× with detail — nothing leaves this machine',
+      modelLabel: 'Upscale model',
+      modelNote: 'Weights download once, then work offline. The model runs locally; your image is never uploaded.',
+      pickLabel: 'Source image',
+      pickHint: 'Click to choose an image',
+      pickNote: 'PNG / JPG / WebP. Output is 4× larger (and heavier).',
+      optLabel: 'Run options',
+      optModel: 'Model',
+      optNote: 'Use a light model for anime / illustrations; pick realesrgan-x4plus for old or blurry photos (best quality, slowest).',
+      run: 'Upscale',
+      save: 'Save PNG',
+      before: 'Before',
+      after: 'After 4×',
+      resultNote: 'The image is processed locally only. Saving keeps the full resolution.',
+      resultLabel: 'Result',
+      tierQuality: 'Best quality',
+      tierSpeed: 'Balanced',
+      tierFast: 'Fastest',
+      download: 'Download',
+      ready: 'Ready',
+      loading: 'Reading image…',
+      working: 'Upscaling…',
+      workingElapsed: 'Upscaling… {s}s elapsed (runs locally; please wait, large photos take a minute or two)',
+      downloading: 'Downloading model {done} / {total} MB',
+      saved: 'Saved to “{name}”',
+      needPick: 'Pick an image first',
+      needModel: 'Download an upscale model first',
+      failed: 'Failed',
+      statLine: '{model} ×{scale} · {ms}s · {w}×{h}',
+    },
+  };
+
+  var TIER_KEY = { quality: 'tierQuality', speed: 'tierSpeed', fast: 'tierFast' };
+
+  var t = function (key, params) {
+    var table = DICT[omni.lang] || DICT.zh;
+    var text = table[key] || DICT.zh[key] || key;
+    if (params) Object.keys(params).forEach(function (k) { text = text.split('{' + k + '}').join(String(params[k])); });
+    return text;
+  };
+  var $ = function (sel) { return document.querySelector(sel); };
+
+  function paint() {
+    document.querySelectorAll('[data-i18n]').forEach(function (el) { el.textContent = t(el.dataset.i18n); });
+  }
+
+  function showError(message) { $('#err').textContent = message || ''; }
+  function showOk(message) {
+    var el = $('#ok');
+    el.textContent = message || '';
+    el.classList.toggle('hidden', !message);
+  }
+  function setBusy(on, text) {
+    state.busy = on;
+    $('#busy').classList.toggle('hidden', !on);
+    if (text) $('#busy-text').textContent = text;
+    $('#run').disabled = on || !state.path || !anyReady();
+  }
+
+  var state = {
+    path: '',
+    dataUrl: '',
+    busy: false,
+    result: null,   // { out, width, height, model, scale, inferenceMs, totalMs }
+    models: [],
+    defaultModel: '',
+    srcImg: null,
+    outImg: null,
+    outSrc: '',
+  };
+
+  // ---------------------------------------------------------------------
+  // 模型：清单 / 下载
+  // ---------------------------------------------------------------------
+  function mb(bytes) { return (bytes / 1048576).toFixed(1); }
+
+  function renderModels() {
+    var list = $('#model-list');
+    list.innerHTML = '';
+    state.models.forEach(function (m) {
+      var row = document.createElement('div');
+      row.className = 'mrow';
+      row.dataset.ready = m.ready ? 'true' : 'false';
+
+      var info = document.createElement('div');
+      info.className = 'grow';
+      var name = document.createElement('div');
+      name.className = 'mname';
+      name.textContent = m.id;
+      var meta = document.createElement('div');
+      meta.className = 'mmeta';
+      meta.textContent = (t(TIER_KEY[m.tier] || 'tierSpeed')) + ' · ' + mb(m.bytes) + ' MB · ' + m.license;
+      info.appendChild(name);
+      info.appendChild(meta);
+
+      var btn = document.createElement('button');
+      btn.className = 'btn sm' + (m.id === state.defaultModel ? ' primary' : '');
+      btn.textContent = m.ready ? t('ready') : t('download');
+      btn.disabled = m.ready || state.busy;
+      btn.addEventListener('click', function () { downloadModel(m); });
+
+      row.appendChild(info);
+      row.appendChild(btn);
+      list.appendChild(row);
+    });
+    $('#models').classList.toggle('hidden', state.models.some(function (m) { return m.ready; }));
+    fillModelSelect();
+    $('#run').disabled = state.busy || !state.path || !anyReady();
+  }
+
+  function anyReady() {
+    return state.models.some(function (m) { return m.ready; });
+  }
+
+  function fillModelSelect() {
+    var sel = $('#opt-model');
+    var keep = sel.value;
+    sel.innerHTML = '';
+    state.models.forEach(function (m) {
+      var opt = document.createElement('option');
+      opt.value = m.id;
+      opt.textContent = m.id + (m.ready ? '' : ' · ' + mb(m.bytes) + 'MB');
+      opt.disabled = !m.ready;
+      sel.appendChild(opt);
+    });
+    var preferred = keep || state.defaultModel;
+    var usable = state.models.filter(function (m) { return m.ready; });
+    if (usable.some(function (m) { return m.id === preferred; })) sel.value = preferred;
+    else if (usable[0]) sel.value = usable[0].id;
+  }
+
+  function refreshStatus() {
+    return omni.upscale.status().then(function (res) {
+      state.models = (res.models || []).map(function (m) { return Object.assign({}, m, { defaultModel: m.id === res.defaultModel }); });
+      state.defaultModel = res.defaultModel || '';
+      renderModels();
+      return res;
+    });
+  }
+
+  function downloadModel(spec) {
+    if (state.busy) return;
+    showError('');
+    setBusy(true, t('downloading', { done: '0', total: mb(spec.bytes) }));
+    // 下载进度靠轮询 status：小应用收不到宿主的推送事件，而清单里本来就带本地字节数
+    var timer = setInterval(function () {
+      omni.upscale.status().then(function (res) {
+        var m = (res.models || []).filter(function (x) { return x.id === spec.id; })[0];
+        if (m) setBusy(true, t('downloading', { done: mb(m.localBytes || 0), total: mb(m.bytes) }));
+      }).catch(function () {});
+    }, 800);
+    omni.upscale.download(spec.id).then(function () {
+      return refreshStatus();
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('upscale.download.failed', e.message || String(e), { model: spec.id });
+    }).then(function () {
+      clearInterval(timer);
+      setBusy(false);
+      refreshStatus();
+    });
+  }
+
+  // ---------------------------------------------------------------------
+  // 选图
+  // ---------------------------------------------------------------------
+  $('#pick').addEventListener('click', function () {
+    if (state.busy) return;
+    showError('');
+    showOk('');
+    setBusy(true, t('loading'));
+    omni.files.pick({ types: 'png,jpg,jpeg,webp' }).then(function (picked) {
+      var path = (picked.paths || [])[0];
+      if (!path) return null;
+      return omni.files.read({ path: path }).then(function (file) {
+        state.path = path;
+        state.dataUrl = file.dataUrl;
+        var img = $('#src');
+        img.src = file.dataUrl;
+        img.classList.remove('hidden');
+        $('#pick').classList.add('hidden');
+        $('#before').src = file.dataUrl;
+      });
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('upscale.pick.failed', e.message || String(e), {});
+    }).then(function () {
+      setBusy(false);
+      $('#run').disabled = state.busy || !state.path || !anyReady();
+    });
+  });
+
+  // ---------------------------------------------------------------------
+  // 放大
+  // ---------------------------------------------------------------------
+  $('#run').addEventListener('click', function () {
+    if (!state.path || state.busy) return;
+    if (!anyReady()) { showError(t('needModel')); return; }
+    showError('');
+    showOk('');
+    setBusy(true, t('working'));
+    // 计时器在**页面里**走，不依赖宿主：推理是在主进程里同步跑的（WASM 阻塞事件循环），
+    // 期间状态轮询根本回不来 —— 靠轮询报进度是行不通的。这里用纯前端的"已用 N 秒"
+    // 让用户看出它真的在跑，而不是卡死。
+    var startedAt = Date.now();
+    var tick = function () {
+      setBusy(true, t('workingElapsed', { s: Math.round((Date.now() - startedAt) / 1000) }));
+    };
+    tick();
+    var progTimer = setInterval(tick, 1000);
+    var stopProg = function () { clearInterval(progTimer); };
+    omni.upscale.run({
+      path: state.path,
+      model: $('#opt-model').value || undefined,
+    }).then(function (res) {
+      // 优先用内联的 dataUrl：媒体端口被别的实例占着时，URL 那一条会取不到图。
+      var src = res.out.dataUrl || res.out.url;
+      return new Promise(function (resolve, reject) {
+        var img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.onload = function () { resolve(img); };
+        img.onerror = function () { reject(new Error(t('failed'))); };
+        img.src = src;
+      }).then(function (img) {
+        state.result = res;
+        state.outImg = img;
+        state.outSrc = src;
+        $('#after').src = src;
+        $('#result').classList.remove('hidden');
+        var secs = ((res.totalMs || 0) / 1000).toFixed(1);
+        $('#stat').textContent = t('statLine', {
+          model: res.model, scale: res.scale || 4, ms: secs, w: res.width, h: res.height,
+        });
+        return omni.log('upscale.done', 'upscaled', {
+          model: res.model, scale: res.scale, ms: res.totalMs, width: res.width, height: res.height,
+        });
+      });
+    }).catch(function (e) {
+      showError((e.message || String(e)) + '');
+      omni.log('upscale.run.failed', e.message || String(e), { model: $('#opt-model').value });
+    }).then(function () { stopProg(); setBusy(false); });
+  });
+
+  // 结果图来自媒体服务（带 ACAO:*），可作 canvas 源以原分辨率导出
+  function loadFullImage(url) {
+    return new Promise(function (resolve, reject) {
+      var img = new Image();
+      img.crossOrigin = 'anonymous';
+      img.onload = function () { resolve(img); };
+      img.onerror = function () { reject(new Error('image load failed')); };
+      img.src = url;
+    });
+  }
+
+  $('#save').addEventListener('click', function () {
+    if (!state.result) return;
+    showError('');
+    setBusy(true, t('working'));
+    loadFullImage(state.outSrc || state.result.out.url).then(function (img) {
+      var name = 'upscale-' + Date.now().toString().slice(-6) + '.png';
+      var canvas = document.createElement('canvas');
+      canvas.width = img.naturalWidth;
+      canvas.height = img.naturalHeight;
+      canvas.getContext('2d').drawImage(img, 0, 0);
+      return omni.files.save({ name: name, dataUrl: canvas.toDataURL('image/png') });
+    }).then(function (res) {
+      showOk(t('saved', { name: (res.path || '').split('/').pop() || 'upscale.png' }));
+      return omni.log('upscale.saved', 'saved', {});
+    }).catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('upscale.save.failed', e.message || String(e), {});
+    }).then(function () { setBusy(false); });
+  });
+
+  omni.ready.then(function () {
+    paint();
+    refreshStatus().catch(function (e) {
+      showError(e.message || String(e));
+      omni.log('upscale.status.failed', e.message || String(e), {});
+    });
+  });
+  omni.onCapabilities = function () { refreshStatus().catch(function () {}); };
+})();
+</script>
+</body>
+</html>

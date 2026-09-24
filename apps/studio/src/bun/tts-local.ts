@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, rmSync, statSync } from 
 import path from "path";
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
+import { removeManifest, writeManifest } from "./install-manifest";
 import {
   installedModelSize,
   isModelInstalled,
@@ -449,6 +450,12 @@ export async function downloadTtsLocalEngine(
   const existing = options.upgrade ? null : await resolveBinary();
   if (existing) return { ok: true };
 
+  // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+  if (!removeManifest(getEnginesDir())) {
+    const error = `无法清除上次的安装记录，请检查 ${getEnginesDir()} 是否被占用或只读`;
+    return { ok: false, error };
+  }
+
   const asset = releaseAssetName();
   if (!asset) {
     return {
@@ -470,6 +477,15 @@ export async function downloadTtsLocalEngine(
     accept: (file) => extractEngine(file, targetDir),
   });
   rmSync(tmpTgz, { force: true });
+  if (res.ok) {
+    writeManifest(getEnginesDir(), {
+      engine: "audio.cpp",
+      version: AUDIOCPP_ENGINE_VERSION,
+      platform: process.platform,
+      arch: process.arch,
+      steps: 2,
+    });
+  }
   return res.ok ? { ok: true } : { ok: false, error: res.error };
 }
 

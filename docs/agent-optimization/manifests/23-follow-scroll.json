@@ -1,0 +1,31 @@
+{
+  "id": "23-follow-scroll",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/use-follow-scroll.ts",
+    "apps/studio/src/mainview/app/agent/use-follow-scroll.test.ts",
+    "apps/studio/src/mainview/app/agent/conversation.tsx"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/use-follow-scroll.ts",
+    "apps/studio/src/mainview/app/agent/conversation.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/use-follow-scroll.test.ts",
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx"
+  ],
+  "max_source_lines": 45,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "判据改成小于等于（正好距底一个阈值时又会抢滚动条）",
+      "file": "apps/studio/src/mainview/app/agent/use-follow-scroll.ts",
+      "find": "< FOLLOW_THRESHOLD_PX",
+      "replace": "<= FOLLOW_THRESHOLD_PX"
+    }
+  ]
+}

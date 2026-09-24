@@ -16,6 +16,8 @@ import { useMlxModelDownloadStore } from "../stores/mlx-model-download";
 import { useMlxModelRunStore } from "../stores/mlx-model-run";
 import { useMediaSetupStore } from "../stores/media-setup";
 import { usePpOcrInstallStore } from "../stores/ppocr-install";
+import { useSystemOneInstallStore } from "../stores/systemone-install";
+import type { LayaPhase } from "../../bun/systemone-laya";
 import { usePpOcrDownloadStore } from "../stores/ppocr-download";
 import { useTessInstallStore } from "../stores/tess-install";
 import { useEngineInstallStore } from "../stores/engine-install";
@@ -32,6 +34,7 @@ const knownCompletedIds = new Set<string>();
 /** navigate 可直达的工具页（index 路由内的 activeApp）。 */
 const NAV_APP_PATHS = new Set<string>([
   "agent",
+  "jev",
   "voicecall",
   "voice",
   "image",
@@ -302,6 +305,27 @@ const rpc = Electroview.defineRPC<AppRPC>({
         // 阶段进入终态（就绪 / 空闲 / 出错）时刷新引擎状态查询。
         if (phase === "ready" || phase === "idle" || phase === "error") {
           queryClient.invalidateQueries({ queryKey: ["ppocr-status"] });
+        }
+      },
+      systemoneInstallLog: ({ lines }) => {
+        useSystemOneInstallStore.getState().appendLines(lines);
+        // 安装收尾（成功 / 失败）后重查 JEV 后端状态：面板上的「已安装 / 未安装」挂在它上面。
+        if (lines.some(isInstallTerminalLine)) {
+          queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
+        }
+      },
+      systemoneModelProgress: ({ weights, phase, bytes }) => {
+        useSystemOneInstallStore.getState().setProgress({ weights, phase, bytes });
+        // 下完之后重查状态：模型行要从「下载」变成「启动」。
+        if (phase === "done") {
+          queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
+        }
+      },
+      systemonePhase: ({ phase, message }) => {
+        useSystemOneInstallStore.getState().setPhase(phase as LayaPhase, message);
+        // 就绪 / 空闲 / 出错是终态：此时"能不能用"已经定了，值得重查一次。
+        if (phase === "ready" || phase === "idle" || phase === "error") {
+          queryClient.invalidateQueries({ queryKey: ["systemone", "status"] });
         }
       },
       ppOcrModelProgress: ({ model, progress }) => {

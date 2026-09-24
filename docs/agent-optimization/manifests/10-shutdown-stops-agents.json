@@ -1,0 +1,33 @@
+{
+  "id": "10-shutdown-stops-agents",
+  "allowed_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/shutdown.ts",
+    "apps/studio/src/bun/agent-shutdown.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/shutdown.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-shutdown.test.ts",
+    "apps/studio/src/bun/agent-turn.test.ts",
+    "apps/studio/src/bun/agent-reentry.test.ts"
+  ],
+  "max_source_lines": 35,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "await stopAllAgentRuns"
+  ],
+  "mutations": [
+    {
+      "name": "只停 running、放过 starting（启动窗口里的会话收不掉）",
+      "file": "apps/studio/src/bun/agent.ts",
+      "find": "...starting",
+      "replace": ""
+    }
+  ]
+}

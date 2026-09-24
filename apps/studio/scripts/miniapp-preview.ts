@@ -41,6 +41,7 @@ const READY: MiniAppCapabilitySnapshot = {
   chat: { ready: true, label: "预览 · qwen3-8b" },
   asr: { ready: true, label: "预览 · whisper-large-v3" },
   bgRemove: { ready: true, label: "预览 · 本地 silueta" },
+  upscale: { ready: true, label: "预览 · 本地 realesrgan-x4plus" },
   local: { ready: true, label: "预览 · 仅本机处理" },
 };
 

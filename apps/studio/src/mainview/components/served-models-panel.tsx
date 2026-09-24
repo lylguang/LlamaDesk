@@ -34,6 +34,7 @@ import { ENGINE_SHORT_NAMES } from "@/shared/engines";
 import { classifyModelName, MODEL_CATEGORY_SETS, type ModelCategory } from "@/shared/modelscope";
 import type { ServedModelInfo } from "@/shared/served-models";
 import { serverErrorHint } from "@/mainview/lib/server-error";
+import { AgentDiagnoseButton } from "@/mainview/components/agent-diagnose-button";
 import { cn } from "@/mainview/lib/utils";
 
 /**
@@ -262,6 +263,19 @@ function ServedModelRow({ model }: { model: ServedModelInfo }) {
             <span className="mt-1.5 size-0.5 shrink-0 rounded-full bg-destructive/50" />
             <span className="min-w-0 break-words">{rawError}</span>
           </p>
+          {/* 起不来的实例：把报错、引擎、模型、端口和这个实例的日志一起交给 Agent。 */}
+          <AgentDiagnoseButton
+            size="xs"
+            intro={t("agent.diagnose.localModel")}
+            error={rawError}
+            context={[
+              `引擎：${model.engine}`,
+              `模型：${model.modelRef}`,
+              `端口：${model.port}`,
+              ...(hint ? [`界面给出的判断：${hint}`] : []),
+            ]}
+            logs={async () => (await rpcClient.getServedModelLogs({ id: model.id })).logs.split("\n")}
+          />
         </div>
       )}
     </div>
@@ -361,6 +375,12 @@ function StartServedModelForm() {
             </p>
           )}
           <p className="text-[11px] text-destructive/70">{error}</p>
+          <AgentDiagnoseButton
+            size="xs"
+            intro={t("agent.diagnose.localModel")}
+            error={error}
+            context={[`模型：${path}`, ...(errorHint ? [`界面给出的判断：${errorHint}`] : [])]}
+          />
         </div>
       )}
     </div>

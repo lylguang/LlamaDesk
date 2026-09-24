@@ -1,4 +1,4 @@
-import { existsSync } from "fs";
+import { existsSync, statSync } from "fs";
 import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
 import type { LanguageModel } from "ai";
 
@@ -17,6 +17,7 @@ import {
 import { modelTypeOf } from "../shared/cloud-providers";
 import { isRealtimeModelId } from "../shared/realtime-voice";
 import { ENGINE_SHORT_NAMES } from "../shared/engines";
+import { resolveMmprojFor } from "./runtimes/llama";
 import * as ModelStore from "./model-store";
 import * as Served from "./model-servers";
 import { activateCloudProvider, activeProviderId, listCloudProviders } from "./cloud-providers";
@@ -150,11 +151,33 @@ const VISION_MODEL_HINTS =
   /(?:^|[^a-z0-9])(?:vl|vlm|vision|llava|omni|minicpm-?v|internvl|pixtral|moondream|smolvlm|idefics|cogvlm|glm-?4-?v|gemma-?3|janus)/i;
 
 /**
+ * 当前本地模型目录里配了可用的 mmproj 投影文件没有 —— 也就是 llama.cpp 启动时会不会
+ * 给它注入 `--mmproj`。
+ *
+ * **必须调 resolveMmprojFor 而不是自己按名字扫一遍**：那个函数还会剔除
+ * 「内容不是 GGUF」「还没下完」的文件，启动时并不会把它们配上去。两边判据不一致的
+ * 后果正是这类 bug 的镜像 —— 这里说支持图片、服务端却因为没配投影而 400。
+ * 目录形态的模型（vLLM / SGLang / MLX）由引擎自己处理多模态，不走 mmproj 配对。
+ */
+function localModelHasMmproj(): boolean {
+  const localPath = getSetting("LOCAL_MODEL_PATH");
+  if (!localPath || !existsSync(localPath)) return false;
+  try {
+    if (statSync(localPath).isDirectory()) return false;
+  } catch {
+    // 路径读不到（权限 / 刚被移走）就退回按名字判定，不因为读盘失败改变能力结论
+    return false;
+  }
+  return resolveMmprojFor(localPath) !== null;
+}
+
+/**
  * 当前模型能不能接受图片输入 —— 决定 Agent 是否拿到 view_image 工具。
  *
  * 纯文本模型收到图片内容块会被服务端直接 400（llama.cpp / vLLM 都如此），
  * 所以默认按模型名猜；猜不准时用 AGENT_VISION_TOOL 强制：
  *   auto（默认）/ on / off
+ * 本地模型目录里有 mmproj 时直接算支持（那是比名字可靠得多的证据）；
  * 云端厂商的主力模型基本都支持视觉，直接放行。
  */
 export function chatModelSupportsImages(): boolean {
@@ -162,6 +185,7 @@ export function chatModelSupportsImages(): boolean {
   if (mode === "on") return true;
   if (mode === "off") return false;
   if (getSetting("SERVER_MODE") !== "local") return true;
+  if (localModelHasMmproj()) return true;
   return VISION_MODEL_HINTS.test(`${getChatModelLabel()} ${getChatModelName()}`);
 }
 

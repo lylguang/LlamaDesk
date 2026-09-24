@@ -23,6 +23,9 @@
 export const APP_RAIL_IDS = [
   "chat",
   "agent",
+  // JEV（类型化判定）：紧挨着 Agent —— 两者是一对（Agent 用它做判断），
+  // 但要各自是一级入口：它自己有一整套页面（问题编辑器 / 概率分布 / 后端配置）。
+  "jev",
   "voicecall",
   "voice",
   "image",

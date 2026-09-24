@@ -10,7 +10,8 @@ import { REALTIME_OUTPUT_RATE, realtimeDialectFor, realtimeInputRate } from "@/s
 /**
  * 实时语音通话引擎（前端侧）：
  * - 麦克风采集 + 能量 VAD：说话开始/结束自动断句，680ms 静音判定一句话说完
- * - 本地模式：说话期间每 ~280ms 推一帧 16k WAV（整段）给后端做增量转写
+ * - 本地 / omni 模式：只在说话窗口内推流，每 ~280ms 推一帧增量 PCM16 16k，
+ *   由后端累积成整段（本地拿去转写，omni 拿去当音频输入发给多模态模型）
  * - 云端模式：说话期间每 ~120ms 推增量 PCM16 给实时模型（服务端 VAD 断句）；
  *   采样率按厂商取（百炼 16k / 阶跃 24k，喂错会被当成另一种语速）
  * - 抢话打断：agent 正在想/正在说（云端）时检测到人声 → voicecallInterrupt + 清空播放队列
@@ -68,9 +69,11 @@ export function useVoiceCallEngine() {
   const analyserRef = useRef<AnalyserNode | null>(null);
   const samplesRef = useRef<Float32Array>(new Float32Array(0));
   const utteranceStartRef = useRef(0);
-  /** 云端模式：已推送到后端的采样下标（只发增量，避免整段重发）。 */
+  /** 云端模式（全双工，一直推）：已推送到后端的采样下标（只发增量，避免整段重发）。 */
   const lastPushRef = useRef(0);
   const providerRef = useRef<VoiceCallProvider>("local");
+  /** 是不是"持续推流"的云端实时模式（本地与 omni 都只在说话窗口内推）。 */
+  const isRealtime = () => providerRef.current === "cloud";
   /**
    * 云端上行采样率：拨号时按厂商定一次（百炼 16k / 阶跃 24k）。
    * 通话中不能改（改设置不影响正在进行的连接），所以存在 ref 里。
@@ -214,8 +217,7 @@ export function useVoiceCallEngine() {
   // VAD + 采集
   // ------------------------------------------------------------------
 
-  const pushInterval = () =>
-    providerRef.current === "cloud" ? CLOUD_PUSH_INTERVAL_MS : PUSH_INTERVAL_MS;
+  const pushInterval = () => (isRealtime() ? CLOUD_PUSH_INTERVAL_MS : PUSH_INTERVAL_MS);
 
   const startPushTimer = () => {
     if (pushTimerRef.current !== null) return;
@@ -236,13 +238,12 @@ export function useVoiceCallEngine() {
     const samples = samplesRef.current;
     const from = lastPushRef.current;
     if (samples.length - from < UTTERANCE_MIN_SAMPLES) return;
-    // 本地/云端统一发增量裸 PCM16：
+    // 三种模式统一发增量裸 PCM16：
     //  - 云端直接喂给实时模型（input_audio_buffer.append），采样率按厂商取
-    //  - 本地由后端累积，转写前统一包 WAV 头（避免把多个 WAV 小块粘成一个非法文件）
-    const pcmBase64 =
-      providerRef.current === "cloud"
-        ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
-        : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
+    //  - 本地 / omni 由后端累积，用前统一包 WAV 头（避免把多个 WAV 小块粘成一个非法文件）
+    const pcmBase64 = isRealtime()
+      ? encodePcm16Base64(samples.subarray(from), INPUT_RATE, inputRateRef.current)
+      : encodePcm16Base64(samples.subarray(from), INPUT_RATE);
     lastPushRef.current = samples.length;
     void rpcClient.voicecallPushAudio({ conversationId, wavBase64: pcmBase64, format: "pcm" });
   };
@@ -266,19 +267,20 @@ export function useVoiceCallEngine() {
     lastPushRef.current = 0;
     store.setLiveText("");
     store.setLiveActive(true);
-    if (providerRef.current === "local") startPushTimer();
+    // 本地 / omni：推流只在说话窗口内跑（omni 要整段音频一次发给模型）。
+    if (!isRealtime()) startPushTimer();
   };
 
   const endUtterance = () => {
     const store = useVoiceCallStore.getState();
     const conversationId = store.callConversationId;
-    // 本地模式的推流随一段话音启停；云端模式持续推流（断句在服务端），这里不停。
-    if (providerRef.current === "local") stopPushTimer();
+    // 本地 / omni 的推流随一段话音启停；云端模式持续推流（断句在服务端），这里不停。
+    if (!isRealtime()) stopPushTimer();
     const samples = samplesRef.current;
     const start = utteranceStartRef.current;
     utteranceStartRef.current = samples.length;
     store.setLiveActive(false);
-    const cloud = providerRef.current === "cloud";
+    const cloud = isRealtime();
     // 云端推流本来就持续，端句只补发最后一段增量并给服务端 commit 信号；
     // 本地端句也按增量补发（后端累积成整段再转写）。
     const from = Math.max(start, lastPushRef.current);
@@ -359,8 +361,8 @@ export function useVoiceCallEngine() {
       vad.speechStreak = 0;
       vad.speaking = false;
       // 云端模式持续推流由定时器按 lastPush 增量抽取，裁剪会丢掉尚未发送的采样；
-      // 本地模式推流只在说话窗口内发生，长时间回声可以安全裁剪防止内存膨胀。
-      if (providerRef.current === "local" && next.length > INPUT_RATE * 3) {
+      // 本地 / omni 的推流只在说话窗口内发生，长时间回声可以安全裁剪防止内存膨胀。
+      if (!isRealtime() && next.length > INPUT_RATE * 3) {
         samplesRef.current = next.subarray(next.length - INPUT_RATE);
       }
       return;
@@ -463,7 +465,7 @@ export function useVoiceCallEngine() {
     analyserRef.current = analyser;
     activeRef.current = true;
     // 云端是持续全双工：开麦即开始增量推流（断句交给服务端 smart_turn）。
-    if (providerRef.current === "cloud") startPushTimer();
+    if (isRealtime()) startPushTimer();
     levelLoop();
   };
 

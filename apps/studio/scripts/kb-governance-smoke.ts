@@ -112,7 +112,7 @@ try {
   writeFileSync(specFile, v1);
 
   const added = K.addFileDocs(kb.id, [specFile]);
-  check("首次导入建立文档", added.length === 1);
+  check("首次导入建立文档", added.docs.length === 1);
   const ready = await waitFor(() => K.listDocs(kb.id).docs.every((d) => d.status === "ready" && d.chunkCount > 0));
   check("摄取完成", ready, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
   const docAfterEmbed = K.listDocs(kb.id).docs[0]!;
@@ -121,8 +121,8 @@ try {
   const reskip = K.addFileDocs(kb.id, [specFile]);
   check(
     "源文件未变化时不重复导入",
-    reskip.length === 0 && K.listDocs(kb.id).docs.length === 1,
-    `added=${reskip.length} docs=${K.listDocs(kb.id).docs.length}`,
+    reskip.docs.length === 0 && K.listDocs(kb.id).docs.length === 1,
+    `added=${reskip.docs.length} docs=${K.listDocs(kb.id).docs.length}`,
   );
 
   // 改一节：内容变了但大小也变，确保 mtime/size 判定一定命中
@@ -130,7 +130,7 @@ try {
   await fetch(`${EMBED_BASE}/stats/reset`);
   writeFileSync(specFile, v2);
   const reimported = K.addFileDocs(kb.id, [specFile]);
-  check("源文件变化时就地重建（不新增文档）", reimported.length === 1 && K.listDocs(kb.id).docs.length === 1);
+  check("源文件变化时就地重建（不新增文档）", reimported.docs.length === 1 && K.listDocs(kb.id).docs.length === 1);
   const ready2 = await waitFor(() => K.listDocs(kb.id).docs.every((d) => d.status === "ready" && d.chunkCount > 0));
   check("重建后摄取完成", ready2, JSON.stringify(K.listDocs(kb.id).docs.map((d) => [d.name, d.status, d.error])));
 

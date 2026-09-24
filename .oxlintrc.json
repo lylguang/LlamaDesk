@@ -2,6 +2,7 @@
   "$schema": "./node_modules/oxlint/configuration_schema.json",
   "ignorePatterns": [
     "dist",
+    "vendor",
     "build",
     "node_modules",
     "bun.lock",

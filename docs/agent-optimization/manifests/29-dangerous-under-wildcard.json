@@ -1,0 +1,35 @@
+{
+  "id": "29-dangerous-under-wildcard",
+  "allowed_files": [
+    "apps/studio/src/bun/permissions.ts",
+    "apps/studio/src/bun/permissions.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/permissions.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/permissions.test.ts",
+    "apps/studio/src/bun/agent-tools.bash.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "精确规则也一并降级（把「对着原文批过的」也拦掉）",
+      "file": "apps/studio/src/bun/permissions.ts",
+      "find": "(rule.pattern.includes(\"*\") || rule.pattern.includes(\"?\")) &&",
+      "replace": "true &&"
+    },
+    {
+      "name": "不再限定 bash（别的权限也被误降级）",
+      "file": "apps/studio/src/bun/permissions.ts",
+      "find": "request.permission === \"bash\" &&",
+      "replace": ""
+    }
+  ]
+}

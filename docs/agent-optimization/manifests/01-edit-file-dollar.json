@@ -1,0 +1,20 @@
+{
+  "id": "01-edit-file-dollar",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent-tools.edit.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-tools.edit.test.ts"
+  ],
+  "max_source_lines": 30,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ]
+}

@@ -433,7 +433,7 @@ async function runStartTunnel(): Promise<TunnelStartResult> {
   });
 
   try {
-    proc = spawnServerProcess(args, buildEnv(currentProtocol()));
+    proc = spawnServerProcess(args, buildEnv(currentProtocol()), "cloudflared");
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     proc = null;

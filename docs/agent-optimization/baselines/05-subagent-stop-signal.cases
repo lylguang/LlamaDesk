@@ -1,0 +1,16 @@
+apps/studio/src/bun/agent-stop-startup.test.ts::describe|runAgentTurn 启动窗口的停止（stopRequests）
+apps/studio/src/bun/agent-stop-startup.test.ts::test|上一轮的残留标记不拖累下一轮：先按停止（不跑回合），再正常跑完
+apps/studio/src/bun/agent-stop-startup.test.ts::test|两轮之间按停止也拦得住：退避期间按停止，桩收到的请求次数不再增长
+apps/studio/src/bun/agent-stop-startup.test.ts::test|启动期按停止 → 桩一次请求都没收到，回合走「已停止」收尾
+apps/studio/src/bun/agent-stop-startup.test.ts::test|跑完之后运行态回落：isAgentRunning 为 false
+apps/studio/src/bun/agent-tools.bash.test.ts::describe|bash 工具
+apps/studio/src/bun/agent-tools.bash.test.ts::test|resolveCommandTimeout：参数夹在 [1000, 600000]，非法值退回 ctx / 默认
+apps/studio/src/bun/agent-tools.bash.test.ts::test|传了 timeout_ms 就按它来，不再写死 120 秒
+apps/studio/src/bun/agent-tools.bash.test.ts::test|后台进程占着 stdout 时也立刻返回，不等管道 EOF
+apps/studio/src/bun/agent-tools.bash.test.ts::test|普通命令照常返回输出与退出码
+apps/studio/src/bun/agent-tools.bash.test.ts::test|用户点停止：命令被终止并在结果里说明
+apps/studio/src/bun/agent-tools.bash.test.ts::test|超时终止整条进程组：后台孙进程不会变成孤儿
+apps/studio/src/bun/agent-turn.test.ts::describe|runAgentTurn 收尾返回值
+apps/studio/src/bun/agent-turn.test.ts::test|失败那一轮轨迹里仍有 error 事件，正文仍带 ⚠️（原有可见行为没动）
+apps/studio/src/bun/agent-turn.test.ts::test|模型持续报错时返回 ok: false 且带上原因
+apps/studio/src/bun/agent-turn.test.ts::test|正常成功的回合仍返回 ok: true

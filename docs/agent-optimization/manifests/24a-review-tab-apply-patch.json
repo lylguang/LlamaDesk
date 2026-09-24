@@ -1,0 +1,32 @@
+{
+  "id": "24a-review-tab-apply-patch",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/timeline.tsx",
+    "apps/studio/src/mainview/app/agent/review-tab.tsx",
+    "apps/studio/src/mainview/app/agent/review-apply-patch.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/timeline.tsx",
+    "apps/studio/src/mainview/app/agent/review-tab.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/review-apply-patch.test.ts",
+    "apps/studio/src/mainview/app/agent/timeline-model.test.ts",
+    "apps/studio/src/mainview/app/agent/message.test.tsx"
+  ],
+  "max_source_lines": 100,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "审查页签又漏掉 apply_patch",
+      "file": "apps/studio/src/mainview/app/agent/review-tab.tsx",
+      "find": "patchFilePaths",
+      "replace": "((_p: string) => [] as string[])"
+    }
+  ]
+}

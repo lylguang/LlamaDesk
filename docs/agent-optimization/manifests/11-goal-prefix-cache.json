@@ -1,0 +1,28 @@
+{
+  "id": "11-goal-prefix-cache",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-goals.ts",
+    "apps/studio/src/bun/agent-goals.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-goals.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-goals.test.ts"
+  ],
+  "max_source_lines": 15,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "续跑消息里的进度换成空串（易变内容两头都丢了）",
+      "file": "apps/studio/src/bun/agent-goals.ts",
+      "find": "describeGoal(goal)",
+      "replace": "\"\""
+    }
+  ]
+}

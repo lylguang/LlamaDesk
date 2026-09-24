@@ -1,0 +1,79 @@
+apps/studio/src/bun/agent-compaction.test.ts::describe|compactMessages
+apps/studio/src/bun/agent-compaction.test.ts::describe|estimateTokens
+apps/studio/src/bun/agent-compaction.test.ts::describe|pruneSupersededReads
+apps/studio/src/bun/agent-compaction.test.ts::test|不同路径 / 不同工具之间互不取代
+apps/studio/src/bun/agent-compaction.test.ts::test|中文按字、英文按字符比例估算
+apps/studio/src/bun/agent-compaction.test.ts::test|任务陈述后面不会跟着被裁断的工具结果（先剥尾部再插任务陈述）
+apps/studio/src/bun/agent-compaction.test.ts::test|分块 content 也会被算进去（工具调用块不能漏）
+apps/studio/src/bun/agent-compaction.test.ts::test|分页读在前、全量读在后：旧的分页结果可以省
+apps/studio/src/bun/agent-compaction.test.ts::test|同一路径的旧读取被最新的整份读取取代
+apps/studio/src/bun/agent-compaction.test.ts::test|同样拦住 AgentMessage 形态的工具结果（transformContext 里角色叫 toolResult）
+apps/studio/src/bun/agent-compaction.test.ts::test|多轮会话长回合时，当前这轮的任务陈述不会被裁掉
+apps/studio/src/bun/agent-compaction.test.ts::test|尾部不会以工具结果开头（否则真实服务会 400）
+apps/studio/src/bun/agent-compaction.test.ts::test|最新一次只是分页读取时，绝不丢旧的全量结果
+apps/studio/src/bun/agent-compaction.test.ts::test|消息很少时不动（避免刚开会话就触发压缩）
+apps/studio/src/bun/agent-compaction.test.ts::test|混合内容比纯英文更贵（同样长度下中文占比越高 token 越多）
+apps/studio/src/bun/agent-compaction.test.ts::test|省下的量太小就不动手（占位文本自己也要花 token）
+apps/studio/src/bun/agent-compaction.test.ts::test|至少保留最后 4 条（预算再紧也不把最近的上下文清空）
+apps/studio/src/bun/agent-compaction.test.ts::test|裁剪时 messages[0] 仍保留、占位消息仍在第 2 位
+apps/studio/src/bun/agent-compaction.test.ts::test|超预算时保留任务陈述与最近消息，中间换成占位说明
+apps/studio/src/bun/agent-compaction.test.ts::test|预算充足时原样返回
+apps/studio/src/bun/agent-compaction.test.ts::test|预算内裁剪；预算小到放不下最小保留量时以「保留最近 4 条」为准
+apps/studio/src/bun/agent-compaction.test.ts::test|预算卡在任务陈述刚好放下时，任务陈述只出现一次（而不是补插两遍）
+apps/studio/src/bun/agent-history.test.ts::describe|buildHistoryMessages
+apps/studio/src/bun/agent-history.test.ts::describe|pairToolEvents
+apps/studio/src/bun/agent-history.test.ts::describe|planRegenerate
+apps/studio/src/bun/agent-history.test.ts::describe|planRevertToMessage
+apps/studio/src/bun/agent-history.test.ts::describe|建会话时的历史回填
+apps/studio/src/bun/agent-history.test.ts::test|start / end 按工具名配对，输出与错误标记带到调用上
+apps/studio/src/bun/agent-history.test.ts::test|删掉目标回答及其之后的一切，prompt 取它前面那条用户消息
+apps/studio/src/bun/agent-history.test.ts::test|只认工具事件：授权 / 状态 / 提问都不算工具调用
+apps/studio/src/bun/agent-history.test.ts::test|同一段历史连跑两次结果一致（纯函数，不留状态）
+apps/studio/src/bun/agent-history.test.ts::test|同名工具并行调用时按后进先出配对（结果顺序不保证）
+apps/studio/src/bun/agent-history.test.ts::test|回填的助手消息带 0 用量（别让占用条把它当成实测值）
+apps/studio/src/bun/agent-history.test.ts::test|坏掉的 args（不是 JSON）退化成空对象而不是抛错
+apps/studio/src/bun/agent-history.test.ts::test|子智能体内部的事件不进主 Agent 的历史
+apps/studio/src/bun/agent-history.test.ts::test|工具输出被截断（历史原样回填会把 8k 窗口吃光）
+apps/studio/src/bun/agent-history.test.ts::test|带工具调用的助手消息被拆成「调用 → 结果 → 正文」
+apps/studio/src/bun/agent-history.test.ts::test|最后一条助手消息：没有可删的（调用方据此报「没什么可回退的」）
+apps/studio/src/bun/agent-history.test.ts::test|末尾不是用户消息时原样返回（重新生成 / 无人值守那条路径）
+apps/studio/src/bun/agent-history.test.ts::test|末尾那条用户消息就是本轮的 prompt，要摘掉（否则任务会重复一遍）
+apps/studio/src/bun/agent-history.test.ts::test|每个 toolCall 都有对应的 toolResult（缺了真实服务会 400）
+apps/studio/src/bun/agent-history.test.ts::test|没有工具调用的会话与以前一样：只有 user / assistant 正文
+apps/studio/src/bun/agent-history.test.ts::test|目标回答之前没有用户消息：明确报错，不瞎猜
+apps/studio/src/bun/agent-history.test.ts::test|目标是中间那条回答：它之后的问答一起删（重跑就是重开这一段）
+apps/studio/src/bun/agent-history.test.ts::test|空正文的用户消息被跳过（不往历史里塞空回合）
+apps/studio/src/bun/agent-history.test.ts::test|落在助手消息上：保留这条，删它后面的（keepTarget = true）
+apps/studio/src/bun/agent-history.test.ts::test|落在用户消息上：连它一起删（那条提问要回填输入框重打）
+apps/studio/src/bun/agent-history.test.ts::test|被复用的用户消息**不在**删除区间内 —— 所以本轮不能再插一条 user 行
+apps/studio/src/bun/agent-history.test.ts::test|角色写的是别的值（tool / 空）时按助手处理：保守地保留目标那条
+apps/studio/src/bun/agent-spill.test.ts::describe|capToolResultText
+apps/studio/src/bun/agent-spill.test.ts::describe|isSpillPath（那两处窄口子的边界）
+apps/studio/src/bun/agent-spill.test.ts::describe|spillToolOutput
+apps/studio/src/bun/agent-spill.test.ts::describe|toolOutputCharLimit（单条工具输出随窗口缩放）
+apps/studio/src/bun/agent-spill.test.ts::describe|truncateForModel
+apps/studio/src/bun/agent-spill.test.ts::test|8192 窗口算出 6144（8k 窗口下单条工具结果不能吃掉大半个窗口）
+apps/studio/src/bun/agent-spill.test.ts::test|maxChars 为 0 时不返回任何原文内容（text.slice(-0) 会吐出整段）
+apps/studio/src/bun/agent-spill.test.ts::test|maxChars 为负数时同样不返回原文内容
+apps/studio/src/bun/agent-spill.test.ts::test|中间省略说明里带着正确的省略字符数
+apps/studio/src/bun/agent-spill.test.ts::test|写到会话目录、能原样读回，并带上工具名
+apps/studio/src/bun/agent-spill.test.ts::test|只保留最近 N 个转存文件
+apps/studio/src/bun/agent-spill.test.ts::test|大窗口被 MAX_TOOL_OUTPUT_CHARS 夹住（窗口再大也不放宽）
+apps/studio/src/bun/agent-spill.test.ts::test|头尾两段合计正好等于 max，不多占窗口（多个 max 值）
+apps/studio/src/bun/agent-spill.test.ts::test|头部不占满额度：尾部标记不能被头部挤掉（比例不能等于 1）
+apps/studio/src/bun/agent-spill.test.ts::test|头部仍在最前，结果以原文开头
+apps/studio/src/bun/agent-spill.test.ts::test|字面在转存目录里就算（写之前文件还不存在）
+apps/studio/src/bun/agent-spill.test.ts::test|小窗口被下限夹住：再小的窗口也要让模型看到一点东西
+apps/studio/src/bun/agent-spill.test.ts::test|工具名进文件名前消毒（含路径分隔符也不会跑出目录）
+apps/studio/src/bun/agent-spill.test.ts::test|没超限就原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|目录外的路径不算，别处也不被认成转存
+apps/studio/src/bun/agent-spill.test.ts::test|目录里没有 .txt 时清理不动手
+apps/studio/src/bun/agent-spill.test.ts::test|硬上限之内原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|超过内存硬上限时丢尾部并说明原因（bash 输出在读之前不知道有多大）
+apps/studio/src/bun/agent-spill.test.ts::test|超过写盘上限时截断，并在结果里如实标注
+apps/studio/src/bun/agent-spill.test.ts::test|超限时保留尾部（bash 的失败清单和统计都在结尾）
+apps/studio/src/bun/agent-spill.test.ts::test|超限时写清三件事：被截了、还差多少、去哪儿找原文
+apps/studio/src/bun/agent-spill.test.ts::test|转存失败（没有路径）时退化成旧文案，但不撒谎说原文还在
+apps/studio/src/bun/agent-spill.test.ts::test|软链接指向凭据文件时不算：否则三道门一起被绕过
+apps/studio/src/bun/agent-spill.test.ts::test|非法值（0、负数、NaN、Infinity）退回 MAX_TOOL_OUTPUT_CHARS
+apps/studio/src/bun/agent-spill.test.ts::test|默认硬上限比展示上限大两个量级（先落盘、再截断给模型看）

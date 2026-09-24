@@ -1,0 +1,32 @@
+{
+  "id": "15-summary-circuit-breaker",
+  "allowed_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/agent-summary-breaker.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-summary-breaker.test.ts",
+    "apps/studio/src/bun/agent-summary.test.ts",
+    "apps/studio/src/bun/agent-compaction.test.ts",
+    "apps/studio/src/bun/agent-compaction-pipeline.test.ts"
+  ],
+  "max_source_lines": 30,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "summarizing"
+  ],
+  "mutations": [
+    {
+      "name": "冷却时长归零（每步又重试一次 90 秒摘要）",
+      "file": "apps/studio/src/bun/agent.ts",
+      "find": "const summaryCooldownMs = 5 * 60_000;",
+      "replace": "const summaryCooldownMs = 0;"
+    }
+  ]
+}

@@ -204,6 +204,21 @@ export function isModelWeightExt(name: string): boolean {
   return MODEL_WEIGHT_EXTS.some((ext) => n.endsWith(ext));
 }
 
+/**
+ * 多模态投影文件（mmproj）的命名判定。
+ *
+ * 上游没有统一命名，仓库里三种写法都常见：
+ *   - `mmproj-F16.gguf`（llama.cpp / Unsloth 自家导出，投影文件在前）
+ *   - `mmproj-model-f16.gguf`（bartowski 一类）
+ *   - `Qwen3-VL-4B-Instruct-mmproj-BF16.gguf`（模型名在前，ModelScope 镜像常见）
+ * 所以按「名字里带一段 mmproj 的 .gguf」判定，而不是只认 `mmproj-` 前缀：
+ * 漏认的代价是模型起了却没有视觉能力（上传图片被服务端直接拒），
+ * 而量化名里不会出现 mmproj 这个词，多认的风险可以忽略。
+ */
+export function isMmprojFileName(name: string): boolean {
+  return /(?:^|[-_.])mmproj[^/\\]*\.gguf$/i.test(fileBaseName(name));
+}
+
 /** Fuzzy quantization match: "Q4_K_M" matches "Qwen3-4B-Q4_K_M.gguf" / "…q4_k_m…". */
 export function matchQuant(fileName: string, quant: string): boolean {
   const a = fileName.toLowerCase().replace(/[^a-z0-9]/g, "");

@@ -1,0 +1,31 @@
+{
+  "id": "09a-queue-button",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/composer.tsx",
+    "apps/studio/src/mainview/app/agent/composer-queue.test.tsx"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/composer.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/composer-queue.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-slash.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-workspace.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-render.test.tsx"
+  ],
+  "max_source_lines": 8,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "把 !busy 加回去（排队按钮又变成永远点不动）",
+      "file": "apps/studio/src/mainview/app/agent/composer.tsx",
+      "find": "const canSend = input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0;",
+      "replace": "const canSend = (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) && !busy;"
+    }
+  ]
+}

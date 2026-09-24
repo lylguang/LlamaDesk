@@ -5,6 +5,7 @@ import { logEvent } from "./app-log";
 import { getSetting, updateSettings } from "./db/settings";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir } from "./image-server";
+import { removeManifest, writeManifest } from "./install-manifest";
 import { convertFileToImages } from "./vllm";
 import { downloadHttpFile, type DownloadProgress } from "./modelscope";
 import { resolveOcrImage, saveOcrRecord, type OcrLine, type OcrResult } from "./ocr";
@@ -331,6 +332,13 @@ export function downloadPpOcrEngine(): Promise<{
   // 防重入：双击/并发调用复用同一次安装。
   if (engineInstallInFlight) return engineInstallInFlight;
   engineInstallInFlight = (async () => {
+    // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+    if (!removeManifest(getEngineDir())) {
+      const error = `无法清除上次的安装记录，请检查 ${getEngineDir()} 是否被占用或只读`;
+      emitLog(error);
+      engineInstallInFlight = null;
+      return { ok: false, error };
+    }
     try {
       // 上次安装被中断（.installing 标记跨重启残留）→ venv 状态不可信，
       // 自动清掉残留后重装；models/（已下模型 + 断点分片）保留。
@@ -489,6 +497,13 @@ async function doDownloadPpOcrEngine(): Promise<{
 
   const version = await getPpOcrVersion();
   emitLog(version ? `安装成功：paddleocr ${version}` : "安装成功");
+  writeManifest(getEngineDir(), {
+    engine: "paddleocr",
+    version: version ?? null,
+    platform: process.platform,
+    arch: process.arch,
+    steps: 2,
+  });
   return { ok: true, version: version ?? undefined };
 }
 

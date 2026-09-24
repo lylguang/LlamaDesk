@@ -1,0 +1,23 @@
+{
+  "id": "04b-stop-during-startup",
+  "allowed_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/agent-stop-startup.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-stop-startup.test.ts",
+    "apps/studio/src/bun/agent-reentry.test.ts",
+    "apps/studio/src/bun/agent-turn.test.ts",
+    "apps/studio/src/bun/agent-queue.test.ts"
+  ],
+  "max_source_lines": 15,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ]
+}

@@ -1,0 +1,22 @@
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::describe|压缩流水线
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网之后新增的内容接在结论后面，再被后续裁剪正常处理
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网之后照样走裁剪：上下文回到窗口之内（不是「收网完就再也不压了」）
+apps/studio/src/bun/agent-compaction-pipeline.test.ts::test|收网只在执行轨迹里记一条（按步记会刷出一整列重复行）
+apps/studio/src/bun/agent-compaction.test.ts::describe|compactMessages
+apps/studio/src/bun/agent-compaction.test.ts::describe|estimateTokens
+apps/studio/src/bun/agent-compaction.test.ts::describe|pruneSupersededReads
+apps/studio/src/bun/agent-compaction.test.ts::test|不同路径 / 不同工具之间互不取代
+apps/studio/src/bun/agent-compaction.test.ts::test|中文按字、英文按字符比例估算
+apps/studio/src/bun/agent-compaction.test.ts::test|分块 content 也会被算进去（工具调用块不能漏）
+apps/studio/src/bun/agent-compaction.test.ts::test|分页读在前、全量读在后：旧的分页结果可以省
+apps/studio/src/bun/agent-compaction.test.ts::test|同一路径的旧读取被最新的整份读取取代
+apps/studio/src/bun/agent-compaction.test.ts::test|同样拦住 AgentMessage 形态的工具结果（transformContext 里角色叫 toolResult）
+apps/studio/src/bun/agent-compaction.test.ts::test|尾部不会以工具结果开头（否则真实服务会 400）
+apps/studio/src/bun/agent-compaction.test.ts::test|最新一次只是分页读取时，绝不丢旧的全量结果
+apps/studio/src/bun/agent-compaction.test.ts::test|消息很少时不动（避免刚开会话就触发压缩）
+apps/studio/src/bun/agent-compaction.test.ts::test|混合内容比纯英文更贵（同样长度下中文占比越高 token 越多）
+apps/studio/src/bun/agent-compaction.test.ts::test|省下的量太小就不动手（占位文本自己也要花 token）
+apps/studio/src/bun/agent-compaction.test.ts::test|至少保留最后 4 条（预算再紧也不把最近的上下文清空）
+apps/studio/src/bun/agent-compaction.test.ts::test|超预算时保留任务陈述与最近消息，中间换成占位说明
+apps/studio/src/bun/agent-compaction.test.ts::test|预算充足时原样返回
+apps/studio/src/bun/agent-compaction.test.ts::test|预算内裁剪；预算小到放不下最小保留量时以「保留最近 4 条」为准

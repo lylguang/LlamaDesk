@@ -41,23 +41,38 @@ put(join(tmp, "repo"), "mmproj-f16.gguf");
 
 const models = scanPlainDir(tmp, "external");
 
-describe("model-scan / mmproj 排除", () => {
-  test("isMmprojFile：mmproj-*.gguf 命中，普通权重不命中", () => {
+describe("model-scan / mmproj 归属", () => {
+  test("isMmprojFile：三种上游命名都命中，普通权重不命中", () => {
     expect(isMmprojFile("mmproj-f16.gguf")).toBe(true);
     expect(isMmprojFile("mmproj-bf16.gguf")).toBe(true);
     expect(isMmprojFile("mmproj-model-f16.gguf")).toBe(true);
+    // 模型名在前（ModelScope 镜像常见）：只认 mmproj- 前缀会漏掉它，
+    // 代价是模型起了却没有视觉能力。
+    expect(isMmprojFile("prefix-mmproj-f16.gguf")).toBe(true);
+    expect(isMmprojFile("Qwen3-VL-4B-Instruct-mmproj-BF16.gguf")).toBe(true);
+    expect(isMmprojFile("sub/mmproj-f16.gguf")).toBe(true);
     expect(isMmprojFile("model.gguf")).toBe(false);
     expect(isMmprojFile("mmproj-f16.safetensors")).toBe(false);
-    expect(isMmprojFile("prefix-mmproj-f16.gguf")).toBe(false);
   });
 
-  test("平面目录（含子目录）里的 mmproj-*.gguf 不出现在扫描结果", () => {
+  test("平面目录（含子目录）里的 mmproj 不单列成模型", () => {
     const fileNames = models.filter((m) => !m.isDir).map((m) => `${m.repo}/${m.fileName}`);
     expect(fileNames).toContain("flat/gme-2b-f16.gguf");
     expect(fileNames).toContain("nested/wemm-9b.gguf");
     for (const name of fileNames) {
       expect(name.includes("mmproj")).toBe(false);
     }
+  });
+
+  test("但 mmproj 登记在同目录模型条目的 supportFiles 上（市场的「已下载」判定要看见它）", () => {
+    const flat = models.find((m) => m.repo === "flat" && m.fileName === "gme-2b-f16.gguf");
+    expect(flat?.supportFiles?.sort()).toEqual(["mmproj-bf16.gguf", "mmproj-f16.gguf"]);
+
+    const nested = models.find((m) => m.repo === "nested" && m.fileName === "wemm-9b.gguf");
+    expect(nested?.supportFiles).toEqual(["mmproj-model-f16.gguf"]);
+
+    // 配对按目录：子目录里的投影文件不会挂到别的目录的模型上
+    expect(flat?.supportFiles).not.toContain("mmproj-model-f16.gguf");
   });
 
   test("仓库目录的 files[] 聚合不受损：mmproj 仍在（已知可接受残留，风险表在案）", () => {

@@ -21,6 +21,8 @@ export type GpuInfo = {
   name: string;
   /** 独显显存（bytes）。Apple 统一内存 / 核显为 null —— 那种机器内存就是显存。 */
   vramBytes: number | null;
+  /** 统一内存架构（Apple Silicon、AMD APU）：显存和系统内存是同一块，不能分开做预算。 */
+  unifiedMemory?: boolean;
 };
 
 /** 推理内存预算按哪一份内存折算（界面据此写「可用预算」的说明）。 */
@@ -78,6 +80,13 @@ export function classifyChipVendor(chipName: string): ChipVendor {
 // 内存预算
 // ---------------------------------------------------------------------------
 
+/**
+ * 低于这个「显存」一定是 APU 的专用分区（AMD 把统一内存里划一小块专用给 GPU，
+ * Strix Halo 上是 512 MiB），不可能是一张能跑模型的独显。
+ * Apple Silicon 同理：GPU 从来没有任何独立显存。
+ */
+export const AMD_DEDICATED_VRAM_MIN_BYTES = 2 * 1024 ** 3;
+
 /** Apple 统一内存：macOS 默认的 GPU wired 上限就是物理内存的 75%（`iogpu.wired_limit_mb`）。 */
 export const UNIFIED_BUDGET_RATIO = 0.75;
 /** 独显：留 10% 给显示输出、上下文缓冲和显存碎片。 */
@@ -90,7 +99,7 @@ export function inferenceMemoryBudget(input: {
   totalMemoryBytes: number;
 }): { budgetBytes: number; basis: MemoryBasis } {
   const { gpu, totalMemoryBytes } = input;
-  if (gpu.kind === "apple") {
+  if (gpu.kind === "apple" || gpu.unifiedMemory === true) {
     return { budgetBytes: Math.round(totalMemoryBytes * UNIFIED_BUDGET_RATIO), basis: "unified" };
   }
   if (gpu.vramBytes && gpu.vramBytes > 0) {

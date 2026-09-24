@@ -18,6 +18,8 @@ import { getCloudModelRefs, getInstalledModels, type CloudModelRef } from "./mod
 import { DEFAULT_INFERENCE_PORT } from "../../shared/server-info";
 import { serverContextWindow } from "../../shared/benchmark";
 import type { InferenceEngine } from "../../shared/engines";
+import { contextLengthForModel } from "../../shared/cloud-providers";
+import { resolveCloudContextWindow } from "../../shared/model-context";
 import { resolveDataDir } from "../data-dir";
 
 type ToolKind = "anthropic" | "openai" | "generic";
@@ -152,13 +154,20 @@ export async function cmdLaunch(parsed: ParsedArgs) {
   const apiKey = modelIsLocal ? "EMPTY" : (settings.VLLM_API_KEY || "EMPTY");
   if (!modelIsLocal && !cloudBase) fail("云端模型需要先配置云端 API：`omi cloud --set ...`");
 
-  // ChatGPT / Codex 的模型目录要声明上下文窗口，它据此决定何时自动压缩：本地模型取推理
-  // 服务器真实的单请求窗口（llama.cpp 的 SERVER_CTX_SIZE 是 KV 总量，按 --parallel 均分），
-  // 拿不到就退回保守默认值 —— 报大了长会话会在服务端硬报错。
+  // ChatGPT / Codex 的模型目录要声明上下文窗口，它据此决定何时自动压缩：
+  // - **本地**：取推理服务器真实的单请求窗口（llama.cpp 的 SERVER_CTX_SIZE 是 KV 总量，
+  //   按 --parallel 均分）；引擎没有对应旋钮（MLX）时退回保守默认值 —— 报大了长会话
+  //   会在服务端硬报错。
+  // - **云端**：按模型定，与对话 / Agent 走同一个解析器（设置页手填的覆盖值 → 模型 id
+  //   里的尺寸后缀 → 已知型号目录 → 256K）。以前这里对所有云端模型都写死 128k，
+  //   1M 窗口的模型会被外部工具按 128k 提前压缩。
   const contextWindow = modelIsLocal
-    ? serverContextWindow((settings.INFERENCE_ENGINE ?? "llama.cpp") as InferenceEngine, settings) ??
-      CHATGPT_FALLBACK_CONTEXT_WINDOW
-    : CHATGPT_FALLBACK_CONTEXT_WINDOW;
+    ? (serverContextWindow((settings.INFERENCE_ENGINE ?? "llama.cpp") as InferenceEngine, settings) ??
+      CHATGPT_FALLBACK_CONTEXT_WINDOW)
+    : resolveCloudContextWindow(
+        model.name,
+        contextLengthForModel(settings.CLOUD_MODELS, model.name),
+      );
 
   // 统一走本地 API 网关：网关负责协议翻译（Anthropic ↔ OpenAI）并按模型 ID 路由本地/云端。
   // 网关可能因配置端口被占用而回退到下一个空闲端口（如 10000 被其它程序占用 → 10001），
@@ -286,7 +295,7 @@ export async function cmdLaunch(parsed: ParsedArgs) {
       break;
     }
     case "codex": {
-      configureCodex(`${gatewayBase}/v1/`, model.name, memoryOn);
+      configureCodex(`${gatewayBase}/v1/`, model.name, contextWindow, memoryOn);
       env.OPENAI_API_KEY = agentKey;
       extraArgs.unshift("--profile", CODEX_PROFILE_NAME, "-m", model.name);
       break;
@@ -456,13 +465,15 @@ const CODEX_DIR = join(homedir(), ".codex");
 const CODEX_PROFILE_NAME = "omni-launch";
 
 /** `omi launch codex`（codex CLI）用的模型目录，独立于桌面端那份 models.json。 */
-export function codexCatalogJson(model: string): string {
+export function codexCatalogJson(model: string, contextWindow: number): string {
   const catalog = {
     models: [
       {
         slug: model,
         display_name: model,
-        context_window: 128_000,
+        // 目录里的窗口必须是真的：Codex 拿它当自动压缩的基准（见上面 chatgptModelsJson
+        // 的字段说明）。写死 128k 会让 8k 的本地模型报大、1M 的云端模型报小。
+        context_window: contextWindow,
         shell_type: "default",
         visibility: "list",
         supported_in_api: true,
@@ -514,10 +525,15 @@ export function codexProfileToml(
   return textLines.join("\n");
 }
 
-export function configureCodex(baseURL: string, model: string, memoryOn: boolean): void {
+export function configureCodex(
+  baseURL: string,
+  model: string,
+  contextWindow: number,
+  memoryOn: boolean,
+): void {
   mkdirSync(CODEX_DIR, { recursive: true });
   const catalogPath = join(CODEX_DIR, "model.json");
-  writeFileSync(catalogPath, codexCatalogJson(model));
+  writeFileSync(catalogPath, codexCatalogJson(model, contextWindow));
   const profilePath = join(CODEX_DIR, `${CODEX_PROFILE_NAME}.config.toml`);
   writeFileSync(profilePath, codexProfileToml(baseURL, model, catalogPath, memoryOn));
 }
@@ -609,7 +625,11 @@ const CHATGPT_BACKUP_DIR = join(CODEX_DIR, "backup-omni");
 const CHATGPT_CONFIG_BACKUP = join(CHATGPT_BACKUP_DIR, "config.toml");
 const CHATGPT_MANIFEST = join(CHATGPT_BACKUP_DIR, "manifest.json");
 
-/** 读不到真实上下文窗口时声明给 Codex 的保守值（云端模型走这个）。 */
+/**
+ * 本地模型读不到真实窗口时声明给 Codex 的保守值（引擎没有窗口旋钮，如 MLX）。
+ * 云端模型**不用**这个 —— 它按模型解析（`resolveCloudContextWindow`），
+ * 否则 1M 窗口的模型会被当成 128k 提前压缩。
+ */
 const CHATGPT_FALLBACK_CONTEXT_WINDOW = 128_000;
 
 /** 客户端自带目录读不到时的兜底提示词（见 readCodexInstructions）。 */

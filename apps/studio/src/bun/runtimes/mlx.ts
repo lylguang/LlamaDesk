@@ -307,7 +307,7 @@ export class MlxRuntime implements Runtime {
     if (hfEndpoint) env.HF_ENDPOINT = hfEndpoint;
 
     try {
-      this.serverProcess = spawnServerProcess(cmd, env);
+      this.serverProcess = spawnServerProcess(cmd, env, "mlx");
       pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;

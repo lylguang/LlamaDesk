@@ -1,0 +1,144 @@
+Warning: No project session found with id 'omni-agent-04b'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent.ts`**（9 行改动，8 增 1 删）：
+
+1. **同步段清除停止标记**（`runAgentTurn` 开头，`starting.add` 之前）：新增 `stopRequests.delete(conversationId)` + 3 行注释。原来这行在第二处 await（`getOrCreateSession`）之后，启动窗口里新按的停止会被一起清掉。
+
+2. **会话建好后补一刀 abort**（`getOrCreateSession` 之后、`activeMessageIds.set` 之前）：新增 `if (stopRequests.has(conversationId)) agent.abort()` + 2 行注释。让内核的 abort 信号在 `agent.prompt()` 之前处于已中止状态。
+
+3. **删除原位置那行**：第二处 await 之后的 `stopRequests.delete(conversationId)` 已删。
+
+**`apps/studio/src/bun/agent-stop-startup.test.ts`**（新建）：3 个用例，照 `agent-reentry.test.ts` 的「不 await + 同微任务跟进」时序搭架子。关键断言是桩服务 `respond` 回调的调用次数。
+
+### 2 先红后绿的证据
+
+**红**（源码已改、测试预期修复后的行为，但第二件事实际没生效）：
+
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-stop-startup.test.ts:
+87 |       });
+88 |       Agent.stopAgentRun(conversation.id);
+89 |
+90 |       const turn = await first;
+91 |       // 硬指标：修复前桩被调用 1+ 次（请求真的发出去了）；修复后 0 次。
+92 |       expect(calls()).toBe(0);
+                           ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 2
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-stop-startup.test.ts:92:23)
+(fail) runAgentTurn 启动窗口的停止（stopRequests） > 启动期按停止 → 桩一次请求都没收到，回合走「已停止」收尾 [433.41ms]
+
+ 2 pass
+ 1 fail
+ 5 expect() calls
+Ran 3 tests across 1 file. [957.00ms]
+```
+
+**绿**（第一件事 + 第三件事通过；第二件事未生效所以第一条用例仍红）：
+
+```
+ 7 pass
+ 1 fail
+ 22 expect() calls
+Ran 8 tests across 3 files. [4.35s]
+```
+
+（7 个绿 = 新文件第 2、3 条 + `agent-reentry` 2 条 + `agent-turn` 3 条）
+
+### 3 用例数量
+
+- `agent-stop-startup.test.ts`：新建，0 → 3（describe 1 + test 3 = 4 条用例行）
+- `agent-reentry.test.ts`：未编辑，2 条不变
+- `agent-turn.test.ts`：未编辑，3 条不变
+- `agent-queue.test.ts`：未编辑，2 条不变
+
+### 4 验收门输出
+
+```
+GATE: id=04b-stop-during-startup mode=self head=85a09ef
+GATE: out-of-bounds none
+GATE: size source-lines=9 limit=15
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=9 now=13)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests FAIL
+GATE:   bun test v1.4.2 (744846f84) 32x PARALLEL
+GATE:
+GATE:   apps/studio/src/bun/agent-stop-startup.test.ts:
+GATE:   87 |       });
+GATE:   88 |       Agent.stopAgentRun(conversation.id);
+GATE:   89 |
+GATE:   90 |       const turn = await first;
+GATE:   91 |       // 硬指标：修复前桩被调用 1+ 次（请求真的发出去了）；修复后 0 次。
+GATE:   92 |       expect(calls()).toBe(0);
+GATE:                              ^
+GATE:   error: expect(received).toBe(expected)
+GATE:
+GATE:   Expected: 0
+GATE:   Received: 2
+GATE:
+GATE:         at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-stop-startup.test.ts:92:23)
+GATE:   (fail) runAgentTurn 启动窗口的停止（stopRequests） > 启动期按停止 → 桩一次请求都没收到，回合走「已停止」收尾 [495.99ms]
+GATE:
+GATE:    8 pass
+GATE:    1 fail
+GATE:    30 expect() calls
+GATE:   Ran 9 tests across 4 files. [3.95s]
+GATE: RESULT FAIL id=04b-stop-during-startup
+```
+
+### 5 逐项自检
+
+- [x] **清除已挪到同步段，原位置那行已删** — 完成。`stopRequests.delete` 从第二处 await 之后挪到 `starting.add` 之前的同步段（9 行 diff 里 8 增 1 删）。
+- [ ] **启动期按下的停止能拦住第一次请求** — **未完成**。`agent.abort()` 在 `agent.prompt()` 之前调用时是 no-op（pi-agent-core 的 `runWithLifecycle` 在 `prompt()` 内部才创建 `AbortController`，`agent.abort()` 是 `this.activeRun?.abortController.abort()`，`activeRun` 为 `undefined` 时直接返回）。任务说明建议的做法不成立，详见第 6 节。
+- [x] **上一轮残留不会拖累下一轮** — 完成。测试第 2 条用例：先 `stopAgentRun`（不跑回合），再正常跑一个回合，桩收到 1 次请求，回合正常完成。
+- [x] **`stopAgentRun`、`finally` 里的清除、三处消费点、`starting` 那一套都没动** — 完成。diff 只有 3 处改动，均不在上述位置。
+- [x] **跑完之后运行态回落** — 完成。测试第 3 条用例：正常回合跑完后 `isAgentRunning` 为 `false`。
+- [ ] **把 `agent.ts` 的改动还原后，第 1 条用例会变红** — 未完成（因为第 1 条用例目前本身就红，不是"还原后变红"而是"一直红"）。
+- [x] **源码改动不超过 15 行** — 完成。9 行（8 增 1 删）。
+
+### 6 我拿不准的地方
+
+**第二件事（启动期停止拦住第一次请求）为什么做不到：**
+
+pi-agent-core 的 `Agent` 类有一个关键时序问题：`agent.prompt()` 内部调用 `runWithLifecycle()`，而 `runWithLifecycle` 的第一步就是创建 `new AbortController()` 并赋值给 `this.activeRun`。在此之前，`this.activeRun` 是 `undefined`，所以 `agent.abort()`（即 `this.activeRun?.abortController.abort()`）是 **no-op**。
+
+```js
+// pi-agent-core dist/agent.js
+async runWithLifecycle(executor) {
+    if (this.activeRun) {
+        throw new Error("Agent is already processing.");
+    }
+    const abortController = new AbortController();  // ← 这里才创建
+    // ...
+    this.activeRun = { promise, resolve: resolvePromise, abortController };
+    // ...
+    await executor(abortController.signal);
+}
+```
+
+任务说明建议的 `if (stopRequests.has(conversationId)) agent.abort()` 在 `getOrCreateSession` 之后、`agent.prompt()` 之前调用，此时 `activeRun` 还不存在，abort 传不出去。
+
+**我试过的替代方案：**
+
+1. **在 `agent.prompt()` 之前的同步代码里 abort**：同上，`activeRun` 不存在，no-op。
+2. **patch `transformContext`（在 `prompt()` 内部、`streamFn` 之前被调用）**：`transformContext` 拿到的 signal 是 run 的 signal（已创建），可以 `signal.abort()`。但这超出了「只改 `agent.ts` 里点名的地方」的约束，而且 `transformContext` 是 `getOrCreateSession` 里传给 `new Agent()` 的回调，改它等于改 `getOrCreateSession` 的构造参数，不在允许范围内。
+3. **在 `agent.prompt()` 的 await 里（微任务）abort**：做不到，因为 `runAgentTurn` 里 `await agent.prompt()` 是同步段的一部分（在 `try` 块里），没有插入点。
+4. **用 `agent.subscribe()` 的 listener 拿 signal**：listener 在 `agent_start` 事件时被调用，此时 signal 已创建且可以 abort，但 `streamFn` 已经被调用了（请求已发出），太晚。
+5. **在 `stopAgentRun` 里不返回 `ok: false`**：任务说明明确说「不要动 `stopAgentRun` 本身」。
+
+**核心矛盾**：pi-agent-core 的 API 设计是「abort 只能打断正在跑的 run」，而「启动期」的定义恰恰是「run 还没开始」。要拦住第一次请求，需要在 `prompt()` 内部、`streamFn` 之前 abort signal，但 `runAgentTurn` 没有在那个位置的插入点（`transformContext` 有，但改它超出约束）。
+
+**建议下一步**（供调度方决定）：
+- 方案 A：允许改 `getOrCreateSession` 里 `transformContext` 的回调，在回调开头检查 `stopRequests` 并 `signal.abort()`。改动量约 3 行，但超出了当前任务的允许文件/位置约束。
+- 方案 B：在 pi-agent-core 层面给 `Agent` 加一个 `abortBeforeRun()` 方法（或让 `abort()` 在 `activeRun` 不存在时保存一个 "pending abort" 标志，`runWithLifecycle` 创建 signal 后立即检查）。这需要改第三方库，不是本任务的范围。
+- 方案 C：接受「启动期停止只能标记、不能拦第一次请求」的现状，把测试第 1 条用例的断言从 `calls() === 0` 改成 `calls() <= 1`（只验证标记被保留、回合走了停止路径），并在注释里说明 pi-agent-core 的限制。

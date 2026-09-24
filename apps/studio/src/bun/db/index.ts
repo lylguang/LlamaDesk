@@ -247,17 +247,41 @@ function repairUnreachableMigrations(): void {
   }
 }
 
-normalizeMigrationTimestamps();
-repairUnreachableMigrations();
-try {
-  migrate(db, { migrationsFolder });
-} catch (e) {
-  logMigrateFailure(e);
-  throw new Error(
-    `数据库迁移失败：${e instanceof Error ? e.message : String(e)}\n` +
-      `数据库：${dbPath}\n` +
-      `迁移前备份位于同目录的 db-backups/（可复制回 ${join(dbPath)} 后重试），` +
-      `详细日志见数据目录 logs/db-migrate-error.log。`,
-    { cause: e },
-  );
+/**
+ * 只读进程（`omi` 的本地兜底）**不得迁移别人的库**。
+ *
+ * 为什么：迁移的判定标准是 `__drizzle_migrations` 里应用过的 `when` 与**当前构建**的
+ * journal 逐一比对。同一个库会被两份不同的构建打开 —— 安装版（stable 渠道）和你在仓库里
+ * 跑的那份源码 —— 而两份构建的 journal 时间戳并不一致（历史上有一批迁移被写成伪造的
+ * 递增戳）。于是**任一方跑一次迁移，另一方下次启动就会认为"这些迁移还没跑过"**，
+ * 重跑建表直接撞 `table already exists`，表现就是"更新完/跑过 omi 之后再也打不开"。
+ *
+ * 迁移与自愈（normalize/repair）都是**应用**的职责：它知道自己是哪一版、也应该在
+ * 起不来时给出提示。CLI 只是读设置 / 模型，读不到就让调用方报清楚，不该顺手改写
+ * 另一个构建的迁移状态。
+ */
+const skipMigrations = process.env.OMNI_SKIP_MIGRATIONS === "1";
+
+if (skipMigrations) {
+  logEvent({
+    level: "info",
+    source: "app",
+    event: "db.migrate.skipped",
+    message: `只读进程跳过迁移（OMNI_SKIP_MIGRATIONS=1）：${dbPath}`,
+  });
+} else {
+  normalizeMigrationTimestamps();
+  repairUnreachableMigrations();
+  try {
+    migrate(db, { migrationsFolder });
+  } catch (e) {
+    logMigrateFailure(e);
+    throw new Error(
+      `数据库迁移失败：${e instanceof Error ? e.message : String(e)}\n` +
+        `数据库：${dbPath}\n` +
+        `迁移前备份位于同目录的 db-backups/（可复制回 ${join(dbPath)} 后重试），` +
+        `详细日志见数据目录 logs/db-migrate-error.log。`,
+      { cause: e },
+    );
+  }
 }

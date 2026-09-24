@@ -1,0 +1,80 @@
+Warning: No project session found with id 'omni-agent-09a'; creating a new session with that id.
+Done. Final report:
+
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/mainview/src/mainview/app/agent/composer.tsx`**（2 行替换，共 4 行改动）—— `canSend` 定义（原第 323-324 行）：
+- 原来：`const canSend = (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) && !busy;`
+- 现在：`const canSend = input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0;`（外加一行注释说明运行中点它是排队）
+
+**`apps/studio/src/mainview/app/agent/composer-queue.test.tsx`**（新建）—— 4 个用例，脚手架照抄 `composer-slash.test.tsx` 第 1-101 行（happy-dom 注入、记 `calls` 的 `@lib/rpc` Proxy、清理钩子、`type`/`clickSend`/`mount`），mock 补了 `followUpAgentMessage → { ok: true, queued: true }`，运行态用 `act` 包裹的 `setRunning(true)`。
+
+### 2 先红后绿的证据
+
+红（改源码前，首次跑出的是 3 红 1 绿；修好我自己测试里两处脚手架问题后，还原源码得到的干净红）：
+```
+(fail) 运行中输入文字后，发送按钮不是 disabled（本次修的缺陷） [36.75ms]
+(fail) 运行中点发送按钮：发出排队请求（followUpAgentMessage, mode=queue） [13.06ms]
+ 2 pass
+ 2 fail
+```
+首次运行的原始失败断言输出：
+```
+164 |   expect(sendBtn).not.toBeNull();
+165 |   expect(sendBtn!.disabled).toBe(false);
+error: expect(received).toBe(expected)
+...
+- [
+-   {
+-     "content": "帮我看看这个报错",
+-     "mode": "queue",
+-   },
+- ]
++ []
+```
+
+绿（源码改完后）：
+```
+4 pass
+ 0 fail
+Ran 4 tests across 1 file.
+```
+
+### 3 用例数量
+
+- `composer-queue.test.tsx`：新建，编辑前 0 个 → 编辑后 4 个（期间只修过我自己新写的文件的脚手架，未动任何他人用例）
+- `composer-slash.test.tsx`：未编辑，8 个 → 8 个（复跑全绿）
+
+### 4 验收门输出
+
+```
+GATE: id=09a-queue-button mode=self head=9b88c19
+GATE: out-of-bounds none
+GATE: size source-lines=4 limit=8
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=16 now=20)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (20 pass, 1s)
+GATE: RESULT PASS id=09a-queue-button
+```
+
+### 5 逐项自检
+
+- [x] `canSend` 不再要求 `!busy` —— **完成**
+- [x] `canSend` 确认只有一处使用 —— **完成**。grep 结果（改动前）：`composer.tsx:323:  const canSend =`（定义）、`composer.tsx:767:   disabled={!canSend || sendMutation.isPending || queueMutation.isPending}`（唯一使用处）
+- [x] 运行中有内容 → 按钮可点，点击发出 `mode: "queue"` 的请求 —— **完成**（用例 1、2）
+- [x] 运行中无内容 → 仍是停止按钮 —— **完成**（用例 3：`stop-btn` 存在、`send-btn` 不存在）
+- [x] 空输入 → 仍然禁用 —— **完成**（用例 4）
+- [x] `busy` 的定义、回车路径、`handleSend`、`queueMutation` 都没动 —— **完成**（diff 仅 composer.tsx 的 canSend 两行）
+- [x] 把 composer.tsx 改动还原后，第 1 条用例变红 —— **完成**（实测还原后 `(fail) 运行中输入文字后，发送按钮不是 disabled（本次修的缺陷）`，改回后 4 pass）
+- [x] 源码改动不超过 8 门 —— **完成**（gate 报 `source-lines=4 limit=8`）
+
+### 6 我拿不准的地方
+
+- 过程中第一次跑门时 typecheck 报过我测试文件里一个 TS2769（`conversationId` 不在断言对象类型里），是我自己新文件的类型标注问题，改了一行 `as` 标注后过了；不属于源码改动。
+- `docs/agent-optimization/logs/09a.log` 是 gate.sh 自己生成的日志文件，不是我创建的。
+
+无。

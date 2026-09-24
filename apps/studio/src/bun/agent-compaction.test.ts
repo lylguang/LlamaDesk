@@ -130,6 +130,74 @@ describe("compactMessages", () => {
     expect(tight.messages.length).toBe(6); // 任务 + 占位 + 最近 4 条
     expect(tight.tokensAfter).toBeLessThan(tight.tokensBefore);
   });
+
+  test("多轮会话长回合时，当前这轮的任务陈述不会被裁掉", () => {
+    const currentTask = message("user", "这一轮：把导出做完");
+    const messages = [message("user", "第一轮的老问题")];
+    // 中间塞十几条，但都不许用 user 角色，否则「最后一条 user」就变了
+    for (let i = 0; i < 12; i += 1) {
+      messages.push(message("assistant", `第 ${i} 步的思考与输出，比较长一些`));
+      messages.push(message("tool", `工具返回的一大段输出 ${i}`));
+    }
+    messages.push(currentTask);
+    // 任务陈述之后再塞 30 条长消息把预算撑爆
+    for (let i = 0; i < 30; i += 1) {
+      messages.push(
+        i % 2 === 0
+          ? message("assistant", `回合内容 ${i}：这是一段相当长的中文内容用来把预算彻底撑爆`)
+          : message("tool", `又一段工具结果 ${i}，同样很长用来撑预算`),
+      );
+    }
+    const result = compactMessages(messages, 200, placeholder);
+    expect(result.dropped).toBeGreaterThan(0);
+    expect(result.messages.some((m) => m === currentTask)).toBe(true);
+  });
+
+  test("裁剪时 messages[0] 仍保留、占位消息仍在第 2 位", () => {
+    const head = message("user", "把项目跑起来");
+    const messages = [head];
+    for (let i = 0; i < 40; i += 1) {
+      messages.push(message(i % 2 === 0 ? "assistant" : "user", `第 ${i} 步：这是一段比较长的中文内容用来撑爆预算`));
+    }
+    const result = compactMessages(messages, 200, placeholder);
+    expect(result.messages[0]).toBe(head);
+    expect(result.messages[1]).toEqual(placeholder(result.dropped));
+  });
+
+  test("任务陈述后面不会跟着被裁断的工具结果（先剥尾部再插任务陈述）", () => {
+    const currentTask = message("user", "这一轮：把导出做完");
+    const messages = [message("user", "第一轮的老问题")];
+    for (let i = 0; i < 10; i += 1) {
+      messages.push(message("assistant", `第 ${i} 步的思考`));
+      messages.push(message("tool", `中间的工具输出 ${i}`));
+    }
+    messages.push(currentTask);
+    // 任务陈述之后紧跟一串工具结果
+    for (let i = 0; i < 10; i += 1) {
+      messages.push(message("tool", `导出过程中的一段工具结果 ${i}`));
+      messages.push(message("assistant", `继续推进 ${i}`));
+    }
+    const result = compactMessages(messages, 150, placeholder);
+    const index = result.messages.findIndex((m) => m === currentTask);
+    expect(index).toBeGreaterThan(0);
+    expect(result.messages[index + 1]?.role).not.toBe("tool");
+    expect(result.messages[index + 1]?.role).not.toBe("toolResult");
+  });
+
+  test("预算卡在任务陈述刚好放下时，任务陈述只出现一次（而不是补插两遍）", () => {
+    const currentTask = message("user", "这一轮：把导出做完");
+    const big = (n: number) => `大段填充 ${n}：`.repeat(20);
+    const messages = [message("user", "第一轮的老问题")];
+    for (let i = 0; i < 12; i += 1) messages.push(message("assistant", big(i)));
+    messages.push(currentTask);
+    for (let i = 0; i < 4; i += 1) messages.push(message("assistant", `短输出 ${i}`));
+    const result = compactMessages(messages, 100, placeholder);
+    expect(result.dropped).toBeGreaterThan(0);
+    // 结果里任务陈述必须恰好一次（head 是第一轮的老问题，不会重复）
+    expect(result.messages.filter((m) => m === currentTask).length).toBe(1);
+    // 占位那条不算在原始消息里，dropped 的账要平
+    expect(result.dropped).toBe(messages.length - result.messages.length + 1);
+  });
 });
 
 describe("pruneSupersededReads", () => {

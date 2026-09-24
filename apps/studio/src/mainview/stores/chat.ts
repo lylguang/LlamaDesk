@@ -126,18 +126,20 @@ export const useChatStore = create<ChatState>((set, get) => ({
   setConversations: (conversations) => set({ conversations }),
   setActiveConversation: (id) => set({ activeConversationId: id }),
   setActiveMessages: (messages) =>
-    set((state) => ({
-      activeMessages: messages,
+    set((state) => {
       // 只保留仍被当前消息引用的统计，切换会话后自动清理陈旧 id。
-      messageStats: Object.fromEntries(
-        Object.entries(state.messageStats).filter(
-          ([id]) => id !== "prototype" && messages.some((m) => String(m.id) === id),
-        ),
-      ),
-      liveStats: Object.fromEntries(
-        Object.entries(state.liveStats).filter(([id]) => messages.some((m) => String(m.id) === id)),
-      ),
-    })),
+      // 一个键都没被过滤掉时复用原对象：无谓地换引用会让订阅它的组件（输入区
+      // 子树里的 ContextInspector 就订了整份 messageStats）在每个流式增量上白白重渲染。
+      const k1 = Object.entries(state.messageStats).filter((id) =>
+        id[0] !== "prototype" && messages.some((m) => String(m.id) === id[0]));
+      const k2 = Object.entries(state.liveStats).filter((id) =>
+        messages.some((m) => String(m.id) === id[0]));
+      return {
+        activeMessages: messages,
+        messageStats: k1.length === Object.keys(state.messageStats).length ? state.messageStats : Object.fromEntries(k1),
+        liveStats: k2.length === Object.keys(state.liveStats).length ? state.liveStats : Object.fromEntries(k2),
+      };
+    }),
   setStreaming: (streaming) =>
     set({
       streaming,

@@ -81,17 +81,23 @@ describe("一级菜单布局", () => {
     const ids = (entries: { id: string }[]) => entries.map((entry) => entry.id);
     const base = defaultRailLayout();
 
-    // 往后移：chat 拖到第 3 位
-    expect(ids(moveRailEntry(base, 0, 3)).slice(0, 4)).toEqual(["agent", "voicecall", "voice", "chat"]);
+    // 往后移：chat 拖到第 3 位。期望值从 APP_RAIL_IDS 推出来，而不是写死邻居名 ——
+    // 否则每次新增一个一级菜单，这里都会因为"下标 3 换人了"而假失败。
+    expect(ids(moveRailEntry(base, 0, 3)).slice(0, 4)).toEqual([
+      APP_RAIL_IDS[1],
+      APP_RAIL_IDS[2],
+      APP_RAIL_IDS[3],
+      "chat",
+    ]);
     // 往前移：benchmark 拖到第 1 位
     const back = moveRailEntry(base, APP_RAIL_IDS.indexOf("benchmark"), 1);
-    expect(ids(back).slice(0, 3)).toEqual(["chat", "benchmark", "agent"]);
+    expect(ids(back).slice(0, 3)).toEqual(["chat", "benchmark", APP_RAIL_IDS[1]]);
     expect(back).toHaveLength(APP_RAIL_IDS.length);
     // 原地不动：返回原数组（引用不变，省一次无意义的重渲染 / 写库）
     expect(moveRailEntry(base, 2, 2)).toBe(base);
     // 越界夹紧：拖到列表外就是首 / 末位
-    expect(ids(moveRailEntry(base, 3, 999))[APP_RAIL_IDS.length - 1]).toBe("voice");
-    expect(ids(moveRailEntry(base, 3, -5))[0]).toBe("voice");
+    expect(ids(moveRailEntry(base, 3, 999))[APP_RAIL_IDS.length - 1]).toBe(APP_RAIL_IDS[3]);
+    expect(ids(moveRailEntry(base, 3, -5))[0]).toBe(APP_RAIL_IDS[3]);
     // 非法起点不动
     expect(moveRailEntry(base, -1, 2)).toBe(base);
     expect(moveRailEntry(base, 99, 2)).toBe(base);

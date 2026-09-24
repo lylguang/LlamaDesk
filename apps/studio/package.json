@@ -22,7 +22,7 @@
     "miniapps:preview": "bun scripts/miniapp-preview.ts",
     "miniapps:center": "bun scripts/miniapp-center-preview.tsx",
     "chat:preview": "bun scripts/chat-preview.tsx",
-    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/music-gen-smoke.ts && bun scripts/bg-remove-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/proxy-smoke.ts && bun scripts/agent-capabilities-smoke.ts && bun scripts/agent-live-check.ts && bun scripts/agent-resilience-smoke.ts && bun scripts/omi-docs-smoke.ts && bun scripts/builtin-skills-smoke.ts",
+    "test:smoke": "bun scripts/migrations-smoke.ts && bun scripts/memory-smoke.ts && bun scripts/kb-smoke.ts && bun scripts/kb-chat-smoke.ts && bun scripts/kb-rerank-smoke.ts && bun scripts/kb-access-smoke.ts && bun scripts/kb-governance-smoke.ts && bun scripts/video-gen-smoke.ts && bun scripts/music-gen-smoke.ts && bun scripts/bg-remove-smoke.ts && bun scripts/backup-smoke.ts && bun scripts/proxy-smoke.ts && bun scripts/systemone-smoke.ts && bun scripts/agent-capabilities-smoke.ts && bun scripts/agent-live-check.ts && bun scripts/agent-resilience-smoke.ts && bun scripts/omi-docs-smoke.ts && bun scripts/builtin-skills-smoke.ts",
     "build:dev": "vite build && electrobun build",
     "build:canary": "vite build && electrobun build --env=canary",
     "build:stable": "vite build && electrobun build --env=stable"
@@ -86,6 +86,7 @@
     "@napi-rs/canvas-win32-x64-msvc": "^0.1.97"
   },
   "devDependencies": {
+    "@typesafe-ai/sdk": "^0.6.0",
     "@types/bun": "catalog:",
     "@types/react": "catalog:",
     "@types/react-dom": "catalog:",

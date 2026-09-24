@@ -1,0 +1,28 @@
+{
+  "id": "17-instructions-budget",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-instructions.ts",
+    "apps/studio/src/bun/agent-instructions.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-instructions.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-instructions.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "分配顺序改回从泛到具体（最具体那层又会被饿死）",
+      "file": "apps/studio/src/bun/agent-instructions.ts",
+      "find": "for (let i = files.length - 1; i >= 0; i -= 1)",
+      "replace": "for (let i = 0; i < files.length; i += 1)"
+    }
+  ]
+}

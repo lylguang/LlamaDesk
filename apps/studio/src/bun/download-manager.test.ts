@@ -1,9 +1,11 @@
-import { afterAll, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { afterAll, beforeAll, expect, test } from "bun:test";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "fs";
+import { clearAppLog as clearLogs, readAppLogs as readLogs } from "./app-log";
 import { tmpdir } from "os";
 import { join } from "path";
 
 import { mockModulePartial } from "./test-mocks";
+import { writeDownloadManifest } from "./download-manifest";
 
 /**
  * 下载队列的排序行为：小文件先下、显式点击插队、失败自动重试后才判死、
@@ -34,7 +36,10 @@ await mockModulePartial<typeof import("./model-store")>("./model-store", {
  * 这个文件的「磁盘」：一个真临时目录，`reset()` 会把 `seedFiles` 落成真文件
  * （下载管理器只看「存在且 size > 0」与同目录的 `.part*`）。
  */
-const modelsRoot = mkdtempSync(join(tmpdir(), "omni-download-manager-test-"));
+// `reset()` 会整体重建这个目录（模拟一次全新的磁盘），所以 helper 统一通过这个
+// getter 取路径，不能引用模块加载时的常量值（reset 之后那已经不存在了）。
+let modelsRoot = mkdtempSync(join(tmpdir(), "omni-download-manager-test-"));
+const modelsRootOf = () => modelsRoot;
 
 /** 前 N 次下载调用抛错（模拟 ModelScope 偶发 500）。 */
 let failFirst = 0;
@@ -43,7 +48,10 @@ const started: string[] = [];
 let gates: Array<() => void> = [];
 
 await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
-  modelDestPath: (repo, fileName) => join(modelsRoot, repo.replace("/", "__"), fileName),
+  modelDestPath: (repo, fileName) => join(modelsRootOf(), repo.replace("/", "__"), fileName),
+  // 与下载落盘共用同一个模型根（真实 getModelsBaseDir 读 OMNI_DATA_DIR，与
+  // test-preload 的临时数据目录一致）—— verify 时扫的就是这里。
+  getModelsBaseDir: () => modelsRootOf(),
   removePartialFiles: () => {},
   downloadFile: async (_repo: string, fileName: string) => {
     if (failFirst > 0) {
@@ -65,14 +73,21 @@ await mockModulePartial<typeof import("./modelscope")>("./modelscope", {
 
 const { DownloadManager } = await import("./download-manager");
 
+beforeAll(() => {
+  // 清掉本进程内存里的旧日志（同进程内其它测试文件可能写过），只留本文件的断言对象。
+  clearLogs();
+});
+
 afterAll(() => {
   for (const release of gates) release();
+  clearLogs();
   rmSync(modelsRoot, { recursive: true, force: true });
 });
 
 /** 换一批「磁盘上已有数据」的文件：`seedFiles` 落成真文件，其余清空。 */
 function reset(seedFiles: string[] = [], failures = 0) {
   rmSync(modelsRoot, { recursive: true, force: true });
+  modelsRoot = mkdtempSync(join(tmpdir(), "omni-download-manager-test-"));
   const repoDir = join(modelsRoot, "some__repo");
   mkdirSync(repoDir, { recursive: true });
   for (const name of seedFiles) writeFileSync(join(repoDir, name), Buffer.alloc(1024));
@@ -93,6 +108,17 @@ async function waitFor(
     last = dm.list().find((t) => t.id === id);
     if (last && predicate(last)) return { ...last };
     await Bun.sleep(10);
+  }
+  return last;
+}
+
+/** 轮询一个布尔条件直到为真（或超时，返回最后的值）。 */
+async function waitForBool(fn: () => boolean, timeoutMs = 2_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs;
+  let last = fn();
+  while (!last && Date.now() < deadline) {
+    await Bun.sleep(10);
+    last = fn();
   }
   return last;
 }
@@ -252,3 +278,160 @@ test("重试用尽后标记失败，错误信息保留最终原因", async () =>
   expect(done?.error).toContain("500");
   await releaseAll();
 }, 15_000);
+
+// ---------------------------------------------------------------------------
+// manifest 接入（B2b）：下载开始前写清单、完成时比对磁盘、取消时打标记。
+// manifest 与取消标记都在 OMNI_DATA_DIR（test-preload.ts 的临时目录）的
+// downloads/ 下，直接读文件断言；日志断言用 app-log 的内存缓冲。
+// ---------------------------------------------------------------------------
+
+type MarketFile = { name: string; path: string; size: number };
+
+/** 把「市场清单」写进真实模型目录（<数据目录>/models/<safeRepo>/）。 */
+function seedRepoFiles(repo: string, files: MarketFile[]) {
+  const repoDir = join(modelsRootOf(), repo.replace("/", "__"));
+  for (const f of files) {
+    const full = join(repoDir, f.path);
+    mkdirSync(join(full, ".."), { recursive: true });
+    writeFileSync(full, Buffer.alloc(f.size));
+  }
+}
+
+const dataDownloads = () => join(process.env.OMNI_DATA_DIR!, "downloads");
+let dataDownloadsOverride: string | null = null;
+
+// manifest/取消标记的文件名规则与 download-manifest.ts 一致：
+// `<safeRepoId(repo)>__<safeRepoId(variant) 或 _>.json`，variant 为空用 `_` 占位。
+function recordName(repo: string, variant = ""): string {
+  const safe = (s: string) => s.replace(/[/\\:\s]+/g, "__");
+  return `${safe(repo)}__${variant === "" ? "_" : safe(variant)}.json`;
+}
+function downloadsRoot(): string {
+  return dataDownloadsOverride ?? dataDownloads();
+}
+function manifestExists(repo: string): boolean {
+  return existsSync(join(downloadsRoot(), "manifests", recordName(repo)));
+}
+function cancelledExists(repo: string): boolean {
+  return existsSync(join(downloadsRoot(), "cancelled", recordName(repo)));
+}
+function manifestPathFor(repo: string): string {
+  return join(downloadsRoot(), "manifests", recordName(repo));
+}
+
+test("正常下载跑完：开始前 manifest 被写过，完成时比对通过，清单不留残", async () => {
+  const repo = "manifest/ok";
+  const files: MarketFile[] = [
+    { name: "config.json", path: "config.json", size: 100 },
+    { name: "w.bin", path: "w.bin", size: 512 },
+  ];
+  reset();
+  seedRepoFiles(repo, files);
+  clearLogs();
+  const dm = new DownloadManager();
+  // 整仓库下载：市场清单随任务带进来（这里就是「下载整个模型」的路径）。
+  const t1 = dm.start(repo, "config.json", "chat", "modelscope", {
+    size: 100,
+    manifestFiles: files,
+  });
+  dm.start(repo, "w.bin", "chat", "modelscope", { size: 512, manifestFiles: files });
+  // 开始取文件前 manifest 就已落盘（两个任务写同一份）。
+  const written = await waitForBool(() => manifestExists(repo), 2_000);
+  expect(written).toBe(true);
+  await releaseAll();
+  await releaseAll();
+  const done = await waitFor(dm, t1.id, (t) => t.status === "completed", 2_000);
+  expect(done?.status).toBe("completed");
+  // 完成时比对了 manifest（文件都在、大小一致 → verified）。
+  const logs = readLogs({ event: "download.manifest.verified" });
+  expect(logs.some((e) => (e.detail as { repo?: string } | undefined)?.repo === repo)).toBe(true);
+  // 比对通过后 manifest 完成使命被删，不留陈旧清单。
+  expect(manifestExists(repo)).toBe(false);
+  expect(cancelledExists(repo)).toBe(false);
+});
+
+test("磁盘上少一个文件：记 download.manifest.incomplete，但任务仍是 completed，manifest 保留", async () => {
+  const repo = "manifest/short";
+  // 清单里有 3 个文件，但磁盘只下了前 2 个（第三个「下完」的文件根本没落盘，
+  // 比如下载过程中被外部删掉 / 写入失败）。
+  const files: MarketFile[] = [
+    { name: "config.json", path: "config.json", size: 100 },
+    { name: "a.bin", path: "a.bin", size: 200 },
+    { name: "b.bin", path: "b.bin", size: 300 },
+  ];
+  reset();
+  seedRepoFiles(repo, files.slice(0, 2));
+  const dm = new DownloadManager();
+  const t1 = dm.start(repo, "config.json", "chat", "modelscope", {
+    size: 100,
+    manifestFiles: files,
+  });
+  const t2 = dm.start(repo, "a.bin", "chat", "modelscope", { size: 200, manifestFiles: files });
+  const t3 = dm.start(repo, "b.bin", "chat", "modelscope", { size: 300, manifestFiles: files });
+  clearLogs(); // 开跑前的 manifest 写入警告等噪音不进去断言窗口
+  await releaseAll();
+  await releaseAll();
+  await releaseAll();
+  for (const id of [t1.id, t2.id, t3.id]) {
+    const done = await waitFor(dm, id, (t) => t.status === "completed", 2_000);
+    // incomplete 只记日志、不判失败（这一版先让数据跑起来，见 verifyManifest 注释）。
+    expect(done?.status).toBe("completed");
+  }
+  const logs = readLogs({ event: "download.manifest.incomplete" });
+  const hit = logs.find((e) => (e.detail as { repo?: string } | undefined)?.repo === repo);
+  expect(hit).toBeDefined();
+  expect(hit!.level).toBe("warn");
+  const detail = hit!.detail as { missing?: string[] };
+  expect(detail.missing).toEqual(["b.bin"]);
+  // 保留 manifest：下次续传 / 扫描还要用它。
+  expect(manifestExists(repo)).toBe(true);
+});
+
+test("取消 → 取消标记落盘；重新开始同一下载 → 标记被清掉", async () => {
+  const repo = "manifest/cancel";
+  reset();
+  const dm = new DownloadManager();
+  const task = dm.start(repo, "c.bin", "chat", "modelscope", { size: 40 });
+  // 闸住不跑，直接取消。
+  expect(dm.cancel(task.id)).toBe(true);
+  expect(cancelledExists(repo)).toBe(true);
+
+  // 重新下载同一仓库 → 开跑前取消标记被清掉。
+  const t2 = dm.start(repo, "c.bin", "chat", "modelscope", { size: 40 });
+  const cleared = await waitForBool(() => !cancelledExists(repo), 2_000);
+  expect(cleared).toBe(true);
+  await releaseAll();
+  const done = await waitFor(dm, t2.id, (t) => t.status === "completed", 2_000);
+  expect(done?.status).toBe("completed");
+  expect(cancelledExists(repo)).toBe(false);
+});
+
+test("writeDownloadManifest 返回 false（写失败）→ 下载照常进行、照常成功", async () => {
+  // 让 manifest 写入必然失败：把数据目录指到一个「downloads 本身是个文件」的
+  // 位置（atomicWriteJson 建 manifests 子目录会抛 EEXIST → writeDownloadManifest
+  // 返回 false 并自己记一条 warn）。不能用 mock.module 覆盖：bun 的 mock 是进程
+  // 级、撤不掉，会弄脏同批次其它文件。env 在测试结束时恢复。
+  const repo = "manifest/nowrite";
+  reset();
+  const realDataDir = process.env.OMNI_DATA_DIR!;
+  const badData = join(modelsRootOf(), "no-write");
+  mkdirSync(badData, { recursive: true });
+  writeFileSync(join(badData, "downloads"), "");
+  dataDownloadsOverride = join(badData, "downloads");
+  process.env.OMNI_DATA_DIR = badData;
+  // 前提确认：这个位置上的写入确实失败。
+  expect(
+    writeDownloadManifest({ repoId: repo, variant: "", files: [{ path: "n.bin", size: 32 }] }),
+  ).toBe(false);
+  const dm = new DownloadManager();
+  const task = dm.start(repo, "n.bin", "chat", "modelscope", { size: 32 });
+  // 下载被闸住直到放行；放行前先等它真的进闸。
+  await waitForCount(started, 1, 2_000);
+  await releaseAll();
+  const done = await waitFor(dm, task.id, (t) => t.status === "completed", 2_000);
+  expect(done?.status).toBe("completed");
+  expect(done?.error).toBeUndefined();
+  process.env.OMNI_DATA_DIR = realDataDir;
+  dataDownloadsOverride = null;
+  rmSync(badData, { recursive: true, force: true });
+});

@@ -1,0 +1,75 @@
+Warning: No project session found with id 'omni-agent-18b'; creating a new session with that id.
+All done. Here's the delivery report:
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent-spill.ts`**：在 `MAX_TOOL_OUTPUT_CHARS` 声明之后新增三个具名常量（`TOOL_OUTPUT_WINDOW_SHARE = 0.25`、`TOKEN_TO_CHAR_RATIO = 3`、`MIN_TOOL_OUTPUT_CHARS = 2_000`，注释照抄任务说明）和一个纯函数 `toolOutputCharLimit(windowTokens)`：非法值（非有限 / ≤ 0）直接退回 `MAX_TOOL_OUTPUT_CHARS`；否则 `floor(windowTokens × 0.25 × 3)`，再夹到 `[2000, 24000]`。没动任何现有函数或常量值。
+- **`apps/studio/src/bun/agent.ts`**：只改 `makeToolOutputHook` + 两行 import（`contextWindowTokens` 进 `./agent-context` 块，`toolOutputCharLimit` 进 `./agent-spill` 块）。hook 里在 `resultText` 之后新增 `const limit = toolOutputCharLimit(contextWindowTokens());`，第 648 行的判断改用 `limit`，`truncateForModel` 加上 `maxChars: limit` —— 判断与截断用的是同一个 `limit`。日志行未动。
+
+### 2 先红后绿的证据
+
+红（先加用例，此时 `toolOutputCharLimit` 还不存在）：
+
+```
+bun test v1.4.2 (744846f84)
+
+apps/studio/src/bun/agent-spill.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'toolOutputCharLimit' not found in module '/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-spill.ts'.
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [5.00ms]
+```
+
+绿（源码改完后）：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 25 pass
+ 0 fail
+ 82 expect() calls
+Ran 25 tests across 1 file. [102.00ms]
+```
+
+### 3 用例数量
+
+`apps/studio/src/bun/agent-spill.test.ts`：编辑前 25 → 编辑后 30（+1 个 `describe`、+4 个 `test`）。现有用例一条未删未改。
+
+### 4 验收门输出
+
+```
+GATE: id=18b-window-scaled-limit mode=self head=a279e8b
+GATE: out-of-bounds none
+GATE: size source-lines=25 limit=35
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=25 now=30)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (25 pass, 0s)
+GATE: RESULT PASS id=18b-window-scaled-limit
+```
+
+### 5 逐项自检
+
+- 新增的是纯函数，不读设置、不碰文件系统 —— 完成（只取参运算，窗口值由调用方传）
+- 比例、折算、夹取三步都对，上表五行都能对上 —— 完成（8192→6144、131072→24000、1024→2000 有测试钉死；4096→3072、32768→24000 按同一公式手算核对过）
+- 非法值退回 `MAX_TOOL_OUTPUT_CHARS` —— 完成（0 / 负数 / NaN / Infinity 四个都测，均得 24000）
+- `agent.ts` 第 648 行判断和第 658 行截断用同一个 limit —— 完成（同一个 `const limit`）
+- 没改 `truncateForModel`、`capToolResultText`、转存逻辑、`MAX_TOOL_OUTPUT_CHARS` 数值 —— 完成
+- `agent.ts` 除 `makeToolOutputHook` 和两行 import 别处一字未动 —— 完成（git diff 确认 agent.ts 仅 +5/-2，全部在这三处）
+- 现有用例一条没删没改，全绿 —— 完成（gate 的 cases-missing none：baseline 25 全在，now 30）
+- 源码改动两个文件合计不超过 35 行 —— 完成（agent-spill.ts +18、agent.ts +5/-2，numstat 合计 25）
+
+### 6 我拿不准的地方
+
+- 任务说明称「现有 24 条用例」，但基线文件（`baselines/18b-window-scaled-limit.cases`）记录的是 **25** 条（含 4 个 `describe` 标题在内）；实际 `test` 语句是 21 个，加 4 个 describe 共 25。我按基线文件为准，未删未改任何现有条目，gate 也确认无丢失。
+- `toolOutputCharLimit` 在窗口极大（如 131072 → 98304）时撞上 `MAX_TOOL_OUTPUT_CHARS` 上限，此时行为与今天完全一致，符合任务要求「窗口再大也不放宽」。

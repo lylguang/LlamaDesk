@@ -250,6 +250,7 @@ export function GatewayScreen() {
   const endpoints: { labelKey: string; path: string }[] = [
     { labelKey: "settings.gateway.endpoints.docs", path: "/docs" },
     { labelKey: "settings.gateway.endpoints.models", path: "/v1/models" },
+    { labelKey: "settings.gateway.endpoints.systemone", path: "/v1/systemone" },
     { labelKey: "settings.gateway.endpoints.chat", path: "/v1/chat/completions" },
     { labelKey: "settings.gateway.endpoints.responses", path: "/v1/responses" },
     { labelKey: "settings.gateway.endpoints.messages", path: "/v1/messages" },
@@ -584,6 +585,9 @@ export function GatewayScreen() {
           </div>
 
           <p className="mt-2 text-[11px] text-muted-foreground/70">{t("settings.gateway.protocol.hint")}</p>
+          <p className="mt-1 text-[11px] text-muted-foreground/70">
+            {t("settings.gateway.systemone.hint")}
+          </p>
           <p className="mt-1 text-[11px] text-muted-foreground/70">{t("settings.gateway.endpoints.hint")}</p>
         </div>
 

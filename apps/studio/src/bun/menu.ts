@@ -1,7 +1,7 @@
 import Electrobun from "electrobun/bun";
-import { ApplicationMenu, Updater } from "electrobun/bun";
+import { ApplicationMenu } from "electrobun/bun";
 import { APP_NAME } from "./config";
-import { updateState, checkForUpdate } from "./updates";
+import { updateState, checkForUpdate, applyUpdateNow } from "./updates";
 
 function getUpdateMenuItem() {
   switch (updateState.status) {
@@ -63,7 +63,8 @@ export const createMenu = () => {
     if (e.data.action === "check-for-updates") {
       checkForUpdate();
     } else if (e.data.action === "apply-update") {
-      Updater.applyUpdate();
+      // 走 applyUpdateNow：先 await 停服再交给 Updater（见 updates.ts 的说明）。
+      void applyUpdateNow();
     }
   });
 };

@@ -66,15 +66,21 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   Full triage guide: `.agents/skills/omni-doctor/`; one-shot evidence dump:
   `bun run --cwd apps/studio scripts/omni-diag.ts`
 - **Every local runtime the app installs is one catalog, managed in one place**
-  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the ten engines —
+  (`shared/local-engines.ts` + `bun/engine-catalog.ts` → Settings → 引擎): the eleven engines —
   llama.cpp / vLLM / SGLang / MLX (text inference), whisper.cpp, audio.cpp, PaddleOCR,
-  Tesseract, mflux and cloudflared — each get one row with state, version, path, disk usage
+  Tesseract, mflux, laya-mlx (SystemOne typed judgments, its own `systemone` group — it is a
+  *judgment* model, not a chat model, so it does not belong under inference) and cloudflared —
+  each get one row with state, version, path, disk usage
   and 安装 / 升级 / 卸载. Adding an engine = one `LOCAL_ENGINE_SPECS` entry + one probe/install/
   uninstall adapter; the page, its groups and its buttons are derived from those two, and the
   id doubles as the setup-screen engine id (`EngineInstallEvent.engine` is a `LocalEngineId`).
   Three rules: **uninstall only ever removes the managed copy** under `<dataDir>/engines/<id>`
   (PATH / brew / conda installs are never touched, so those rows deliberately show no uninstall
-  button), **model weights are never deleted with an engine** (each spec points at the page that
+  button), and a row's 「管理模型」 button must **reset the route** before switching `activeApp`
+  (`useRouter.getState().setRoute({ path: "index" })`) — the content area dispatches on
+  `route.path`, so from settings only changing `activeApp` leaves the user staring at the settings
+  page, i.e. a button that visibly does nothing (this bit the voice / OCR / image / JEV rows),
+  and **model weights are never deleted with an engine** (each spec points at the page that
   owns them), and **install/uninstall stops whatever was using the engine first** (served models,
   whisper-server, OCR / MLX workers) — cloudflared refuses while its tunnel is up instead.
   Upgrading is the same path as installing with `upgrade: true` (pip `--upgrade`, or re-download
@@ -149,6 +155,57 @@ Views must be configured in `electrobun.config.ts` to be built and copied into t
   reserved slot already: settings (`MUSIC_LOCAL_*`), the record's `localBase`, and the UI toggle
   exist, and `localUnavailable()` states plainly that no engine is wired up rather than faking
   a result.
+- **A cloud model's context window is one number, resolved by `shared/model-context.ts`** (user
+  override on the model entry → size suffix in the id → catalog of known models → 256K default).
+  It is the single source for the Agent's compaction budget (`bun/chat-context.ts` →
+  `agent.ts` / `agent-context.ts`), for what the settings page shows, and for the `context_window`
+  `omi launch` writes into the Codex / ChatGPT catalogs — so none of them can disagree; the
+  override lives on `CloudModelEntry.contextLength` (looked up with
+  `cloud-providers.ts`'s `contextLengthForModel`) and is edited in the 上下文 column of
+  设置 → 云端模型. Cloud mode must never read `SERVER_CTX_SIZE` (that is the local
+  llama.cpp KV knob; reading it once pinned `max_tokens` to 1 and produced empty cloud turns),
+  and cloud output caps go through `CLOUD_MAX_OUTPUT_TOKENS`, never the window. Don't set 1M for
+  models that are really 128K (DeepSeek) — an over-declared window pushes the compaction line
+  past the vendor's real limit and turns into hard `context_length_exceeded` 400s.
+- **JEV / SystemOne is a second protocol on the gateway, not another chat model**
+  (`shared/systemone.ts` is the single source: types, validation, model catalog, error bodies,
+  request ids). It answers *typed* questions — `choice` / `score` / `noul` — and returns
+  probabilities instead of generated text, over TypeSafe's wire protocol, aligned field-by-field
+  with the official API (verified against the live service, not paraphrased from docs):
+  `POST /v1/systemone` with `{state, model, questions}`, `{model, answers, usage}` back,
+  **403 for a missing key vs 401 for an invalid one** (both `{"detail":{"error_type","message"}}`),
+  FastAPI-shaped 422, and `x-typesafe-request-id` on every response. That is what lets the
+  official SDKs (`typesafe-sdk` / `@typesafe-ai/sdk`) reach the gateway by changing only
+  `TYPESAFE_BASE_URL` and `TYPESAFE_API_KEY` — `gateway.systemone.test.ts` and
+  `scripts/systemone-smoke.ts` call the real `@typesafe-ai/sdk` to keep that true, including
+  its error classification. Three entries (the **JEV page** — its own rail entry between Agent
+  and Voice Call, `app/jev/` / the `jev_evaluate` agent tool / `POST /v1/systemone`) all go
+  through one `runSystemOne` (`bun/systemone.ts`), so the page and an external agent cannot
+  disagree. It is a rail app and *not* an Agent right-panel tab on purpose: the page needs full
+  width (editor + probability distributions), and two half-identical surfaces is the duplication
+  the menu rules warn about. Two rules: `/v1/models` deliberately returns a
+  **superset** (OpenAI's `data` *and* TypeSafe's `models` — each client reads only its own field,
+  and two endpoints would break "just change the base URL"), and backend resolution normalizes
+  the requested model name to what the chosen backend understands (a `laya-*` name on the cloud
+  backend becomes the cloud default, a cloud alias on the local backend becomes the local model)
+  because a drop-in client will not have edited its `model` string. The page is laid out like the TTS page (parameters
+  left, output right): its left column starts with a judgment-engine switch — **local** (install
+  the laya-mlx engine, download a checkpoint, start it) vs **cloud** (base URL + key), then the
+  state and the question list; the right column is the probability distributions; the app sidebar
+  holds the built-in examples (bilingual — Chinese examples under a Chinese UI, while identifiers
+  like `noul` / `jev-latest` / `/v1/systemone` stay English because they get copied verbatim).
+  Local deployment is the managed `laya-mlx` venv under `<dataDir>/engines/laya`
+  (`bun/systemone-laya.ts` + `systemone-laya-worker.py`, Apple Silicon only, declared in
+  electrobun's copy list; its protocol is `predict` / `models` / `download` / `load` / `unload` —
+  `models` probes the HF cache with `local_files_only`, `download` reports real on-disk bytes from
+  a polling main thread, `load` makes a checkpoint resident without running inference);
+  **uninstall deletes only the venv, never the weights** in the HF cache, and the runtime
+  timeout is separate (`SYSTEMONE_LOCAL_TIMEOUT_MS`, 600s) because the first call downloads
+  weights. Price is a constant 0 (`SYSTEMONE_PRICING`); the usage ledger records tokens and
+  count under channel `systemone`, never money. Both keys are in `ENCRYPTED_SETTINGS_KEYS`, and
+  `SYSTEMONE_CLOUD_API_KEY` matches `REMOTE_SECRET_KEY`, so they are ciphertext at rest and
+  blanked for web clients. Maintainer doc: docs/jev-systemone.md; bundled skill with examples:
+  `builtin-skills/jev-typed-decisions/`.
 - **Public exposure goes through `bun/tunnel.ts`, never through `GATEWAY_HOST=0.0.0.0`**:
   Settings → Services → Remote Access runs a supervised `cloudflared` child process
   (`bun/cloudflared.ts` downloads the official binary into `<dataDir>/engines/cloudflared/`;

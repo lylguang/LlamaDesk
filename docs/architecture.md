@@ -311,7 +311,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 
 文档管线是 `上传 → pdfjs/canvas 逐页渲染（或 sharp 归一化）→ 信号量并发（默认 3）→ VLM 识别 → HTML/Markdown 解析 → 按 bbox 裁图存 WebP`。裁剪出的图片文件名用**内容 md5**，保证同一张图跨页去重后名字一致。
 
-**语音**：ASR 三条路径（audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。通话有两种模式——本地半双工（增量转写 + 句切分 + 逐句合成，支持抢话打断）和云端全双工（Realtime WebSocket）。
+**语音**：ASR 三条路径（audio.cpp / whisper.cpp / 远端），TTS 三条（本地 audio.cpp GGUF / vLLM 兼容端点 / Edge TTS 兜底）。通话有三种模式（`VOICE_CALL_PROVIDER`）——**本地半双工**（增量转写 + 句切分 + 逐句合成，支持抢话打断）、**云端全双工**（Realtime WebSocket，服务端 VAD 与出声）、**omni**（前端能量 VAD 断句，整段音频作为 `input_audio` 直送多模态对话模型，流式收文字后仍走本地逐句 TTS）。omni 的取舍写在 `shared/voice-call-omni.ts`：省掉 ASR 这一段，代价是半双工，且这些模型只出文字。
+
+三种模式的**句子切分 / Markdown 剥离 / 逐句 TTS / 打断判定是同一份**（`voice-call.ts` 的 `runTurn`），只有"正文从哪来"不同。另一处容易漏的差别在收尾：local 由 `streamChatTurn` 负责助手消息的占位、落库与 `chatChunk`/`chatDone` 推送，omni 直接打 HTTP，那三件事得自己做 —— 漏掉的表现是"听得到回答、消息列表里却一直是空的"。omni 的音频与密钥都从选中的厂商行取（`bun/omni-call.ts`），它走的是 OpenAI 兼容的 `/chat/completions`，不是实时端点。
 
 云端语音的**厂商差异只写在两处**：TTS 走 OpenAI 兼容的 `/v1/audio/speech`（各家形状一致，差别只有音色名 —— `shared/tts-voices.ts` 收官方音色清单，以及"别家留下的占位音色换成这一家的默认值"这条规则）；ASR 与实时语音各有一层方言，由 `realtimeDialectFor`（地址为主、模型名为辅）判出：
 
@@ -320,7 +322,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 | 百炼（DashScope） | OpenAI 兼容 `/v1/audio/transcriptions`（multipart） | `wss://…/api-ws/v1/realtime`，格式 `pcm`、断句 `smart_turn` / `semantic_vad` | 16k |
 | 阶跃星辰（StepFun） | `/v1/audio/asr/sse`（base64 + SSE 增量文本：StepAudio 3 ASR 只在这个端点，带时间戳的文件接口要公网可下载的 URL） | `wss://api.stepfun.com/v1/realtime`，格式 `pcm16`、只认 `server_vad`、不能发手工 commit | 24k |
 
-`realtimeBaseUrlForProvider` 把厂商的 HTTP 地址推成实时端点，所以换厂商时地址、模型、音色会一起跟着换（手填的中转地址除外）。
+`realtimeBaseUrlForProvider` 把厂商的 HTTP 地址推成实时端点，所以换厂商时地址、模型、音色会一起跟着换（手填的中转地址除外）。它按主机形状判而不是逐个比常量：百炼有国内（`dashscope.aliyuncs.com`）与国际（`dashscope-intl.aliyuncs.com`，qwencloud.com）两套主机，路径相同但**密钥不通用** —— 主机原样带过去，否则国际站用户会被当成"自建中转"而永远要手填 wss 地址。
+
+另有一条易混的命名规则：实时模型靠 `isRealtimeModelId` 过滤，而**`omni` 不再单独放行**。实时 omni 的名字里都带 `realtime`（`qwen3.5-omni-flash-realtime`），所以收紧后一个都没漏；而 `qwen3.8-omni-flash` 这种非实时的 omni 是走 Chat Completions 的普通对话模型，按名字放行会让它同时出现在实时下拉里（选了连不上）和从对话模型清单里消失。
 
 **Bun ↔ Python worker 协议**是这层最值得记住的设计：**stdin/stdout 逐行 JSON（JSON-lines），stderr 留给 Python 侧的进度输出**（mflux 的 tqdm、paddle 的日志）。命令一般是 `load` / `generate|recognize` / `quit`，事件是 `phase` / `loaded` / `done` / `error`。常驻 worker 的价值是模型只加载一次、反复生成；MLX worker 空闲 10 分钟自动卸载，PP-OCR worker 加载有 5 分钟、识别有 3 分钟超时兜底（防"无限识别中"）。
 
@@ -344,6 +348,9 @@ CLAUDE.md / AGENTS.md 的托管区块（同样受预算约束，其余交给 `me
 - 嵌入：`POST /v1/embeddings`，代理运行中的嵌入实例（模型页以嵌入类别启动的模型）；无实例 503 并带启动引导
 - 语音：`/v1/audio/speech`、`/v1/audio/transcriptions`（各有四级/多级回退链）
 - 图像：`/v1/images/generations`
+- 类型化判定：`POST /v1/systemone`（JEV / SystemOne：`choice` / `score` / `noul` 三原语，
+  与 TypeSafe 官方协议逐字段对齐，本地 laya-mlx 或云端 TypeSafe 二选一；官方 SDK 换
+  Base URL + Key 即可直连，详见 [jev-systemone.md](./jev-systemone.md)）
 - 素材：`/v1/media`（只读检索本机素材库，与内置 Agent 的 `media_search` 同一份实现）
 - 记忆与知识库：`/v1/memories`、`POST /mcp`
 - 文档：`/health`、`/openapi.json`、`/docs`、`/redoc`
@@ -493,6 +500,14 @@ omi <cmd>
 
 迁移在 `src/bun/db/migrations/`（0000–0040）。**加了新迁移要留意 drizzle 的 `when` 排序** —— 曾出现过新迁移的 `when` 小于前一条，导致老库升级时被整条跳过。根因是迁移器**只读一次**库里的最大 `created_at`（`ORDER BY created_at DESC LIMIT 1`，循环里不再更新）：只要待应用迁移的 `when` 不大于那一刻的最大值，它在那个库上就永远够不着。因此 `db/index.ts` 在 `migrate()` 之前有两道自愈 —— `normalizeMigrationTimestamps()`（按 SQL hash 把已应用行的 `created_at` 对齐到 journal 的 `when`）与 `repairUnreachableMigrations()`（把「`when` 不高于库内最大值、却没有应用记录」的迁移就地补跑并记账）。合并分支重编号迁移时（main 保留编号、我方顺延到末位、`when` 取引入提交毫秒）正是这两道自愈起作用的场景，回归用例见 `db/db-migrate-timestamps.tests.ts`。
 
+**只读进程（`omi` 的本地兜底 / 任何 CLI）不得迁移这个库**：`src/cli/db.ts` 以 `OMNI_SKIP_MIGRATIONS=1` 打开（`db/index.ts` 里跳过两道自愈与 `migrate()`）。同一个库会被**两份不同的构建**打开 —— 安装版（stable 渠道）与仓库里的源码 —— 而两份构建的 journal `when` 并不一致，于是"谁跑一次迁移，另一方下次启动就重跑建表并崩在 `table already exists`"（用户看到的"跑过一次 `omi` / 更新完之后再也打不开"）。迁移与自愈是**应用**的职责：它知道自己是哪一版，起不来时也该由它把事情说清楚。回归用例见 `db/db-migrate-timestamps.tests.ts` 的「只读进程不迁移、不自愈」。
+
+**升级流程**（`updates.ts` / `shutdown.ts` / `startup-guard.ts`）三条纪律：
+
+- **升级前必须 `await teardownServices()` 再交给 `Updater`**：`Updater.applyUpdate()` 内部是 Electrobun 的 `quit()`，它只**发出** before-quit、不等我们的停服 Promise 就 `forceExit` —— 子进程是 detached 的，漏一个就活过升级、占着端口与显存，新版本一起来就抢不到资源。窗口 close / before-quit / SIGTERM 与升级路径共用 `bun/shutdown.ts` 这一份实现（幂等、逐项 `allSettled`）。
+- **启动期的致命错误要看得见**：`bun/startup-guard.ts` 是 `index.ts` 的第一行导入，在模块求值期就注册好 `uncaughtException` / `unhandledRejection`；`./db` 迁移失败这类错误此前会让 Worker 直接退出（没有窗口、没有提示），现在会落进 `logs/startup-error.log` + `app.log` 并尽力弹一条系统提示框（子进程实现，不依赖原生事件循环 —— 出问题的正是事件循环还没起来的那一段）。启动完成即 `markStartupReady()` 交班，运行期异常仍走原有处理器。
+- **启动不依赖工作目录**：`Updater.localInfo` 读的是相对 cwd 的 `../Resources/version.json`，换一种启动方式就可能落空且**同步抛错** —— `getMainViewUrl()` 恰好在建窗口之前 await 它。版本 / 渠道读取一律走 `localVersionSafe()`（不抛、失败按打包版处理），并在打 `app.start` 之前对齐版本（此前日志里永远是 `0.0.0`），版本变化时记一条 `update.applied from→to`。
+
 **数据目录布局**（`<userData>`，macOS 上是 `~/Library/Application Support/omni-studio.kunpengtalk.com/<channel>`）：
 
 ```
@@ -542,6 +557,7 @@ omni-control.sock       CLI 控制通道
 8. **出站 HTTP 走全局 `fetch`**（`bun/proxy.ts` 装的代理包装）**或显式 `proxy` 参数**；不要为远端主机另开 socket 或旁路 HTTP 客户端，否则那条请求会绕过用户的代理设置。本机 IPC（控制套接字的 `unix:` 请求）例外，包装层主动放行。
 9. **小应用只能调用宿主放行的动作**（`shared/miniapps.ts` 的 `MINIAPP_ACTIONS`），转发层（`lib/miniapp-bridge.ts`）不得出现"按方法名透传 RPC"的写法；小应用页面必须保持在 `sandbox`（无 `allow-same-origin`）的 iframe 里。
 10. **内置厂商目录只有一份**（`shared/cloud-providers.ts` 的 `CLOUD_PRESETS`）：安装即整份入驻 `cloud_providers` 表（`ensureBuiltinProviders`，幂等、已有行一律不动），界面上直接列出来、用户只填 Key。**地址由应用维护** —— 与预设一致的行由 `isBuiltinBaseUrl` 判定为"内置地址"：界面上只读、`updateCloudProvider` 拒改、`deleteCloudProvider` 拒删（删了下一次读取还会原样入驻）；地址被用户改过的旧行不在此列，保持可改。新增一家厂商 = 预设数组里加一条（含 `section` 分栏与 `apiKeyUrl`），不改界面、不改数据库。
+11. **只有应用进程迁移数据库**：CLI / 任何只读进程用 `OMNI_SKIP_MIGRATIONS=1` 打开，绝不对另一个构建的库跑 `migrate()` 或两道时间戳自愈（见 §8）。升级路径必须先 `await teardownServices()` 再 `Updater.applyUpdate()`；启动期的致命错误必须经过 `bun/startup-guard.ts` 变得可见（`logs/startup-error.log` + 系统提示框），不允许再出现"闪退且没有任何提示"。
 
 ## 11. 已知架构债
 

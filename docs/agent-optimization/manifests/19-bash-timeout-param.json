@@ -1,0 +1,31 @@
+{
+  "id": "19-bash-timeout-param",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent-tools.bash.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-tools.bash.test.ts",
+    "apps/studio/src/bun/agent-tools.edit.test.ts",
+    "apps/studio/src/bun/agent-tools.glob.test.ts",
+    "apps/studio/src/bun/agent-tools.patch.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "去掉上限夹取（模型可以把一个回合挂到天荒地老）",
+      "file": "apps/studio/src/bun/agent-tools.ts",
+      "find": "MAX_COMMAND_TIMEOUT_MS",
+      "replace": "Number.MAX_SAFE_INTEGER"
+    }
+  ]
+}

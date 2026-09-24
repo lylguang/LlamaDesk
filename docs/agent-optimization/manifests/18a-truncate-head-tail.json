@@ -1,0 +1,28 @@
+{
+  "id": "18a-truncate-head-tail",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-spill.ts",
+    "apps/studio/src/bun/agent-spill.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-spill.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-spill.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "头部比例改成 1（等于又变回只留头部）",
+      "file": "apps/studio/src/bun/agent-spill.ts",
+      "find": "const TRUNCATE_HEAD_RATIO = 0.7;",
+      "replace": "const TRUNCATE_HEAD_RATIO = 1;"
+    }
+  ]
+}

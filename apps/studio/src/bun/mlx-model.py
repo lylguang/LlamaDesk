@@ -55,6 +55,20 @@ def _weight_def(repo: str):
             ZImageWeightDefinition as D,
         )
         return D
+    if repo.startswith("Qwen/"):
+        # Qwen-Image-2.1 需要较新的 mflux（0.7.x+，CLI 入口 mflux-generate-qwen-2.1）。
+        # 老版本没有这类，导入失败时给出明确提示而不是裸 traceback ——
+        # 否则用户面对“不知道要升级 mflux”的报错无从下手。
+        try:
+            from mflux.models.qwen21.weights.qwen21_weight_definition import (
+                Qwen21WeightDefinition as D,
+            )
+            return D
+        except ImportError:
+            raise ValueError(
+                "Qwen-Image-2.1 需要新版 mflux（含 Qwen21WeightDefinition）。"
+                "请到「设置 → 模型引擎 → mflux」升级引擎后重试。"
+            )
     raise ValueError(f"不支持的模型仓库：{repo}")
 
 
@@ -205,6 +219,7 @@ _MODEL_ALIAS = {
     "flux-dev": "dev",
     "z-image-turbo": "z-image-turbo",
     "flux2-klein-9b": "flux2-klein-9b",
+    "qwen-image-2.1": "qwen-image-2.1",
 }
 
 

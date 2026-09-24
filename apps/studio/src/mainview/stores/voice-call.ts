@@ -27,13 +27,17 @@ export type AudioEntry = {
   format: "wav" | "pcm";
 };
 
-export type VoiceCallProvider = "local" | "cloud";
+/**
+ * 通话模式：local（本地 ASR + 模型 + TTS）、cloud（实时语音全双工）、
+ * omni（整段音频直送多模态模型）。后两者的取舍见 shared/voice-call-omni.ts。
+ */
+export type VoiceCallProvider = "local" | "cloud" | "omni";
 
 interface VoiceCallState {
   phase: CallPhase;
   /** 当前通话绑定的会话（即一条通话记录）。 */
   callConversationId: number | null;
-  /** 当前通话使用的模式（本地 / 云端）。 */
+  /** 当前通话使用的模式（本地 / 云端 / omni）。 */
   provider: VoiceCallProvider | null;
   /** 实时字幕：用户正在说的话（后端增量转写回推）。 */
   liveText: string;

@@ -2,6 +2,7 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, renameSync, rmSync } fro
 import path from "path";
 import { WHISPER_CPP_RELEASE_TAG, WHISPER_CPP_REPO } from "../shared/whispercpp";
 import { getDataDir } from "./paths";
+import { removeManifest, writeManifest } from "./install-manifest";
 import { fetchAssetFromSources, githubReleaseUrls, officialWithMirrors } from "./mirror-download";
 
 /**
@@ -249,6 +250,13 @@ async function downloadCondaEngine(): Promise<{ ok: boolean; error?: string; ver
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
   await finalize(engineRoot, version);
+  writeManifest(getEnginesDir(), {
+    engine: "whisper.cpp",
+    version,
+    platform: process.platform,
+    arch: process.arch,
+    steps: 2,
+  });
   return bundledBinary("whisper-cli")
     ? { ok: true, version }
     : { ok: false, error: "安装后未找到 whisper-cli" };
@@ -337,6 +345,11 @@ async function installGitHubRelease(tmp: string, version: string): Promise<{ ok:
 export async function downloadWhisperEngine(
   options: { upgrade?: boolean } = {},
 ): Promise<{ ok: boolean; error?: string; version?: string }> {
+  // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+  if (!removeManifest(getEnginesDir())) {
+    const error = `无法清除上次的安装记录，请检查 ${getEnginesDir()} 是否被占用或只读`;
+    return { ok: false, error };
+  }
   if (!options.upgrade) {
     const installed = await resolveWhisperBinary("whisper-cli");
     if (installed) {
@@ -370,6 +383,13 @@ export async function downloadWhisperEngine(
   });
   rmSync(tmp, { force: true });
   if (!res.ok) return { ok: false, error: res.error };
+  writeManifest(getEnginesDir(), {
+    engine: "whisper.cpp",
+    version: WHISPER_CPP_RELEASE_TAG,
+    platform: process.platform,
+    arch: process.arch,
+    steps: 2,
+  });
   return { ok: true, version: WHISPER_CPP_RELEASE_TAG };
 }
 

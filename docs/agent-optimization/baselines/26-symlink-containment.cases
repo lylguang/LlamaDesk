@@ -1,0 +1,69 @@
+apps/studio/src/bun/agent-spill.test.ts::describe|capToolResultText
+apps/studio/src/bun/agent-spill.test.ts::describe|isSpillPath（那两处窄口子的边界）
+apps/studio/src/bun/agent-spill.test.ts::describe|spillToolOutput
+apps/studio/src/bun/agent-spill.test.ts::describe|toolOutputCharLimit（单条工具输出随窗口缩放）
+apps/studio/src/bun/agent-spill.test.ts::describe|truncateForModel
+apps/studio/src/bun/agent-spill.test.ts::test|8192 窗口算出 6144（8k 窗口下单条工具结果不能吃掉大半个窗口）
+apps/studio/src/bun/agent-spill.test.ts::test|maxChars 为 0 时不返回任何原文内容（text.slice(-0) 会吐出整段）
+apps/studio/src/bun/agent-spill.test.ts::test|maxChars 为负数时同样不返回原文内容
+apps/studio/src/bun/agent-spill.test.ts::test|中间省略说明里带着正确的省略字符数
+apps/studio/src/bun/agent-spill.test.ts::test|写到会话目录、能原样读回，并带上工具名
+apps/studio/src/bun/agent-spill.test.ts::test|只保留最近 N 个转存文件
+apps/studio/src/bun/agent-spill.test.ts::test|大窗口被 MAX_TOOL_OUTPUT_CHARS 夹住（窗口再大也不放宽）
+apps/studio/src/bun/agent-spill.test.ts::test|头尾两段合计正好等于 max，不多占窗口（多个 max 值）
+apps/studio/src/bun/agent-spill.test.ts::test|头部不占满额度：尾部标记不能被头部挤掉（比例不能等于 1）
+apps/studio/src/bun/agent-spill.test.ts::test|头部仍在最前，结果以原文开头
+apps/studio/src/bun/agent-spill.test.ts::test|字面在转存目录里就算（写之前文件还不存在）
+apps/studio/src/bun/agent-spill.test.ts::test|小窗口被下限夹住：再小的窗口也要让模型看到一点东西
+apps/studio/src/bun/agent-spill.test.ts::test|工具名进文件名前消毒（含路径分隔符也不会跑出目录）
+apps/studio/src/bun/agent-spill.test.ts::test|没超限就原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|目录外的路径不算，别处也不被认成转存
+apps/studio/src/bun/agent-spill.test.ts::test|目录里没有 .txt 时清理不动手
+apps/studio/src/bun/agent-spill.test.ts::test|硬上限之内原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|超过内存硬上限时丢尾部并说明原因（bash 输出在读之前不知道有多大）
+apps/studio/src/bun/agent-spill.test.ts::test|超过写盘上限时截断，并在结果里如实标注
+apps/studio/src/bun/agent-spill.test.ts::test|超限时保留尾部（bash 的失败清单和统计都在结尾）
+apps/studio/src/bun/agent-spill.test.ts::test|超限时写清三件事：被截了、还差多少、去哪儿找原文
+apps/studio/src/bun/agent-spill.test.ts::test|转存失败（没有路径）时退化成旧文案，但不撒谎说原文还在
+apps/studio/src/bun/agent-spill.test.ts::test|软链接指向凭据文件时不算：否则三道门一起被绕过
+apps/studio/src/bun/agent-spill.test.ts::test|非法值（0、负数、NaN、Infinity）退回 MAX_TOOL_OUTPUT_CHARS
+apps/studio/src/bun/agent-spill.test.ts::test|默认硬上限比展示上限大两个量级（先落盘、再截断给模型看）
+apps/studio/src/bun/agent-tools.bash.test.ts::describe|bash 工具
+apps/studio/src/bun/agent-tools.bash.test.ts::test|resolveCommandTimeout：参数夹在 [1000, 600000]，非法值退回 ctx / 默认
+apps/studio/src/bun/agent-tools.bash.test.ts::test|传了 timeout_ms 就按它来，不再写死 120 秒
+apps/studio/src/bun/agent-tools.bash.test.ts::test|后台进程占着 stdout 时也立刻返回，不等管道 EOF
+apps/studio/src/bun/agent-tools.bash.test.ts::test|普通命令照常返回输出与退出码
+apps/studio/src/bun/agent-tools.bash.test.ts::test|用户点停止：命令被终止并在结果里说明
+apps/studio/src/bun/agent-tools.bash.test.ts::test|超时终止整条进程组：后台孙进程不会变成孤儿
+apps/studio/src/bun/agent-tools.edit.test.ts::describe|edit_file 工具
+apps/studio/src/bun/agent-tools.edit.test.ts::test|new_str 含 $$ 和 $
+apps/studio/src/bun/agent-tools.edit.test.ts::test|new_str 含 $& 时按字面落盘，不展开替换模式
+apps/studio/src/bun/agent-tools.edit.test.ts::test|old_str 为空时返回错误且不写文件
+apps/studio/src/bun/agent-tools.edit.test.ts::test|replace_all=true 且 new_str 含 $& 时仍然正确
+apps/studio/src/bun/agent-tools.edit.test.ts::test|正常单次替换仍然正确
+apps/studio/src/bun/agent-tools.glob.test.ts::describe|glob 工具的 ** 语义
+apps/studio/src/bun/agent-tools.glob.test.ts::test|**/b.ts 前缀必须在斜杠处结束，不匹配 src/ab.ts
+apps/studio/src/bun/agent-tools.glob.test.ts::test|src/**/*.test.ts 匹配 src/deep/d.test.ts
+apps/studio/src/bun/agent-tools.glob.test.ts::test|**/*.ts 不匹配 readme.md
+apps/studio/src/bun/agent-tools.glob.test.ts::test|**/*.ts 匹配根层文件 a.ts
+apps/studio/src/bun/agent-tools.glob.test.ts::test|**/*.ts 同时匹配 src/b.ts 和 src/deep/c.ts
+apps/studio/src/bun/agent-tools.glob.test.ts::test|**/x/*.ts 目录段必须完整，不匹配 ax/c.ts
+apps/studio/src/bun/agent-tools.glob.test.ts::test|? 仍然只匹配单个字符
+apps/studio/src/bun/agent-tools.glob.test.ts::test|单个 *.ts 只匹配根层，不跨目录
+apps/studio/src/bun/agent-tools.patch.test.ts::describe|apply_patch 工具
+apps/studio/src/bun/agent-tools.patch.test.ts::describe|request_permissions（模型主动申请权限）
+apps/studio/src/bun/agent-tools.patch.test.ts::describe|view_image 工具
+apps/studio/src/bun/agent-tools.patch.test.ts::describe|权限翻译
+apps/studio/src/bun/agent-tools.patch.test.ts::test|apply_patch 落到 edit，模式取公共目录；多文件时展示文件清单
+apps/studio/src/bun/agent-tools.patch.test.ts::test|view_image 读工作区外的图片要授权，读区内不打扰
+apps/studio/src/bun/agent-tools.patch.test.ts::test|不支持的扩展名与超大文件都给出可操作的报错
+apps/studio/src/bun/agent-tools.patch.test.ts::test|图片以内容块返回（base64 + mimeType），同时给一行文字说明
+apps/studio/src/bun/agent-tools.patch.test.ts::test|多文件补丁一次落盘，返回 A/M/D 摘要并登记产出物
+apps/studio/src/bun/agent-tools.patch.test.ts::test|它必须过授权闸门：被翻译成 external_directory 的询问（不是免授权工具）
+apps/studio/src/bun/agent-tools.patch.test.ts::test|定位失败时不动文件，报错能照着改
+apps/studio/src/bun/agent-tools.patch.test.ts::test|工作区之外的写入被路径层拦住（补丁也一样）
+apps/studio/src/bun/agent-tools.patch.test.ts::test|工具能跑起来就意味着闸门已放行；工作区内不必多问一次
+apps/studio/src/bun/agent-tools.patch.test.ts::test|旧的权限翻译用例（保留分组）
+apps/studio/src/bun/agent-tools.patch.test.ts::test|补丁本身解析不出文件时不弹窗（工具会带着报错回来）
+apps/studio/src/bun/agent-tools.patch.test.ts::test|补丁里只要有一个文件在工作区外，就按 external_directory 询问
+apps/studio/src/bun/agent-tools.patch.test.ts::test|视觉模型才有这个工具；纯文本模型拿不到

@@ -1,0 +1,93 @@
+Warning: No project session found with id 'omni-agent-18c'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/scripts/agent-resilience-smoke.ts`**（唯一改动的文件）
+
+1. **桩脚本（stub fetch handler）**：在原来第 6 步（`read_file`）之后、第 7 步（`task`）之前，插入两条新的 `bash` 工具调用：
+   - 步骤 7：`head -c 210000 logs/a.log`（3500 行 × 60 字符 ≈ 210k 字符，截断到 6144）
+   - 步骤 8：`head -c 120000 logs/b.log`（2000 行 × 60 字符 ≈ 120k 字符，截断到 6144）
+   
+   原有步骤编号 7→9、8→10、9→11 顺延。
+
+2. **工作区数据源**：在 stub 启动前用 `mkdirSync` + `writeFileSync` 写两个日志文件（`logs/a.log` 3500 行、`logs/b.log` 2000 行，每行 60 字符），供 `head -c` 命令读取。新增辅助函数 `longLines(n)` 生成带编号的行格式输出。
+
+3. **`seen.headLines`**：新增字段，桩在发出 `head` 工具调用时记录字节数（210000、120000），断言用它。
+
+4. **`AGENT_MAX_STEPS: "12"` → `"20"`**：注释说明原因（3 条 bash + read_file + task + write_file = 6 工具 + 503×2 + 掐断重发 + 空回合 = 9~10 步，加余量）。
+
+5. **第 541 行断言**：`toolStarts("bash") === 1` → `toolStarts("bash") === 3 && seen.headLines.length === 2`。真实语义不变（seq 命令没被重发），只是从"bash 总共只执行 1 次"改成"seq 命令只执行 1 次（3 = 1 seq + 2 head）"。
+
+6. **注释修正**：
+   - 第 415~417 行区域（`VLLM_MODEL_NAME` 上方）：原"大输出把 8k 窗口顶穿"改为"多条大输出累积把 8k 窗口顶穿（单条顶不穿：上限随窗口等比缩放）"
+   - 文件头部文档块：更新任务流程图，新增压缩原理说明段落
+
+### 2 先红后绿的证据
+
+红（原始脚本在 18b 之后的 HEAD 上跑）：
+```
+✗ 任务中途触发过上下文压缩（摘要或裁剪） — []
+```
+（其余 27 项全 ✓，退出码 1）
+
+绿（修改后）：
+```
+✓ 没有 error 形态的轨迹事件（重试用尽才会留下）
+✓ 每一个发出去的请求都是合法的线上协议（压缩没有切出孤儿工具结果 / 未结算调用）
+✓ 被掐断那轮的半截正文没有留在最终回答里
+✓ 大输出被截断并转存（提示里有路径）
+✓ 转存文件真的落盘
+✓ 模型读回了被截断的尾部（看到第 30000 行）
+✓ 子智能体交回了结论（不是「无输出」）
+✓ 报告真的写进了工作区
+✓ 报告登记成了产出物
+✓ 任务中途触发过上下文压缩（摘要或裁剪）
+✓ 压缩之后任务仍然跑完（转存路径没被压掉）
+✓ 会话历史里只有 1 条用户消息（提醒 / 重试没有落成假用户消息）
+✓ 会话历史里只有 1 条助手消息（重试延长的是同一个气泡）
+✓ 重试 / 提醒都留在了这条消息的轨迹里（回看能看懂它为什么多发了几次请求）
+
+最终回答：报告写完了：reports/log-report.md，数据来自 `seq 1 30000` 的完整输出（已核对到第 30000 行）。
+
+✓ 裁剪后的历史仍然合法（没有留下孤儿工具结果）
+✓ 自检：这份历史确实会让边界落在工具结果上（否则上面的检查是空跑）
+resilience smoke 全部通过
+```
+退出码 0，一个 ✗ 都没有。
+
+### 3 用例数量
+
+本任务只改了一个冒烟脚本（`agent-resilience-smoke.ts`），没有编辑任何 `.test.ts` 测试文件。gate 校验 `cases-missing none (baseline=52 now=52)`，无丢失。
+
+### 4 验收门输出
+
+```
+GATE: id=18c-smoke-recalibrate mode=self head=2b369bf
+GATE: out-of-bounds none
+GATE: size source-lines=0 limit=0
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=52 now=52)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (44 pass, 1s)
+GATE: RESULT PASS id=18c-smoke-recalibrate
+```
+
+### 5 逐项自检
+
+| 验收标准 | 状态 |
+|---|---|
+| 冒烟脚本退出码 0，第 7 项压缩断言真的变绿 | ✅ 完成（退出码 0，`✓ 任务中途触发过上下文压缩（摘要或裁剪）`） |
+| 没有削弱任何现有断言 | ✅ 完成（29 项断言全部保留；第 541 行从 `===1` 改为 `===3 && headLines.length===2` 是语义精确化，不是削弱——它仍然断言 seq 只执行 1 次） |
+| 没有靠改 `AGENT_COMPACT_MODE` / `SERVER_CTX_SIZE` / 模型 id 来凑 | ✅ 完成（三者均未改动，保持 `summary` / `8192` / `stub-model-8k`） |
+| 没有动 `agent-spill.ts` 或任何源码文件 | ✅ 完成（`git diff` 只涉及 `apps/studio/scripts/agent-resilience-smoke.ts`） |
+| 「bash 只执行了 1 次」那条断言若改动，已说明改法与理由 | ✅ 完成（见第 1 节第 5 条：改为 `toolStarts("bash") === 3 && seen.headLines.length === 2`，语义是"seq 命令只执行了 1 次"，因为新增了 2 条 head 调用，总 bash 从 1 变成 3） |
+| 第 415 到 417 行注释已改准确 | ✅ 完成（改为"多条大输出累积把 8k 窗口顶穿（单条顶不穿：上限随窗口等比缩放）"） |
+| 全量单测仍然全绿 | ✅ 完成（`bun run test`：2341 pass / 0 fail） |
+
+### 6 我拿不准的地方
+
+- **新增了两条 `head -c` 工具调用**（不是 `grep`），因为 `grep -n` 会匹配文件中每一行产生带行号前缀的输出（格式与 `longLines` 不匹配），而 `head -c N` 直接截取前 N 字节，输出就是文件原文（`longLines` 格式）。两条命令的语义都是"读日志文件"，符合任务描述"统计日志"的场景。
+- **第一次尝试用 `grep -n` 时，stub 的 `/logs/*` HTTP route 被误触**（agent 的 bash 工具通过真实 shell 执行命令，不会经过 stub 的 HTTP），导致 `seen.grepLines` 为空。改为 `head -c` 后，命令走真实 shell 读真实文件，不经过 stub，问题消失。
+- **`seen.headLines` 的填充时机**：在桩发出 `head` 工具调用的那一刻（`emittedToolCalls === 3/4`）push，而不是等 HTTP 请求进来。这比依赖 HTTP route 更可靠，且语义相同（桩控制了什么命令发出，就记什么）。

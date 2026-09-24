@@ -1,0 +1,98 @@
+apps/studio/src/bun/agent-sandbox.test.ts::describe|Linux（bwrap）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|Linux（Landlock 规则生成）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|端到端（真实 Seatbelt）
+apps/studio/src/bun/agent-sandbox.test.ts::describe|策略与包装
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：blankFile 可自定义文件类凭据的覆盖源，缺省是 /dev/null
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：read-only 不挂工作区；联网开关 → --unshare-net
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据**文件**（.npmrc）用 --ro-bind 盖住，而不是 --tmpfs（对着文件挂 tmpfs 会让 bwrap 起不来）
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据目录（.ssh）仍走 --tmpfs，没被误改成 --ro-bind
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：凭据目录用空 tmpfs 盖住（bwrap 没有按路径拒读的写法）
+apps/studio/src/bun/agent-sandbox.test.ts::test|argv：整体只读挂根，再把工作区/临时目录挂成可写
+apps/studio/src/bun/agent-sandbox.test.ts::test|handled 覆盖所有写位：Landlock 只处理你声明的权限，漏一位就是少拦一种
+apps/studio/src/bun/agent-sandbox.test.ts::test|Landlock 的前置条件：禁网与文件系统不兼容都要如实拦下，别硬上
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：只放行临时目录写，且不认已授权目录；网络按开关
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：工作区不给写；临时目录仍可写（与 Seatbelt / bwrap 口径一致）
+apps/studio/src/bun/agent-sandbox.test.ts::test|read-only：工作区也写不了、临时目录可以写、读照常
+apps/studio/src/bun/agent-sandbox.test.ts::test|workspace-write：根目录只给读，可写目录单独给一组（Landlock 是叠加的允许集）
+apps/studio/src/bun/agent-sandbox.test.ts::test|wrapShellCommand：Linux + bwrap 可用 → 包 bwrap；不可用 → 降级并给出安装命令
+apps/studio/src/bun/agent-sandbox.test.ts::test|不存在的路径不生成规则（Landlock 对不存在路径加规则会 ENOENT）
+apps/studio/src/bun/agent-sandbox.test.ts::test|关掉沙箱后同一命令能写出去（确认拦截确实来自沙箱）
+apps/studio/src/bun/agent-sandbox.test.ts::test|关闭时原样执行，不引入任何包装
+apps/studio/src/bun/agent-sandbox.test.ts::test|凭据清单里的本应用数据目录是**真实路径**（写死名字等于什么都没拦）
+apps/studio/src/bun/agent-sandbox.test.ts::test|凭据目录读也被拒（工具层黑名单覆盖不到 bash）
+apps/studio/src/bun/agent-sandbox.test.ts::test|可写目录去重且带 realpath（/tmp 与 /private/tmp 是两条路径）
+apps/studio/src/bun/agent-sandbox.test.ts::test|后端偏好：默认 auto（bwrap 优先、Landlock 兜底），可显式指定
+apps/studio/src/bun/agent-sandbox.test.ts::test|后端按平台选：macOS 走 Seatbelt、Linux 走 bwrap、其它没有
+apps/studio/src/bun/agent-sandbox.test.ts::test|如实说明表达不了的部分：Landlock 是只允许模型，挖不掉凭据目录
+apps/studio/src/bun/agent-sandbox.test.ts::test|工作区内可写，工作区外不可写
+apps/studio/src/bun/agent-sandbox.test.ts::test|已授权目录只在 workspace-write 档可写；重复路径只出现一次
+apps/studio/src/bun/agent-sandbox.test.ts::test|开启后在支持的平台包上 sandbox-exec；不支持的平台降级并说明原因
+apps/studio/src/bun/agent-sandbox.test.ts::test|拦截解释认得 bwrap 的报错（只读挂载 / bwrap 前缀）
+apps/studio/src/bun/agent-sandbox.test.ts::test|无人值守（没注入升级回调）时如实报告被拦，不重跑
+apps/studio/src/bun/agent-sandbox.test.ts::test|普通命令失败（不是沙箱拦的）不会触发升级询问
+apps/studio/src/bun/agent-sandbox.test.ts::test|档位解析：三种值，非法值回落到 off
+apps/studio/src/bun/agent-sandbox.test.ts::test|沙箱升级：拒绝时不重跑，把拒绝原因一并交给模型
+apps/studio/src/bun/agent-sandbox.test.ts::test|沙箱升级：被拦后按次申请，允许则跳过沙箱重跑一次
+apps/studio/src/bun/agent-sandbox.test.ts::test|状态如实反映本机情况：非 Linux 明说不可用，Linux 才去编译与探测
+apps/studio/src/bun/agent-sandbox.test.ts::test|状态摘要如实反映平台与联网设置
+apps/studio/src/bun/agent-sandbox.test.ts::test|策略里包含工作区（含 realpath）、临时目录与已授权目录，并拒绝凭据路径
+apps/studio/src/bun/agent-sandbox.test.ts::test|联网开关 → network 字段与如实的能力提示（老内核没有 net 规则）
+apps/studio/src/bun/agent-sandbox.test.ts::test|规格 JSON：同一档位序列化完全一致，路径排序，版本可演进
+apps/studio/src/bun/agent-sandbox.test.ts::test|设备例外：/dev/null 等必须可写（否则 
+apps/studio/src/bun/agent-sandbox.test.ts::test|阻断说明只在真的像沙箱拦截时出现，并说清是哪一档
+apps/studio/src/bun/agent-tools.path.test.ts::describe|工作区归属判定（解软链）
+apps/studio/src/bun/agent-tools.path.test.ts::test|区内指向区外凭据目录的软链，读取被拒
+apps/studio/src/bun/agent-tools.path.test.ts::test|区内指向区外的软链，写入被拒
+apps/studio/src/bun/agent-tools.path.test.ts::test|区内真实文件与目录照常放行
+apps/studio/src/bun/agent-tools.path.test.ts::test|尚未创建的新文件路径照常放行（写新文件不能因为路径不存在被拒）
+apps/studio/src/bun/permissions.test.ts::describe|evaluate
+apps/studio/src/bun/permissions.test.ts::describe|isDangerousCommand
+apps/studio/src/bun/permissions.test.ts::describe|matchesPermissionPattern
+apps/studio/src/bun/permissions.test.ts::describe|parseRuleList
+apps/studio/src/bun/permissions.test.ts::describe|permissionRequestForTool
+apps/studio/src/bun/permissions.test.ts::describe|winningRule
+apps/studio/src/bun/permissions.test.ts::describe|命令归一化
+apps/studio/src/bun/permissions.test.ts::describe|工作区外的读写分权（写 = external_write，读 = external_directory）
+apps/studio/src/bun/permissions.test.ts::describe|权限名清单
+apps/studio/src/bun/permissions.test.ts::describe|沙箱升级权限
+apps/studio/src/bun/permissions.test.ts::describe|路径工具
+apps/studio/src/bun/permissions.test.ts::test|
+apps/studio/src/bun/permissions.test.ts::test|bash 用命令原文作为模式
+apps/studio/src/bun/permissions.test.ts::test|humanPermissionLabel 有中文说明，未知权限名原样返回
+apps/studio/src/bun/permissions.test.ts::test|isDangerousCommand 也看归一化形式
+apps/studio/src/bun/permissions.test.ts::test|isInsideWorkspace / displayPath
+apps/studio/src/bun/permissions.test.ts::test|manual 全部询问，auto 全部放行，strict 全部拒绝
+apps/studio/src/bun/permissions.test.ts::test|smart / manual 下询问；auto / strict 下默认拒绝
+apps/studio/src/bun/permissions.test.ts::test|smart 默认放行普通命令，拦截危险命令
+apps/studio/src/bun/permissions.test.ts::test|不碰工作区的内置工具不该被当成外部工具（goal / write_plan / think）
+apps/studio/src/bun/permissions.test.ts::test|中文标签与权限摘要探针补上 external_write
+apps/studio/src/bun/permissions.test.ts::test|会话规则可以覆盖默认策略（用户点了「本会话总是」）
+apps/studio/src/bun/permissions.test.ts::test|写工作区外的文件 → external_write（write_file 与 edit_file 各断言一次）
+apps/studio/src/bun/permissions.test.ts::test|只读工具与待办 / 提问类工具完全不参与授权
+apps/studio/src/bun/permissions.test.ts::test|四个档位都有 external_write 默认条目，动作与同档 external_directory 一致
+apps/studio/src/bun/permissions.test.ts::test|子任务派发带上子智能体类型，便于「总是允许 explore」
+apps/studio/src/bun/permissions.test.ts::test|工作区内写入是 edit（相对路径），工作区外是 external_directory
+apps/studio/src/bun/permissions.test.ts::test|工作区内读取不需要授权，工作区外需要
+apps/studio/src/bun/permissions.test.ts::test|工作区外的 apply_patch → external_write
+apps/studio/src/bun/permissions.test.ts::test|工具调用翻译：带上命令原文与沙箱输出，模式用归一化后的命令
+apps/studio/src/bun/permissions.test.ts::test|工具输出的转存目录不算「工作区之外」：读回超限输出不该再弹一次授权
+apps/studio/src/bun/permissions.test.ts::test|已存的 external_directory 允许规则不再放行写（本次修复的缺陷）
+apps/studio/src/bun/permissions.test.ts::test|折叠空白、剥引号与转义，但保留引号内的空白
+apps/studio/src/bun/permissions.test.ts::test|普通命令不会被归一化误伤
+apps/studio/src/bun/permissions.test.ts::test|普通命令不误报
+apps/studio/src/bun/permissions.test.ts::test|最后命中者生效
+apps/studio/src/bun/permissions.test.ts::test|未命中返回 null
+apps/studio/src/bun/permissions.test.ts::test|未知工具（MCP 等）按 mcp 权限处理，模式是工具名
+apps/studio/src/bun/permissions.test.ts::test|未知权限名默认 ask（不默认放行）
+apps/studio/src/bun/permissions.test.ts::test|「本会话总是」存的是归一化命令，之后的等价写法同样命中
+apps/studio/src/bun/permissions.test.ts::test|正则元字符按字面量处理
+apps/studio/src/bun/permissions.test.ts::test|生图 / 生视频的参考图：工作区外的路径要授权，素材库引用与区内文件照旧
+apps/studio/src/bun/permissions.test.ts::test|生效权限摘要里能一眼看到它是询问还是拒绝
+apps/studio/src/bun/permissions.test.ts::test|用户可以显式放行（设置页加一条规则就够）
+apps/studio/src/bun/permissions.test.ts::test|等价写法不再绕过危险命令规则（smart 模式）
+apps/studio/src/bun/permissions.test.ts::test|设置页下拉包含联网搜索与重复调用保护（曾漏掉）
+apps/studio/src/bun/permissions.test.ts::test|识别破坏性命令
+apps/studio/src/bun/permissions.test.ts::test|读工作区外的文件仍是 external_directory（read_file / glob / grep）
+apps/studio/src/bun/permissions.test.ts::test|路径里的分隔符统一按 / 处理
+apps/studio/src/bun/permissions.test.ts::test|过滤非法条目
+apps/studio/src/bun/permissions.test.ts::test|非 JSON 内容返回空数组

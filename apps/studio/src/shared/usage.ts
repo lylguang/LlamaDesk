@@ -32,7 +32,9 @@ export type UsageChannel =
   /** 文档 OCR 的 VLM 视觉理解。 */
   | "ocr"
   /** 翻译页的整段翻译。 */
-  | "translate";
+  | "translate"
+  /** SystemOne / JEV 类型化判定（choice / score / noul）。价格恒为 0，只记次数与 tokens。 */
+  | "systemone";
 
 export const USAGE_CHANNELS: readonly UsageChannel[] = [
   "chat",
@@ -43,6 +45,7 @@ export const USAGE_CHANNELS: readonly UsageChannel[] = [
   "music",
   "ocr",
   "translate",
+  "systemone",
 ];
 
 /** 上游类别：本地推理服务器，还是云端服务商。 */

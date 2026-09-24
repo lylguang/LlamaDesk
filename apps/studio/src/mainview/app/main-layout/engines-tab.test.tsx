@@ -3,7 +3,7 @@ import { Window } from "happy-dom";
 
 /**
  * 设置 → 模型引擎页的回归测试。盯住四件事：
- *   1. 十种引擎（文本推理 / 语音 / OCR / 图像 / 网络工具）都得列出来，且按分类分组；
+ *   1. 全部引擎（文本推理 / 语音 / OCR / 图像 / 类型化判定 / 网络工具）都得列出来，且按分类分组；
  *   2. 只有"应用自己装的那份"才有卸载按钮 —— 系统安装的版本给了卸载，用户点下去
  *      要么删不掉、要么更糟地动了系统里的东西；
  *   3. 卸载必须先确认，确认框里要说清删哪个目录；
@@ -201,7 +201,15 @@ test("列出全部引擎，按分类分组", async () => {
   for (const spec of LOCAL_ENGINE_SPECS) {
     expect(view.text).toContain(spec.name);
   }
-  for (const key of ["engines.cat.inference", "engines.cat.voice", "engines.cat.ocr", "engines.cat.image", "engines.cat.network"]) {
+  for (const key of [
+    "engines.cat.inference",
+    "engines.cat.voice",
+    "engines.cat.ocr",
+    "engines.cat.image",
+    // 类型化判定（SystemOne / JEV）自成一类：laya-mlx 是判定模型，不是聊天模型。
+    "engines.cat.systemone",
+    "engines.cat.network",
+  ]) {
     expect(view.text).toContain(zh(key));
   }
   await view.unmount();
@@ -221,6 +229,73 @@ test("只有托管安装给卸载；系统安装只说明，未安装给安装",
   expect(vllmRow).toBeGreaterThan(-1);
 
   await view.unmount();
+});
+
+test("laya-mlx（类型化判定）也在这一页：能给安装 / 卸载，「管理模型」跳到 JEV 页", async () => {
+  engines = baseEngines().map((e) =>
+    e.id === "laya-mlx"
+      ? {
+          ...e,
+          state: "managed",
+          version: "0.1.0",
+          path: "/data/engines/laya/bin/python3",
+          managedDir: "/data/engines/laya",
+          sizeBytes: 120e6,
+          canUninstall: true,
+          upgradeKind: "latest",
+        }
+      : e,
+  );
+  const { useAppStore } = await import("@stores/app");
+  useAppStore.getState().setActiveApp("chat");
+  const view = await renderTab();
+
+  expect(view.text).toContain(zh("engines.cat.systemone"));
+  expect(view.text).toContain("laya-mlx");
+  expect(view.text).toContain(zh("engines.laya.role"));
+
+  /**
+   * 按钮要**取自己那一行里的**：这一页每行结构一样，`buttonsWith` 返回的是全页的按钮 ——
+   * 拿第一个「管理模型」点下去，点到的是 llama.cpp 那一行（跳模型库），断言必然错。
+   *
+   * 行定位不靠"数着层级往上爬"（行内 DOM 会变，层级一变测试就假失败），而是从所有
+   * 含这个引擎名、且内部有按钮的祖先里逐个找带该标签的按钮，且**从最内层往外找** ——
+   * `querySelectorAll` 给的是文档顺序（最外层在前），顺着找会先命中整页那个容器，
+   * 于是点到的是别的引擎那一行的按钮。
+   */
+  const buttonInLayaRow = (label: string): Element | undefined => {
+    const containers = [...view.container.querySelectorAll("div")]
+      .filter((el) => el.textContent?.includes("laya-mlx") && el.querySelectorAll("button").length > 0)
+      .reverse();
+    for (const container of containers) {
+      const found = [...container.querySelectorAll("button")].find((button) =>
+        button.textContent?.trim().startsWith(label),
+      );
+      if (found) return found;
+    }
+    return undefined;
+  };
+
+  // 「管理模型」必须真的把人送到 JEV 页 —— 权重在那里下 / 起 / 停，
+  // 点不动就等于告诉用户"去那边配"却哪儿也没去。
+  await view.click(buttonInLayaRow("管理模型"));
+  expect(useAppStore.getState().activeApp).toBe("jev");
+
+  // 卸载走的是同一个引擎卸载入口（改名/漏 id 会让它变成"点了没反应"），
+  // 且同样先弹确认框 —— 确认按钮在对话框里，与另一个用例一样按标签找。
+  uninstallCalls.length = 0;
+  uninstallResult = { ok: true, freedBytes: 120e6, stopped: 1 };
+  await view.click(buttonInLayaRow(zh("engines.action.uninstall")));
+  const dialog = document.body.querySelector('[data-slot="dialog-content"]');
+  expect(dialog?.textContent).toContain(zh("engines.uninstall.title", { name: "laya-mlx" }));
+  const confirm = [...(dialog?.querySelectorAll("button") ?? [])].find((b) =>
+    b.textContent?.trim().startsWith(zh("engines.action.uninstall")),
+  );
+  await view.click(confirm);
+  expect(uninstallCalls).toEqual(["laya-mlx"]);
+
+  await view.unmount();
+  useAppStore.getState().setActiveApp("chat");
 });
 
 test("已安装的行给「升级 / 重新下载」，点击时带 upgrade", async () => {

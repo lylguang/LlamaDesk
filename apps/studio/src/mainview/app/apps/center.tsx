@@ -18,6 +18,7 @@ import {
   PenLineIcon,
   ScissorsIcon,
   SearchIcon,
+  ScanSearchIcon,
   SparklesIcon,
   StickerIcon,
   UserRoundIcon,
@@ -50,6 +51,7 @@ const ICONS: Record<MiniAppIcon, ReactNode> = {
   grid: <Grid3x3Icon className="size-5" />,
   notebook: <NotebookPenIcon className="size-5" />,
   sticker: <StickerIcon className="size-5" />,
+  scanSearch: <ScanSearchIcon className="size-5" />,
 };
 
 const CATEGORY_LABEL_KEY: Record<MiniAppCategory, string> = {

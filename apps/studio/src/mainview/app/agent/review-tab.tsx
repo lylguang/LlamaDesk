@@ -12,7 +12,7 @@ import { rpcClient } from "@lib/rpc";
 import { useAgentStore } from "@stores/agent";
 import { useT } from "@stores/ui-lang";
 import { PiTip } from "./pi-tip";
-import { summarizeEdit } from "./timeline";
+import { patchFilePaths, summarizeEdit } from "./timeline";
 import { parseUnifiedDiff } from "../../../shared/diff";
 
 /** git porcelain 的状态码 → 一个字母 + 语义色（新增绿 / 删除红 / 冲突红 / 其余中性）。 */
@@ -37,33 +37,63 @@ function statusColor(tone: "success" | "error" | "muted"): string {
   return "var(--ds-text-muted)";
 }
 
+export type SessionChange = { path: string; added: number; removed: number; tool: string };
+
+/** 从 agent 的 tool_start 事件里累计「这一轮改了哪些文件、各自增删多少行」（纯函数，便于单测）。 */
+export function collectSessionChanges(events: { kind: string; toolName?: string | null; args?: string | null }[]): SessionChange[] {
+  const files = new Map<string, { path: string; added: number; removed: number; tool: string }>();
+  for (const event of events) {
+    if (event.kind !== "tool_start") continue;
+    if (event.toolName !== "write_file" && event.toolName !== "edit_file" && event.toolName !== "apply_patch") continue;
+    const summary = summarizeEdit(event.args ?? null);
+    if (!summary) continue;
+    if (event.toolName === "apply_patch") {
+      // 补丁参数里没有 path（一个补丁还可能改多个文件）：按段落头取出全部文件逐个登记。
+      // 增删行数是整份补丁的合计：只改一个文件时合计数记到它身上（准确）；
+      // 改多个文件时每个文件都登记（「改了哪些文件」是准的），增删行数取合计除以
+      // 文件数、向上取整——近似值，精确到文件的拆分留待后续。
+      // 解析要兜住：一条坏参数抛出去会把整个审查页签打黑（下面 write_file / edit_file 那条路径同样包了 try/catch，同一个理由）。
+      let patch = "";
+      try {
+        patch = String((JSON.parse(event.args ?? "{}") as { patch?: string }).patch ?? "");
+      } catch {
+        patch = "";
+      }
+      const paths = patchFilePaths(patch);
+      if (paths.length === 0) continue;
+      for (const filePath of paths) {
+        const existing = files.get(filePath);
+        files.set(filePath, {
+          path: filePath,
+          added: (existing?.added ?? 0) + Math.ceil(summary.added / paths.length),
+          removed: (existing?.removed ?? 0) + Math.ceil(summary.removed / paths.length),
+          tool: event.toolName,
+        });
+      }
+      continue;
+    }
+    let filePath = "";
+    try {
+      filePath = String((JSON.parse(event.args ?? "{}") as { path?: string }).path ?? "");
+    } catch {
+      filePath = "";
+    }
+    if (!filePath) continue;
+    const existing = files.get(filePath);
+    files.set(filePath, {
+      path: filePath,
+      added: (existing?.added ?? 0) + summary.added,
+      removed: (existing?.removed ?? 0) + summary.removed,
+      tool: event.toolName,
+    });
+  }
+  return [...files.values()].reverse();
+}
+
 /** 本会话改动（工作区不是 git 仓库时的回落）：从 agent 的写文件事件里取。 */
 function useSessionChanges() {
   const events = useAgentStore((s) => s.events);
-  return useMemo(() => {
-    const files = new Map<string, { path: string; added: number; removed: number; tool: string }>();
-    for (const event of events) {
-      if (event.kind !== "tool_start") continue;
-      if (event.toolName !== "write_file" && event.toolName !== "edit_file") continue;
-      const summary = summarizeEdit(event.args);
-      if (!summary) continue;
-      let filePath = "";
-      try {
-        filePath = String((JSON.parse(event.args ?? "{}") as { path?: string }).path ?? "");
-      } catch {
-        filePath = "";
-      }
-      if (!filePath) continue;
-      const existing = files.get(filePath);
-      files.set(filePath, {
-        path: filePath,
-        added: (existing?.added ?? 0) + summary.added,
-        removed: (existing?.removed ?? 0) + summary.removed,
-        tool: event.toolName,
-      });
-    }
-    return [...files.values()].reverse();
-  }, [events]);
+  return useMemo(() => collectSessionChanges(events), [events]);
 }
 
 /**

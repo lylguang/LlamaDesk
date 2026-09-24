@@ -33,7 +33,6 @@ import { Input } from "@ui/input";
 import { Label } from "@ui/label";
 import { Textarea } from "@ui/textarea";
 import { useT } from "@stores/ui-lang";
-import { KB_TEXT_EXT, KB_IMAGE_EXT, KB_AUDIO_EXT, KB_VIDEO_EXT } from "@/shared/knowledge";
 import { cn } from "@/mainview/lib/utils";
 import { KbImageViewer } from "@/mainview/components/kb-image-viewer";
 import type { KbView, KbDocView, KbChunkView } from "@/bun/knowledge";
@@ -500,19 +499,31 @@ export function KbDocsTab({ kb }: { kb: KbView }) {
 
   const addFilesMutation = useMutation({
     mutationFn: async () => {
-      // 与 bun 侧目录导入白名单（KB_FOLDER_FILE_RE）同一来源：shared/knowledge.ts 扩展名常量。
-      const accept = [...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join(",");
-      const { paths } = await rpcClient.openFileDialog({ allowedFileTypes: accept });
+      // 不传扩展名过滤器（"*" = 不过滤）：Windows 上 Electrobun 把逗号分隔的每个扩展名
+      // 渲染成**一条独立过滤器**，第一条即默认值 —— 于是默认只显示 .txt，.md / .pdf 全被
+      // 藏进下拉框；名单里的 md 与 markdown 还生成两条几乎同名的过滤器，选错就把 .md 文件
+      // 直接藏没（issue #28）。支持与否改由主进程按 shared/knowledge.ts 白名单判定，
+      // 跳过的数量在下面回报给用户。
+      const { paths } = await rpcClient.openFileDialog({ allowedFileTypes: "*" });
       if (paths.length === 0) return null;
       return rpcClient.kbAddFiles({ kbId: kb.id, paths });
     },
     onSuccess: (res) => {
       invalidate();
       if (!res) return;
+      const skipped = res.skipped ?? 0;
       setNotice(
-        res.docs.length > 0
-          ? { kind: "ok", text: t("kb.docs.addedCount", { count: String(res.docs.length) }) }
-          : { kind: "error", text: t("kb.docs.addedNone") },
+        res.docs.length === 0 && skipped === 0
+          ? { kind: "error", text: t("kb.docs.addedNone") }
+          : skipped > 0
+            ? {
+                kind: "ok",
+                text: t("kb.docs.addedSkipped", {
+                  added: String(res.docs.length),
+                  skipped: String(skipped),
+                }),
+              }
+            : { kind: "ok", text: t("kb.docs.addedCount", { count: String(res.docs.length) }) },
       );
     },
     onError: (e) => setNotice({ kind: "error", text: t("kb.docs.addFailed", { error: String(e) }) }),

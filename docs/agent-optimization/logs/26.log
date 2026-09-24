@@ -1,0 +1,101 @@
+Warning: No project session found with id 'omni-agent-26'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+- `apps/studio/src/bun/agent-tools.ts`
+  - 第 1 行 import 里加上 `realpathSync`。
+  - 新增内部函数 `isReallyUnder(root, target): boolean`（照抄 `agent-spill.ts` 的 `isSpillPath` 判据）：两边先 `path.resolve`；字面不在 root 底下直接 false；root 不存在 false；取 `realpathSync(root)`；target 不存在时沿父目录上溯到第一个存在的祖先（到文件系统根还没有就 false）；对祖先取 `realpathSync` 后判等于或在真实 root 底下；整段 try/catch，抛错 false（保守）。
+  - `assertNotSecret`：`if (target === root || target.startsWith(root + path.sep)) return;` → `if (isReallyUnder(root, target)) return;`
+  - `assertInsideWorkspace`：`if (target !== root && !target.startsWith(root + path.sep)) throw …` → `if (!isReallyUnder(root, target)) throw …`
+  - `assertReadable` / `assertWritable`：`if (abs === root || abs.startsWith(root + path.sep)) return;` → `if (isReallyUnder(root, abs)) return;`
+  - 其余（`isSpillPath` 口子、`underAny`、报错文案、`SECRET_PATH_PATTERNS`、`~` 展开）一律未动。
+- `apps/studio/src/bun/agent-tools.path.test.ts`（新建）：4 条用例，结构照抄 `agent-tools.patch.test.ts`（临时 workspace + getter 型 `ToolContext`），用 `symlinkSync` 建区内软链指向临时「假凭据目录」。
+
+### 2 先红后绿的证据
+
+红：
+
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-tools.path.test.ts:
+33 | } as ToolContext;
+34 | 
+35 | describe("工作区归属判定（解软链）", () => {
+36 |   test("区内指向区外凭据目录的软链，读取被拒", () => {
+37 |     symlinkSync(outside, path.join(workspace, "leak"));
+38 |     expect(() => assertReadable(ctx, path.join(workspace, "leak"))).toThrow();
+                                                                         ^
+error: expect(received).toThrow()
+
+Received function did not throw
+Received value: undefined
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.path.test.ts:38:69)
+(fail) 工作区归属判定（解软链） > 区内指向区外凭据目录的软链，读取被拒 [0.48ms]
+38 |     expect(() => assertReadable(ctx, path.join(workspace, "leak"))).toThrow();
+39 |   });
+40 | 
+41 |   test("区内指向区外的软链，写入被拒", () => {
+42 |     symlinkSync(outside, path.join(workspace, "leak"));
+43 |     expect(() => assertWritable(ctx, path.join(workspace, "leak"))).toThrow();
+                                                                         ^
+error: expect(received).toThrow()
+
+Received function did not throw
+Received value: undefined
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.path.test.ts:43:69)
+(fail) 工作区归属判定（解软链） > 区内指向区外的软链，写入被拒 [0.17ms]
+
+ 2 pass
+ 2 fail
+ 8 expect() calls
+Ran 4 tests across 1 file. [336.00ms]
+```
+
+绿：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 4 pass
+ 0 fail
+ 8 expect() calls
+Ran 4 tests across 1 file. [344.00ms]
+```
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-tools.path.test.ts`：编辑前 0 个（文件不存在）→ 编辑后 4 个
+- 门里其余 5 个测试文件（patch/edit/glob/bash/spill）均未改动；gate 报告 baseline=69 now=74（新增 4 个）。
+
+### 4 验收门输出
+
+```
+GATE: id=26-symlink-containment mode=self head=29ee5be
+GATE: out-of-bounds none
+GATE: size source-lines=37 limit=40
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=69 now=74)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (61 pass, 2s)
+GATE: RESULT PASS id=26-symlink-containment
+```
+
+### 5 逐项自检
+
+- 四处判断都换成了解软链的版本 — 完成（`assertNotSecret` / `assertInsideWorkspace` / `assertReadable` / `assertWritable` 均改为 `isReallyUnder`）。
+- 不存在的路径沿父目录往上找到第一个存在的祖先 — 完成（`while (!existsSync(probe)) { … }`，到根不存在返回 false）。
+- 异常时保守判为「不在区内」 — 完成（整段 try/catch，catch 返回 false）。
+- `underAny` / `isSpillPath` / 报错文案 / 黑名单内容 / `~` 展开都没动 — 完成（`agent-spill.ts`、`permissions.ts` 均未修改；文案、`SECRET_PATH_PATTERNS`、`resolvePath` 的 `~` 展开原样保留）。
+- 工作区内的普通读写没有被误拦 — 完成（用例 3 绿）。
+- 写新文件（路径尚不存在）没有被误拦 — 完成（用例 4 绿）。
+- 把 `agent-tools.ts` 的改动还原后，第 1 条用例会变红 — 完成（已自试：`git show HEAD:agent-tools.ts` 还原后重跑，用例 1、2 均 fail，`2 pass / 2 fail`，随后已还原回改后版本）。
+- 源码改动不超过 40 行 — 完成（`git diff --numstat`：32 增 + 5 删 = 37 行，gate 报 `size source-lines=37 limit=40`）。
+
+### 6 我拿不准的地方
+
+无。

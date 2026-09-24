@@ -1,0 +1,23 @@
+{
+  "id": "24b-lazy-dialogs",
+  "allowed_files": [
+    "apps/studio/src/mainview/app/agent/message.tsx"
+  ],
+  "source_files": [
+    "apps/studio/src/mainview/app/agent/message.tsx"
+  ],
+  "test_files": [
+    "apps/studio/src/mainview/app/agent/message.test.tsx",
+    "apps/studio/src/mainview/app/agent/conversation.test.tsx",
+    "apps/studio/src/mainview/app/agent/composer-queue.test.tsx"
+  ],
+  "max_source_lines": 10,
+  "revert_red": false,
+  "revert_red_reason": "纯懒构造、行为零变化，没有新用例；锚点是 message.test.tsx 的 20 条既有用例全绿 + 主 agent 读 diff 确认只有条件表达式变了",
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ]
+}

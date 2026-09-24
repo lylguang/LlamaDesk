@@ -63,6 +63,7 @@ export type AppLogSource =
   | "update" // 版本更新
   | "notice" // 通知中心落下的条目
   | "usage" // 用量账本（记录失败这类不影响业务的告警）
+  | "systemone" // SystemOne / JEV 类型化判定（本地 laya-mlx 运行时 + 云端 TypeSafe）
   | "cli"; // CLI 侧动作（备份内核等独立进程）
 
 export type AppLogEntry = {

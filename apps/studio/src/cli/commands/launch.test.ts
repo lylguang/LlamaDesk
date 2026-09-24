@@ -242,9 +242,21 @@ describe("omi launch codex：CLI 侧的 profile 与目录", () => {
   });
 
   test("目录项带 base_instructions 且在选择器可见（缺失/隐藏会让客户端不认这个模型）", () => {
-    const entry = (JSON.parse(codexCatalogJson("m")) as { models: Record<string, unknown>[] }).models[0]!;
+    const entry = (JSON.parse(codexCatalogJson("m", 32768)) as { models: Record<string, unknown>[] })
+      .models[0]!;
     expect(entry).toHaveProperty("base_instructions");
     expect(entry.visibility).toBe("list");
     expect(entry.slug).toBe("m");
+  });
+
+  /**
+   * 目录里写死 128k 会让 8k 的本地模型报大、1M 的云端模型报小 —— Codex 拿这个数当
+   * 自动压缩基准，报小了就过早丢历史。窗口必须由调用方传进来。
+   */
+  test("context_window 用传进来的真实窗口，不再写死 128k", () => {
+    const entry = (JSON.parse(codexCatalogJson("m", 1_048_576)) as {
+      models: Record<string, unknown>[];
+    }).models[0]!;
+    expect(entry.context_window).toBe(1_048_576);
   });
 });

@@ -14,6 +14,7 @@ export const MLX_FALLBACKS: { id: string; defaultSteps: number }[] = [
   { id: "flux-schnell", defaultSteps: 4 },
   { id: "flux2-klein-9b", defaultSteps: 4 },
   { id: "flux-dev", defaultSteps: 50 },
+  { id: "qwen-image-2.1", defaultSteps: 40 },
 ];
 
 /**

@@ -9,6 +9,17 @@
 > **增量说明（2026-09-15）**：此后新增了一级菜单 **音乐（`music`，`app/music/index.tsx`，
 > 侧栏创作记录 `app/music/record-list.tsx`，主进程 `bun/music-gen.ts`）**，排在视频之后。
 > 下表保留审计当时（13 个）的编号与结论，新菜单尚未走本文档的梳理流程。
+>
+> **增量说明（后续）**：再新增一级菜单 **JEV（`jev`，`app/jev/index.tsx`，主进程
+> `bun/systemone.ts` + `shared/systemone.ts`）**，排在 **Agent 与通话之间**（默认布局即
+> 该位置；老配置里没有这个 id 时会按默认顺序补在后面，可在 设置 → 外观 → 左侧一级菜单
+> 里拖到想要的位置）。页面结构**对齐语音合成页**：左栏顶部是「判定引擎」切换
+> （本地运行：装 laya-mlx 引擎 / 下权重 / 启动模型；云端接入：Base URL + Key），下面是
+> state 与问题清单与运行按钮；右栏是概率分布结果（空态与产物同语音页一致）；应用侧栏
+> 放五个**中英双语内置示例**（工单分派 / 简历评分 / 内容护栏 / 检索重排 / 意图路由），
+> 点一下装进左栏。协议与 TypeSafe 官方逐字段一致，网关 `POST /v1/systemone` 对外暴露给
+> 其他 Agent，Agent 侧则通过只读工具 `jev_evaluate` 使用它。
+> 详见 [jev-systemone.md](./jev-systemone.md)。
 
 ---
 
@@ -185,6 +196,8 @@ Agent 是三模式（agent / plan / goal）工作台，功能按「会话 / 时�
 | A-21 | 产出物预览（Markdown / 代码 / 图片 / 音视频 / PDF / HTML iframe） | `artifact-preview.tsx` |
 | A-22 | 面板拖动分隔条（宽度本机记住） | `panel-splitter.tsx` |
 
+（JEV / SystemOne 类型化判定**不在这里** —— 它一度被做成这里的第六个页签，但编辑器加概率分布要的是整屏宽度，窄面板摊不开，所以改成了**独立的一级菜单** `jev`（排在 `agent` 与 `voicecall` 之间，见 §1 的增量说明）。Agent 与它的关系是"用"而不是"装"：通过只读工具 `jev_evaluate` 调用。）
+
 ### 5.2 架构点评
 
 - **这是全项目组织得最好的一块**：30 个文件按职责切开，纯逻辑（`timeline-model` / `artifact-meta` / `new-session`）单独抽出并带单测，`agent-screen.tsx` 只做编排。可以作为其他菜单的参照。
@@ -207,15 +220,16 @@ Agent 是三模式（agent / plan / goal）工作台，功能按「会话 / 时�
 
 ### 6.1 功能清单
 
-实时语音通话：左侧配置面板（通话记录走侧栏），右侧通话区。本地模式 = VAD 断句 + 本地 ASR/LLM/TTS；云端模式 = Qwen Realtime 端到端语音。
+实时语音通话：左侧配置面板（通话记录走侧栏），右侧通话区。本地模式 = VAD 断句 + 本地 ASR/LLM/TTS；云端模式 = Qwen Realtime 端到端语音；omni 模式 = VAD 断句 + 整段音频直送多模态模型（如 `qwen3.8-omni-flash`）+ 本地 TTS 播报。
 
 **配置面板（左）**
 
 | # | 功能 | 实现 |
 |---|---|---|
-| V-01 | 模式切换（本地 / 云端）持久化到 `VOICE_CALL_PROVIDER` | `voice-call-screen.tsx` |
+| V-01 | 模式切换（本地 / 云端 / omni）持久化到 `VOICE_CALL_PROVIDER` | `voice-call-screen.tsx` |
 | V-02 | 云端配置引导（厂商 → 实时端点 → 模型 / 音色，保存并测试连接） | `CloudSetupGuide` |
-| V-03 | 就绪检测（模型 / ASR / TTS / 云端配置），缺项可点击跳配置 | `PreflightRow` + `voicecallPreflight` |
+| V-05 | omni 配置引导（厂商 → 多模态模型，保存并测试连接；地址与密钥都取自厂商行） | `OmniSetupGuide` + `voicecallGetOmniConfig` / `voicecallSaveOmniConfig` / `voicecallTestOmni` |
+| V-03 | 就绪检测（模型 / ASR / TTS / 云端 / omni 配置），缺项可点击跳配置；omni 下 ASR 只标注为「可选」（没配也能通话，只是没有字幕、用户那一轮落占位文本） | `PreflightRow` + `voicecallPreflight` |
 | V-04 | 拨号 / 错误展示 | `voice-call-screen.tsx` |
 
 **通话区（右）**

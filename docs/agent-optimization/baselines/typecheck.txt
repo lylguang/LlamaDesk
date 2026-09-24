@@ -1,0 +1,14 @@
+$ turbo run typecheck
+• turbo 2.8.17
+• Packages in scope: @omni-studio/landing, omni-studio
+• Running typecheck in 2 packages
+• Remote caching disabled, using shared worktree cache
+@omni-studio/landing:typecheck: cache bypass, force executing db913a12526ba6a3
+omni-studio:typecheck: cache bypass, force executing 654d46e6e885b580
+@omni-studio/landing:typecheck: $ tsc --noEmit
+omni-studio:typecheck: $ tsc --noEmit
+
+ Tasks:    2 successful, 2 total
+Cached:    0 cached, 2 total
+  Time:    13.229s 
+

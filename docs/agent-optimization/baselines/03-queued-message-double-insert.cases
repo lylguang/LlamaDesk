@@ -1,0 +1,31 @@
+apps/studio/src/bun/agent-history.test.ts::describe|buildHistoryMessages
+apps/studio/src/bun/agent-history.test.ts::describe|pairToolEvents
+apps/studio/src/bun/agent-history.test.ts::describe|planRegenerate
+apps/studio/src/bun/agent-history.test.ts::describe|planRevertToMessage
+apps/studio/src/bun/agent-history.test.ts::describe|建会话时的历史回填
+apps/studio/src/bun/agent-history.test.ts::test|start / end 按工具名配对，输出与错误标记带到调用上
+apps/studio/src/bun/agent-history.test.ts::test|删掉目标回答及其之后的一切，prompt 取它前面那条用户消息
+apps/studio/src/bun/agent-history.test.ts::test|只认工具事件：授权 / 状态 / 提问都不算工具调用
+apps/studio/src/bun/agent-history.test.ts::test|同一段历史连跑两次结果一致（纯函数，不留状态）
+apps/studio/src/bun/agent-history.test.ts::test|同名工具并行调用时按后进先出配对（结果顺序不保证）
+apps/studio/src/bun/agent-history.test.ts::test|回填的助手消息带 0 用量（别让占用条把它当成实测值）
+apps/studio/src/bun/agent-history.test.ts::test|坏掉的 args（不是 JSON）退化成空对象而不是抛错
+apps/studio/src/bun/agent-history.test.ts::test|子智能体内部的事件不进主 Agent 的历史
+apps/studio/src/bun/agent-history.test.ts::test|工具输出被截断（历史原样回填会把 8k 窗口吃光）
+apps/studio/src/bun/agent-history.test.ts::test|带工具调用的助手消息被拆成「调用 → 结果 → 正文」
+apps/studio/src/bun/agent-history.test.ts::test|最后一条助手消息：没有可删的（调用方据此报「没什么可回退的」）
+apps/studio/src/bun/agent-history.test.ts::test|末尾不是用户消息时原样返回（重新生成 / 无人值守那条路径）
+apps/studio/src/bun/agent-history.test.ts::test|末尾那条用户消息就是本轮的 prompt，要摘掉（否则任务会重复一遍）
+apps/studio/src/bun/agent-history.test.ts::test|每个 toolCall 都有对应的 toolResult（缺了真实服务会 400）
+apps/studio/src/bun/agent-history.test.ts::test|没有工具调用的会话与以前一样：只有 user / assistant 正文
+apps/studio/src/bun/agent-history.test.ts::test|目标回答之前没有用户消息：明确报错，不瞎猜
+apps/studio/src/bun/agent-history.test.ts::test|目标是中间那条回答：它之后的问答一起删（重跑就是重开这一段）
+apps/studio/src/bun/agent-history.test.ts::test|空正文的用户消息被跳过（不往历史里塞空回合）
+apps/studio/src/bun/agent-history.test.ts::test|落在助手消息上：保留这条，删它后面的（keepTarget = true）
+apps/studio/src/bun/agent-history.test.ts::test|落在用户消息上：连它一起删（那条提问要回填输入框重打）
+apps/studio/src/bun/agent-history.test.ts::test|被复用的用户消息**不在**删除区间内 —— 所以本轮不能再插一条 user 行
+apps/studio/src/bun/agent-history.test.ts::test|角色写的是别的值（tool / 空）时按助手处理：保守地保留目标那条
+apps/studio/src/bun/agent-turn.test.ts::describe|runAgentTurn 收尾返回值
+apps/studio/src/bun/agent-turn.test.ts::test|失败那一轮轨迹里仍有 error 事件，正文仍带 ⚠️（原有可见行为没动）
+apps/studio/src/bun/agent-turn.test.ts::test|模型持续报错时返回 ok: false 且带上原因
+apps/studio/src/bun/agent-turn.test.ts::test|正常成功的回合仍返回 ok: true

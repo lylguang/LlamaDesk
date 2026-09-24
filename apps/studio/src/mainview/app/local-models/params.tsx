@@ -7,12 +7,25 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@
 import { useT } from "@stores/ui-lang";
 import { type InferenceEngine } from "@/shared/modelscope";
 import { cn } from "@/mainview/lib/utils";
+import { LaunchPlanPreviewCard } from "./launch-preview";
+import type { LaunchPlan } from "@/shared/launch-planner";
+
 
 // ---------------------------------------------------------------------------
 // 启动参数
 // ---------------------------------------------------------------------------
 
-export type ParamNumberField = { key: string; labelKey: string; step?: string };
+type ParamFieldBase = { key: string; labelKey: string };
+type ParamNumberField = ParamFieldBase & {
+  step?: string;
+  /**
+   * 依赖字段的条件禁用：返回非空文案（i18n key）时该字段只读，并在输入框旁显示
+   * 「实际生效值」（用户之前手动填的值保留，依赖关闭后恢复可编辑）。只用于 llama.cpp
+   * 的自动启动参数：`SERVER_AUTO_TUNE === "1"` 时 ctx / batch / ubatch 被自动推算接管；
+   * `SERVER_PARALLEL`、采样参数、KV 缓存类型不由显存推算接管，不设此项。
+   */
+  disabledWhen?: (settings: Record<string, string>) => string | null;
+};
 type ParamSelectOption = {
   value: string;
   /** 语言无关的技术值（`q8_0` / `mmap+mlock`），也是落库的值。 */
@@ -20,21 +33,46 @@ type ParamSelectOption = {
   /** 需要解释的选项给词条；纯技术值（q8_0）用它反而啰嗦，留 label 就够。 */
   labelKey?: string;
 };
-type ParamSelectField = {
-  key: string;
-  labelKey: string;
+type ParamSelectField = ParamFieldBase & {
   /** 选项下面那行说明（有风险的参数写在这里，别让用户凭名字猜）。 */
   hintKey?: string;
   options: ParamSelectOption[];
 };
-type ParamField = (ParamNumberField & { options?: undefined }) | (ParamSelectField & { step?: undefined });
+type ParamField = ParamNumberField | ParamSelectField;
 
 export const PARAM_FIELDS: Record<InferenceEngine, ParamField[]> = {
   "llama.cpp": [
-    { key: "SERVER_CTX_SIZE", labelKey: "models.params.ctx" },
+    {
+      key: "SERVER_AUTO_TUNE",
+      labelKey: "models.params.autoTune",
+      hintKey: "models.params.autoTuneHint",
+      options: [
+        { value: "0", label: "manual", labelKey: "models.params.autoTune.manual" },
+        { value: "1", label: "auto", labelKey: "models.params.autoTune.auto" },
+      ],
+    },
+    {
+      key: "SERVER_FLASH_ATTN",
+      labelKey: "models.params.flashAttn",
+      hintKey: "models.params.flashAttnHint",
+      options: [
+        { value: "auto", label: "auto", labelKey: "models.params.flashAttn.auto" },
+        { value: "on", label: "on", labelKey: "models.params.flashAttn.on" },
+        { value: "off", label: "off", labelKey: "models.params.flashAttn.off" },
+      ],
+    },
+    { key: "SERVER_CTX_SIZE", labelKey: "models.params.ctx", disabledWhen: autoTunedField },
     { key: "SERVER_PARALLEL", labelKey: "models.params.parallel" },
-    { key: "SERVER_BATCH_SIZE", labelKey: "models.params.batch" },
-    { key: "SERVER_UBATCH_SIZE", labelKey: "models.params.ubatch" },
+    {
+      key: "SERVER_BATCH_SIZE",
+      labelKey: "models.params.batch",
+      disabledWhen: autoTunedField,
+    },
+    {
+      key: "SERVER_UBATCH_SIZE",
+      labelKey: "models.params.ubatch",
+      disabledWhen: autoTunedField,
+    },
     { key: "SERVER_TEMP", labelKey: "models.params.temp", step: "0.1" },
     { key: "SERVER_TOP_P", labelKey: "models.params.topP", step: "0.05" },
     { key: "SERVER_TOP_K", labelKey: "models.params.topK" },
@@ -116,11 +154,16 @@ function ParamInput({
   value,
   step,
   onCommit,
+  disabled,
+  disabledNote,
 }: {
   label: string;
   value: string;
   step?: string;
   onCommit: (value: string) => void;
+  disabled?: boolean;
+  /** 只读时的旁注（i18n key）；值本身保留，只挡编辑。 */
+  disabledNote?: string;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
@@ -131,6 +174,7 @@ function ParamInput({
         type="number"
         step={step}
         value={draft}
+        disabled={disabled}
         onChange={(e) => setDraft(e.target.value)}
         onBlur={() => {
           if (draft.trim() !== "" && draft !== value) onCommit(draft.trim());
@@ -141,8 +185,43 @@ function ParamInput({
         }}
         className="h-8 text-xs"
       />
+      {disabled && disabledNote !== undefined && (
+        <span className="text-[10px] leading-relaxed text-muted-foreground/70">{disabledNote}</span>
+      )}
     </label>
   );
+}
+
+/**
+ * 自动启动参数接管的那三个字段（ctx / batch / ubatch）：开启自动后只读。
+ * 返回只读旁注的 i18n key（不是值本身）；返回 null = 可正常编辑。
+ * `SERVER_PARALLEL`、采样参数、KV 缓存类型都不由显存推算接管，不列在这里。
+ */
+function autoTunedField(settings: Record<string, string>): string | null {
+  return settings.SERVER_AUTO_TUNE === "1" ? "models.params.autoTuned" : null;
+}
+
+/**
+ * 自动接管时输入框旁的实际生效值（i18n key 由 `autoTunedField` 提供，这里只给
+ * `{ value }` 参数）：以 `plan`（计划预览）优先 —— 它才是「真正会用的那份」；
+ * 没有计划（RPC 未返回 / 失败）时回落到设置里的值，避免用户对着空值发呆。
+ * 返回 null = 不显示旁注（未接管或无值）。
+ */
+function autoTunedNoteParam(settings: Record<string, string>, key: string, plan?: LaunchPlan | null): { value: string } | null {
+  if (settings.SERVER_AUTO_TUNE !== "1") return null;
+  let value: string | undefined;
+  if (plan) {
+    value =
+      key === "SERVER_CTX_SIZE"
+        ? String(plan.ctxTokens)
+        : key === "SERVER_BATCH_SIZE"
+          ? String(plan.batch)
+          : key === "SERVER_UBATCH_SIZE"
+            ? String(plan.ubatch)
+            : undefined;
+  }
+  if (value === undefined) value = settings[key];
+  return value !== undefined && value !== "" ? { value } : null;
 }
 
 /** 当前引擎的启动参数（上下文长度等），改完即写入设置，下一次启动/重启推理服务器时生效。 */
@@ -157,6 +236,32 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
   const settings = data?.settings ?? {};
   const fields = PARAM_FIELDS[engine];
 
+  // 自动启动参数开启 + llama.cpp + 已有选中模型时，参数面板上方展示一张计划预览卡。
+  // 模型路径取「当前聊天模型」设置（LOCAL_MODEL_PATH），与启动条同源。
+  const autoTuneOn = engine === "llama.cpp" && settings.SERVER_AUTO_TUNE === "1";
+  const activePath = (settings.LOCAL_MODEL_PATH ?? "").trim();
+
+  // 被自动接管的三个字段（ctx / batch / ubatch）需要「真正会用的那份」值做旁注；
+  // 与预览卡共用同一个 RPC 结果，避免重复请求（query key 相同 → TanStack 去重）。
+  const planQuery = useQuery({
+    queryKey: [
+      "launch-plan-preview",
+      activePath,
+      settings.SERVER_AUTO_TUNE,
+      settings.SERVER_PARALLEL,
+      settings.SERVER_BATCH_SIZE,
+      settings.SERVER_UBATCH_SIZE,
+      settings.SERVER_CACHE_TYPE_K,
+      settings.SERVER_CACHE_TYPE_V,
+      settings.SERVER_FLASH_ATTN,
+      settings.SERVER_FLASH_ATTN_EFFECTIVE,
+      settings.SERVER_AUTO_TUNE_MIN_CTX,
+    ],
+    queryFn: () => rpcClient.getLaunchPlanPreview({ path: activePath }),
+    enabled: autoTuneOn && activePath !== "",
+  });
+  const plan = planQuery.data?.ok ? planQuery.data.plan : undefined;
+
   const saveMutation = useMutation({
     mutationFn: (patch: Record<string, string>) => rpcClient.updateSettings({ settings: patch }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
@@ -165,7 +270,9 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
   const commit = (patch: Record<string, string>) => saveMutation.mutate(patch);
 
   return (
-    <div className="flex flex-col gap-2 rounded-lg border p-3">
+    <div className="flex flex-col gap-2">
+      {autoTuneOn && activePath !== "" && <LaunchPlanPreviewCard modelPath={activePath} settings={settings} />}
+      <div className="flex flex-col gap-2 rounded-lg border p-3">
       <button
         type="button"
         onClick={() => setOpen((v) => !v)}
@@ -179,24 +286,28 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
       {open && (
         <div className="flex flex-col gap-3">
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4">
-            {fields.map((f) =>
-              f.options ? (
+            {fields.map((f) => {
+              const dw = "disabledWhen" in f ? f.disabledWhen : undefined;
+              const noteKey = typeof dw === "function" ? dw(settings) : null;
+              const disabled = noteKey !== null;
+              return "options" in f ? (
                 <label key={f.key} className="flex flex-col gap-1">
                   <span className="text-[11px] text-muted-foreground">{t(f.labelKey)}</span>
                   <Select
                     value={settings[f.key] ?? f.options[0]?.value}
-                    onValueChange={(v) =>
+                    onValueChange={(v) => {
+                      if (disabled) return;
                       commit(
                         f.key === "SERVER_CACHE_TYPE_K" ? { SERVER_CACHE_TYPE_K: v, SERVER_CACHE_TYPE_V: v } : { [f.key]: v },
-                      )
-                    }
+                      );
+                    }}
                   >
-                    <SelectTrigger className="h-8 text-xs">
+                    <SelectTrigger className="h-8 text-xs" disabled={disabled}>
                       <SelectValue />
                     </SelectTrigger>
                     <SelectContent>
                       {f.options.map((o) => (
-                        <SelectItem key={o.value} value={o.value}>
+                        <SelectItem key={o.value} value={o.value} disabled={disabled}>
                           {o.labelKey ? t(o.labelKey) : o.label}
                         </SelectItem>
                       ))}
@@ -208,16 +319,28 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
                     </span>
                   )}
                 </label>
-              ) : (
+                ) : (
                 <ParamInput
                   key={f.key}
                   label={t(f.labelKey)}
                   value={settings[f.key] ?? ""}
-                  step={f.step}
-                  onCommit={(v) => commit({ [f.key]: v })}
+                  step={"step" in f ? f.step : undefined}
+                  disabled={disabled}
+                  disabledNote={
+                    disabled && noteKey !== null
+                      ? (() => {
+                          const param = autoTunedNoteParam(settings, f.key, plan);
+                          return param === null ? t(noteKey) : t(noteKey, param);
+                        })()
+                      : undefined
+                  }
+                  onCommit={(v) => {
+                    if (disabled) return;
+                    commit({ [f.key]: v });
+                  }}
                 />
-              ),
-            )}
+              );
+            })}
           </div>
 
           <div className="flex flex-col gap-2 border-t pt-3">
@@ -252,6 +375,7 @@ export function ServerParamsPanel({ engine }: { engine: InferenceEngine }) {
           </div>
         </div>
       )}
+      </div>
     </div>
   );
 }

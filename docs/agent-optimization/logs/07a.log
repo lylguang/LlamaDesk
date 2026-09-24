@@ -1,0 +1,111 @@
+Warning: No project session found with id 'omni-agent-07a'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent-hooks.ts`**（`runHook` + 常量区，共 7 行改动）
+
+1. 常量区加：
+```ts
+/** 单个环境变量有长度上限（Linux 实测 128KB 处抛 E2BIG）。留一半余量。 */
+const MAX_PAYLOAD_ENV_BYTES = 64 * 1024;
+```
+
+2. `runHook` 里 `Bun.spawn` 的 `env`，原来是无条件 `OMNI_HOOK_PAYLOAD: serialized`，改为：
+```ts
+OMNI_HOOK_EVENT: hook.event,
+...(Buffer.byteLength(serialized, "utf8") <= MAX_PAYLOAD_ENV_BYTES ? { OMNI_HOOK_PAYLOAD: serialized } : {}),
+OMNI_HOOK_PAYLOAD_BYTES: String(Buffer.byteLength(serialized, "utf8")),
+```
+语义：负载字节数 ≤ 64KB 时 `OMNI_HOOK_PAYLOAD` 照设；超过则不设这个变量（完整内容仍在 stdin）；无论哪种情况都设 `OMNI_HOOK_PAYLOAD_BYTES`（负载字节数的字符串形式）。stdin 那一行（`proc.stdin.write(serialized)`）原样未动。
+
+**`apps/studio/src/bun/agent-hooks.test.ts`**（只加用例，现有 12 条 `test` 一条没动；文件含 3 个 `describe`）
+
+新增 4 条，全在「单条 hook 的契约」describe 末尾：
+- 负载 200KB（> 64KB 阈值，且 > 128KB E2BIG 线）时钩子能起来，python3 从 stdin 读到的长度 == `Buffer.byteLength(JSON.stringify(payload))`；
+- 负载 200KB 时 `OMNI_HOOK_PAYLOAD` 不存在、`OMNI_HOOK_PAYLOAD_BYTES` 数值正确、`OMNI_HOOK_EVENT` 照在；
+- 小负载时 `OMNI_HOOK_PAYLOAD` 照旧存在、与 stdin 内容相等、字节数字段正确；
+- 多字节用例：50KB 中文字符（150KB 字节，字符数 ≤ 64KB 但字节数 > 64KB）时同样不设 payload env——专门钉住「用字节数而不是字符数判断」这一点。
+
+（大负载用了 200KB 而不是任务建议的 100KB：100KB 在本机（bun 1.4.2，完整 env 约 73 个变量）实测仍能 spawn 成功，红不出来；128KB 裸 env 的 E2BIG 线在本机随其它 env 大小浮动。）
+
+### 2 先红后绿的证据
+
+红（新增 4 条用例 + **源码还原为 HEAD 原样**后跑，输出原样粘贴）：
+
+```
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+apps/studio/src/bun/agent-hooks.test.ts:
+...
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-hooks.test.ts:299:26)
+(fail) 单条 hook 的契约 > 字节数不是字符数：多字节（中文）负载在字节上限之上时同样不设 OMNI_HOOK_PAYLOAD [1.30ms]
+
+ 12 pass
+ 4 fail
+ 52 expect() calls
+Ran 16 tests across 1 file. [3.02s]
+```
+
+其中核心的一条（第 1 条，缺陷本体）失败输出：
+
+```
+233 |     const result = await runHook(hook(`python3 -c 'import sys; d=sys.stdin.read(); print(len(d))'`), payload);
+234 |     expect(result.error).toBeUndefined();
+                               ^
+error: expect(received).toBeUndefined()
+
+Received: "启动失败：E2BIG: argument list too long, posix_spawn '/usr/bin/zsh'"
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-hooks.test.ts:234:26)
+(fail) 单条 hook 的契约 > 负载超过 64KB 时钩子仍然跑得起来，stdin 拿到的是完整负载 [1.14ms]
+```
+
+绿（源码改完后跑，输出原样粘贴）：
+
+```
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+ 16 pass
+ 0 fail
+ 56 expect() calls
+Ran 16 tests across 1 file. [2.54s]
+```
+
+另外按任务第 7 条做过变异自检：把源码里两处 `Buffer.byteLength(serialized, "utf8")` 换成 `serialized.length` 后，14 pass / 2 fail（多字节用例 E2BIG 变红，小负载用例字节数字段变错）——说明新用例能抓住「按字符数判断」这种近似写法，不只是抓整段回退。
+
+### 3 用例数量
+
+`apps/studio/src/bun/agent-hooks.test.ts`：编辑前 12 条 `test`（3 个 `describe`，gate 基线文件 15 行）→ 编辑后 16 条 `test`（3 个 `describe`，gate 采集 19 行）。只增不删，基线 15 行全在（gate `cases-missing none`）。
+
+### 4 验收门输出
+
+```
+GATE: id=07a-hook-payload-env mode=self head=58d4a64
+GATE: out-of-bounds none
+GATE: size source-lines=7 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=15 now=19)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (16 pass)
+GATE: RESULT PASS id=07a-hook-payload-env
+```
+
+### 5 逐项自检
+
+- [x] **完成** 大负载下钩子能正常启动——200KB 负载用例，改前 E2BIG 红、改后绿。
+- [x] **完成** stdin 仍然拿到完整负载——200KB 用例里 python3 从 stdin 读到的长度与 `Buffer.byteLength(JSON.stringify(payload))` 精确相等。
+- [x] **完成** 超限时不设 `OMNI_HOOK_PAYLOAD`，不超限时照设——200KB 用例断言该变量不存在；小负载用例断言它存在且与 stdin 内容相等。
+- [x] **完成** `OMNI_HOOK_PAYLOAD_BYTES` 总是存在且数值正确——超限用例、小负载用例、多字节用例都断言了该值与 `Buffer.byteLength` 相等。
+- [x] **完成** 用 `Buffer.byteLength` 判断，不是 `.length`——源码用 `Buffer.byteLength(serialized, "utf8")`；变异检查（换成 `.length`）测试变红（见第 2 节末段）。
+- [x] **完成** 「不要做的事」一条都没做——stdin 那两行（157–159）原样；超时 / SIGTERM / SIGKILL / stdout·stderr 解析段未动；「启动失败返回 `blocked:false`」未动；`parseHookConfigs` / `hookConfigs` / `hooksFor` 未动。`git diff --stat`：只有白名单内两个文件。
+- [x] **完成** 既有 14 条用例一条没删没改——`test` 从 12 → 16（只增 4 条），基线 15 行全保留。
+- [x] **完成** 把 `agent-hooks.ts` 还原后第 1 条用例变红——自己试了：还原到 HEAD 后跑，第 1 条报 `启动失败：E2BIG: argument list too long, posix_spawn '/usr/bin/zsh'`（见第 2 节红输出）。
+- [x] **完成** 源码改动不超过 25 行——`git diff` 7 行（2 行常量 + 5 行 env，净增 6 行）。
+
+### 6 我拿不准的地方
+
+1. **100KB 在本机红不出来**：任务说「128KB 的环境变量 → E2BIG」，但本机 bun 1.4.2 下完整 env（~73 个变量）+ 100KB 单变量仍能 spawn 成功，127–128KB 的 E2BIG 边界只在小 env 下可复现。为了让第 1 条用例真正红，我把大负载放大到 200KB（任何环境都稳超线）。如果调度方认为必须严格用 100KB，告诉我，我可以改回（但那样该用例在本机是空转的绿）。
+2. **任务说「既有 14 条用例」，文件里实际是 12 条 `test`**（外加 3 个 `describe`；12+3=15 与 gate 基线行数一致）。我按「12 条 test 一条没动」执行，基线校验也全过。如果「14」另有计数口径，请指出。
+3. 计时敏感的那条「stdout 不是 JSON → 整段当上下文」在本次所有运行中都是绿的，没抖到，无需说明。

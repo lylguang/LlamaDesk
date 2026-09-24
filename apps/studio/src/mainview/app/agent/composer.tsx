@@ -283,7 +283,6 @@ export function AgentComposer({
 }) {
   const t = useT();
   const queryClient = useQueryClient();
-  const activeMessages = useChatStore((s) => s.activeMessages);
   const streaming = useChatStore((s) => s.streaming);
   const running = useAgentStore((s) => s.running);
   const workspace = useAgentStore((s) => s.workspace);
@@ -321,8 +320,8 @@ export function AgentComposer({
   }, [pendingPrompt]);
 
   const busy = running || streaming;
-  const canSend =
-    (input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0) && !busy;
+  /** 有内容就能发：运行中点它是「排队」（见 handleSend 的 busy 分支），不是打断。 */
+  const canSend = input.trim().length > 0 || attachments.length > 0 || fileAttachments.length > 0;
 
   const compactMutation = useMutation({
     mutationFn: () => rpcClient.compactAgentConversation({ conversationId }),
@@ -490,8 +489,9 @@ export function AgentComposer({
     setFileAttachments([]);
     requestAnimationFrame(autoResize);
     const now = Date.now();
+    const current = useChatStore.getState().activeMessages;
     useChatStore.getState().setActiveMessages([
-      ...activeMessages,
+      ...current,
       { id: now, conversationId, role: "user", content, images, createdAt: now },
     ]);
     useChatStore.getState().setStreaming(true);

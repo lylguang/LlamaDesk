@@ -10,7 +10,7 @@ import { ScrollArea } from "@ui/scroll-area";
 import { useRouter } from "@stores/router";
 import { useModelDetailStore } from "@stores/model-detail";
 import { useT } from "@stores/ui-lang";
-import { MODEL_SOURCES, MODEL_SOURCE_META, classifyModel, fileBaseName, matchQuant, safeRepoId, type MarketFile, type ModelCategory, type ModelSource } from "../../../shared/modelscope";
+import { MODEL_SOURCES, MODEL_SOURCE_META, classifyModel, fileBaseName, isMmprojFileName, matchQuant, safeRepoId, type MarketFile, type ModelCategory, type ModelSource } from "../../../shared/modelscope";
 import { ModelFileKind } from "../../../shared/modelscope";
 import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectValue } from "@ui/select";
 import { PageShell } from "@components/setting-ui";
@@ -83,7 +83,9 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     }
     // No quant match (or a search result): fall back to the largest weight
     // file — works for GGUF / safetensors / bin / pt / onnx / ckpt.
-    const weights = visibleFiles.filter((f) => f.isWeight);
+    // mmproj 不算：它是投影配件，不是能加载的模型 —— 推荐位必须是权重本身
+    // （投影文件由下载卡按 targets 一起带上，见 download-button.tsx）。
+    const weights = visibleFiles.filter((f) => f.isWeight && !isMmprojFileName(f.name));
     if (weights.length === 0) return null;
     return weights.reduce<MarketFile>(
       (best, f) => (best.size < f.size ? f : best),
@@ -146,6 +148,12 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
     mutationFn: async () => {
       // 小文件优先：config / tokenizer / index 这些几 KB 的先下完，模型目录立刻
       // 具备可读性，几个 GB 的权重分片排在最后（后端队列也会按体积重排兜底）。
+      // 仓库清单（path + size）随任务带下去：下载开跑前写成 manifest，完成后拿它比对磁盘。
+      const manifestFiles = [...visibleFiles, ...supportFiles].map((f) => ({
+        path: f.path,
+        name: f.name,
+        size: f.size,
+      }));
       for (const f of sortBySizeAsc(pendingFiles)) {
         await rpcClient.startModelDownload({
           repo: repo!,
@@ -153,6 +161,7 @@ export function ModelDetailScreen({ onBack }: { onBack?: () => void } = {}) {
           category: category ?? undefined,
           source: modelSource,
           size: f.size,
+          manifestFiles,
         });
       }
     },

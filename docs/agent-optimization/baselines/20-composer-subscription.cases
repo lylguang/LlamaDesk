@@ -1,0 +1,14 @@
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/goal 回车切模式
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/goal 点发送按钮同样切模式（旧行为会把 
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/init 回车把预置提示词发出去
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/omni-doctor 回车：把排障任务书发给模型（技能正文由模型 read_skill 取）
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/omni-doctor 带现象：现象原样带进任务书，不让用户再打一遍
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|命令后面带参数但没声明 takesArgs：当成普通消息发出去，不静默吞话
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|在补全面板里输入 omni-do 能看到 /omni-doctor
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|点发送按钮跑 /omni-doctor：走的是命令，不是把命令当消息发出去
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|会话已聊过：换另一个文件夹 → 在新目录里开新会话并切过去
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|会话已聊过：换成「默认工作区」也开新会话（那条会话跟随全局）
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|「打开文件夹…」走同一条路：选完目录就是在那儿开新会话
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|空白会话：就地改挂，不再攒一条空白会话
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|菜单里写清语义：换工作区会开新会话（不出现 i18n key 原文）
+apps/studio/src/mainview/app/agent/composer-workspace.test.tsx::test|选的正是当前所在的工作区：什么都不做，只是收起菜单

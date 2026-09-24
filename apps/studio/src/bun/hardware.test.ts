@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
 import { readAppLogsInMemory } from "./app-log";
-import { detectHardware, getHardwareInfo, type CommandRunner } from "./hardware";
+import { detectHardware, getHardwareInfo, type CommandRunner, type SysfsReader } from "./hardware";
 
 /**
  * 探测路径按平台各走一遍。命令与系统信息都是注入的，不依赖跑测试的这台机器
@@ -28,7 +28,22 @@ function fakeRunner(answers: Record<string, Answer>): CommandRunner & { calls: s
   };
 }
 
+/**
+ * sysfs 注入口：按前缀查一张 `path → 内容` 表，没登记的返回 null（读不到）。
+ * `calls` 记下每次读的 path，用来断言「根本没碰 sysfs」。
+ */
+function fakeSysfs(files: Record<string, string>) {
+  const calls: string[] = [];
+  const read: SysfsReader = (path) => {
+    calls.push(path);
+    const match = Object.keys(files).find((k) => path.startsWith(k));
+    return match ? files[match] ?? null : null;
+  };
+  return { calls, read };
+}
+
 const GB = 1e9;
+const GiB = 1024 ** 3;
 
 describe("detectHardware", () => {
   test("Apple 芯片：芯片名取自 sysctl，GPU 按统一内存处理，不再跑显卡探测命令", () => {
@@ -50,7 +65,7 @@ describe("detectHardware", () => {
     expect(info.chipVendor).toBe("apple");
     expect(info.modelId).toBe("Mac15,14");
     expect(info.cpuCores).toBe(32);
-    expect(info.gpu).toEqual({ kind: "apple", name: "Apple M3 Ultra", vramBytes: null });
+    expect(info.gpu).toEqual({ kind: "apple", name: "Apple M3 Ultra", vramBytes: null, unifiedMemory: true });
     expect(info.budgetBasis).toBe("unified");
     expect(info.budgetBytes).toBe(Math.round(512 * GB * 0.75));
     // Apple 芯片的 GPU 就是芯片本身：nvidia-smi / system_profiler 都不该被调用
@@ -138,11 +153,11 @@ describe("detectHardware", () => {
   });
 
   test("Linux 没有 nvidia-smi：正常降级，不写告警（那是最常见的情况）", () => {
-    const runner = fakeRunner({});
     const info = detectHardware({
       platform: "linux",
       arch: "x64",
-      runner,
+      runner: fakeRunner({}),
+      readSysFile: fakeSysfs({}).read,
       cpuList: [{ model: "Intel(R) Xeon(R) Silver 4110" }],
       totalMemoryBytes: 32 * GB,
       freeMemoryBytes: 8 * GB,
@@ -164,6 +179,7 @@ describe("detectHardware", () => {
       platform: "linux",
       arch: "x64",
       runner,
+      readSysFile: fakeSysfs({}).read,
       cpuList: [{ model: "Intel(R) Xeon(R) Silver 4110" }],
       totalMemoryBytes: 32 * GB,
       freeMemoryBytes: 8 * GB,
@@ -191,6 +207,176 @@ describe("detectHardware", () => {
     expect(
       readAppLogsInMemory({ source: "app", event: "hardware.chip.probe_failed" }).length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("detectHardware AMD (ROCm)", () => {
+  const linux = (options: {
+    runner?: CommandRunner;
+    sysfs?: { calls: string[]; read: SysfsReader };
+    total?: number;
+  } = {}) =>
+    detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner: options.runner ?? fakeRunner({}),
+      readSysFile: (options.sysfs ?? fakeSysfs({})).read,
+      cpuList: [{ model: "AMD Ryzen AI MAX+ 395" }],
+      totalMemoryBytes: options.total ?? 128 * GB,
+      freeMemoryBytes: 64 * GB,
+    });
+
+  test("本机这台 APU：sysfs 专用分区 512MiB + GTT 120GiB → 统一内存，vramBytes 给 null", () => {
+    const sysfs = fakeSysfs({
+      "/sys/class/drm/card0/device/mem_info_vram_total": "536870912",
+      "/sys/class/drm/card0/device/mem_info_gtt_total": "128849018880",
+      "/sys/class/drm/card0/device/uevent":
+        "DRIVER=amdgpu\nPCI_ID=1002:1586\nPCI_SLOT_NAME=0000:c6:00.0\nMODALIAS=pci:v00001002d00001586sv00001F66sd00000030bc03sc80i00\n",
+      "/sys/class/drm/card0/device/vendor": "0x1002\n",
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner: fakeRunner({}),
+      readSysFile: sysfs.read,
+      cpuList: [{ model: "AMD Ryzen AI MAX+ 395" }],
+      totalMemoryBytes: 128 * GB,
+      freeMemoryBytes: 64 * GB,
+    });
+
+    expect(info.gpu.kind).toBe("amd");
+    expect(info.gpu.unifiedMemory).toBe(true);
+    expect(info.gpu.vramBytes).toBeNull();
+    expect(info.gpu.name).toBe("amdgpu (1002:1586)");
+    expect(info.budgetBasis).toBe("unified");
+    expect(info.budgetBytes).toBe(Math.round(128 * GB * 0.75));
+  });
+
+  test("真独显（24GiB、无 GTT 文件）：vramBytes 照旧，unifiedMemory false，预算按显存", () => {
+    const sysfs = fakeSysfs({
+      "/sys/class/drm/card0/device/mem_info_vram_total": String(24 * GiB),
+      "/sys/class/drm/card0/device/uevent": "DRIVER=amdgpu\nPCI_ID=1002:740c\n",
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner: fakeRunner({}),
+      readSysFile: sysfs.read,
+      cpuList: [{ model: "AMD Ryzen 9 7950X" }],
+      totalMemoryBytes: 64 * GB,
+      freeMemoryBytes: 32 * GB,
+    });
+
+    expect(info.gpu).toEqual({
+      kind: "amd",
+      name: "amdgpu (1002:740c)",
+      vramBytes: 24 * GiB,
+      unifiedMemory: false,
+    });
+    expect(info.budgetBasis).toBe("vram");
+    expect(info.budgetBytes).toBe(Math.round(24 * GiB * 0.9));
+  });
+
+  test("小显存但 GTT 也小（1GiB / 0）：仍判统一内存（走 2GiB 阈值那一支）", () => {
+    const sysfs = fakeSysfs({
+      "/sys/class/drm/card0/device/mem_info_vram_total": String(GiB),
+      "/sys/class/drm/card0/device/uevent": "DRIVER=amdgpu\nPCI_ID=1002:1234\n",
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner: fakeRunner({}),
+      readSysFile: sysfs.read,
+      cpuList: [{ model: "AMD Ryzen 7" }],
+      totalMemoryBytes: 32 * GB,
+      freeMemoryBytes: 16 * GB,
+    });
+
+    expect(info.gpu.kind).toBe("amd");
+    expect(info.gpu.unifiedMemory).toBe(true);
+    expect(info.gpu.vramBytes).toBeNull();
+    expect(info.budgetBasis).toBe("unified");
+  });
+
+  test("sysfs 全读不到、rocm-smi 有输出：从 JSON 解析，走同样的判定", () => {
+    const runner = fakeRunner({
+      "rocm-smi --showmeminfo vram --json": {
+        code: 0,
+        stdout: JSON.stringify({
+          card0: { "VRAM Total Memory (B)": "536870912", "VRAM Total Used Memory (B)": "490381312" },
+        }),
+      },
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner,
+      readSysFile: fakeSysfs({}).read,
+      cpuList: [{ model: "AMD Ryzen AI MAX+ 395" }],
+      totalMemoryBytes: 128 * GB,
+      freeMemoryBytes: 64 * GB,
+    });
+
+    expect(info.gpu.kind).toBe("amd");
+    expect(info.gpu.name).toBe("AMD GPU (card0)");
+    expect(info.gpu.unifiedMemory).toBe(true);
+    expect(info.gpu.vramBytes).toBeNull();
+  });
+
+  test("sysfs 和 rocm-smi 都没有：保持现有 none 行为，不抛异常、不记 AMD 告警", () => {
+    const info = linux();
+    expect(info.gpu.kind).toBe("none");
+    expect(info.budgetBasis).toBe("system");
+    expect(readAppLogsInMemory({ event: "hardware.gpu.amd_probe_failed" })).toHaveLength(0);
+  });
+
+  test("NVIDIA 优先：nvidia-smi 有输出时不碰 AMD 探测（sysfs 一次都没被读）", () => {
+    const sysfs = fakeSysfs({
+      "/sys/class/drm/card0/device/mem_info_vram_total": "536870912",
+    });
+    const runner = fakeRunner({
+      "nvidia-smi --query-gpu=name,memory.total --format=csv,noheader,nounits": {
+        code: 0,
+        stdout: "NVIDIA GeForce RTX 4090, 24564\n",
+      },
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner,
+      readSysFile: sysfs.read,
+      cpuList: [{ model: "AMD Ryzen 9 7950X" }],
+      totalMemoryBytes: 64 * GB,
+      freeMemoryBytes: 32 * GB,
+    });
+
+    expect(info.gpu.kind).toBe("nvidia");
+    expect(sysfs.calls).toHaveLength(0);
+    expect(runner.calls.some((c) => c.startsWith("rocm-smi"))).toBe(false);
+  });
+
+  test("多张卡：card0 报 512MiB、card1 报 16GiB → 选 card1，unifiedMemory false", () => {
+    const sysfs = fakeSysfs({
+      "/sys/class/drm/card0/device/mem_info_vram_total": "536870912",
+      "/sys/class/drm/card0/device/mem_info_gtt_total": "128849018880",
+      "/sys/class/drm/card0/device/uevent": "DRIVER=amdgpu\nPCI_ID=1002:1586\n",
+      "/sys/class/drm/card1/device/mem_info_vram_total": String(16 * GiB),
+      "/sys/class/drm/card1/device/uevent": "DRIVER=amdgpu\nPCI_ID=1002:7442\n",
+    });
+    const info = detectHardware({
+      platform: "linux",
+      arch: "x64",
+      runner: fakeRunner({}),
+      readSysFile: sysfs.read,
+      cpuList: [{ model: "AMD Ryzen 9" }],
+      totalMemoryBytes: 64 * GB,
+      freeMemoryBytes: 32 * GB,
+    });
+
+    expect(info.gpu.kind).toBe("amd");
+    expect(info.gpu.name).toBe("amdgpu (1002:7442)");
+    expect(info.gpu.vramBytes).toBe(16 * GiB);
+    expect(info.gpu.unifiedMemory).toBe(false);
   });
 });
 

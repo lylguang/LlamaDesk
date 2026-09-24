@@ -27,6 +27,7 @@ import { PageHeader, SettingsSection } from "@components/setting-ui";
 import { ENGINE_PHASE_LABEL, isEngineInstallRunning, useEngineInstallStore } from "@stores/engine-install";
 import { useT } from "@stores/ui-lang";
 import { useAppStore } from "@stores/app";
+import { useRouter } from "@stores/router";
 import { cn } from "@lib/utils";
 import {
   LOCAL_ENGINE_CATEGORIES,
@@ -217,6 +218,12 @@ function EngineRow({
       onOpenModelsTab?.();
       return;
     }
+    /*
+     * 必须先离开设置页：内容区是按 `route.path` 分发的，停在 settings 上时只改
+     * activeApp 什么都不会发生 —— 按钮写着「管理模型」，点下去页面一动不动。
+     * （这条对语音 / OCR / 图像 / JEV 四个目标都一样；返回值由 app-rail 那套同款调用对齐。）
+     */
+    useRouter.getState().setRoute({ path: "index" });
     setActiveApp(spec.modelsTarget);
   };
 

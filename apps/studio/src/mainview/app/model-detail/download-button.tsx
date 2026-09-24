@@ -13,7 +13,7 @@ import { Button } from "@ui/button";
 import { Badge } from "@ui/badge";
 import { useModelDownloadStore } from "@stores/model-download";
 import { useT } from "@stores/ui-lang";
-import { MODEL_SOURCE_META, fileBaseName, type MarketFile, type ModelSource } from "../../../shared/modelscope";
+import { MODEL_SOURCE_META, fileBaseName, isMmprojFileName, type MarketFile, type ModelSource } from "../../../shared/modelscope";
 import { installedFilesForRepo } from "@/mainview/lib/installed-models";
 import {
   dedupeByFile,
@@ -81,21 +81,33 @@ export function ModelDownloadCard({
   // 别的仓库里有同名分片不算数（否则会直接把这张卡显示成已下载、跳过真正的权重）。
   const installedNames = installedFilesForRepo(installed.data?.models ?? [], repo);
 
+  // GGUF 仓库的每个量化是能独立跑的模型，`targets` 因此退化成单个文件 ——
+  // **但要带上投影文件（mmproj）**：多模态 GGUF 的视觉塔就装在这个独立文件里，
+  // 只下权重的话模型起得来、纯文本也正常，一上传图片就会被服务端拒（现场就是
+  // 「提示缺 mmproj，可文件明明下过了」）。它是这张卡的一部分，不是仓库里另一件事。
+  const projectors = repoFiles.filter((f) => f.kind === "gguf" && isMmprojFileName(f.name));
   const singleFile = file.kind === "gguf";
-  const targets = singleFile ? [file] : repoFiles.length > 0 ? repoFiles : [file];
+  const targets = singleFile
+    ? [file, ...projectors.filter((p) => fileBaseName(p.name) !== fileBaseName(file.name))]
+    : repoFiles.length > 0
+      ? repoFiles
+      : [file];
   const isInstalled = targets.every((f) => installedNames.has(fileBaseName(f.name)));
+  // 还缺哪些：已下好的文件不再排一次队（同仓库的量化与投影文件可能一半已在盘上，
+  // 「补队列」只该补真正缺的），进度分母也按「还缺的」算，不该被已下好的拉低。
+  const wanted = targets.filter((f) => !installedNames.has(fileBaseName(f.name)));
 
   // 只看这张卡要下的那几个文件的任务：同一个仓库里别的量化在下载不该算进来。
   // 同名的多条任务按「进展最靠前」留一条：失败后重下会留下「旧的 failed + 新的
   // completed」两条，不去重会让模型永远顶着「失败」（与下载面板同一套口径）。
-  const targetNames = new Set(targets.map((f) => f.name));
+  const targetNames = new Set(wanted.map((f) => f.name));
   const relevant = dedupeByFile(
     tasks.filter((task) => task.repo === repo && targetNames.has(task.fileName)),
   );
   // 从没排过队的文件：磁盘上还有没下的权重（别的仓库里的同名分片不算数，见
   // installedFilesForRepo），而任务列表里根本没有它 —— 陈旧的失败卡片就是这种现场，
   // 光点「重试失败的文件」永远补不齐，模型也就一直跑不起来。
-  const missing = targets.filter((f) => !relevant.some((task) => task.fileName === f.name));
+  const missing = wanted.filter((f) => !relevant.some((task) => task.fileName === f.name));
   // 进度按「这个模型要下的全部文件」算：缺的文件按 0 计入分子、按市场给的体积计入分母，
   // 否则一张半拉子卡片会显示成快下完了。
   const all = [...relevant, ...missing.map((f) => placeholderTask(repo, f, source))];
@@ -108,13 +120,17 @@ export function ModelDownloadCard({
   const invalidate = () => queryClient.invalidateQueries({ queryKey: ["model-downloads"] });
   const start = useMutation({
     mutationFn: async () => {
-      for (const f of sortBySizeAsc(targets)) {
+      // 整仓库下载带全量清单（含已下完的文件）：manifest 是仓库级完整清单，
+      // 完成比对才拿得出「缺哪些」。
+      const manifestFiles = targets.map((f) => ({ path: f.path, name: f.name, size: f.size }));
+      for (const f of sortBySizeAsc(wanted)) {
         await rpcClient.startModelDownload({
           repo,
           fileName: f.name,
           category: category ?? undefined,
           source,
           size: f.size,
+          manifestFiles,
         });
       }
     },
@@ -152,6 +168,7 @@ export function ModelDownloadCard({
           category: category ?? undefined,
           source,
           size: f.size,
+          manifestFiles: targets.map((f) => ({ path: f.path, name: f.name, size: f.size })),
         });
       }
     },

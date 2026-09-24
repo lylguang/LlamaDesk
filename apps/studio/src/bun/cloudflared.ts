@@ -16,6 +16,7 @@ import { join } from "path";
 import { logEvent } from "./app-log";
 import { fetchAssetFromSources, githubReleaseUrls } from "./mirror-download";
 import { getDataDir } from "./paths";
+import { removeManifest, writeManifest } from "./install-manifest";
 
 /**
  * 安装的 cloudflared 版本。**升级时刻意改动这里**：cloudflared 是安全敏感组件，
@@ -183,12 +184,27 @@ export async function installCloudflared(): Promise<{ ok: boolean; error?: strin
   installing = true;
   const staging = join(cloudflaredRootDir(), `.staging-${process.pid}`);
   try {
+    // 动任何文件之前先清掉上次的 manifest（与安装完成时的写入配对）。
+    if (!removeManifest(cloudflaredRootDir())) {
+      const error = `无法清除上次的安装记录，请检查 ${cloudflaredRootDir()} 是否被占用或只读`;
+      emitInstallLog(`${error}\n`);
+      return { ok: false, error };
+    }
     const result = await runCloudflaredInstall(staging);
     // 收尾行沿用引擎安装的既有约定（`安装成功：…` / `… 安装失败`）：前端
     // install-log.ts 靠它判断"这批日志里有没有终态"，决定要不要刷新二进制状态。
     emitInstallLog(
       result.ok ? `安装成功：cloudflared ${result.version ?? CLOUDFLARED_VERSION}\n` : "cloudflared 安装失败\n",
     );
+    if (result.ok) {
+      writeManifest(cloudflaredRootDir(), {
+        engine: "cloudflared",
+        version: result.version ?? CLOUDFLARED_VERSION,
+        platform: process.platform,
+        arch: process.arch,
+        steps: 2,
+      });
+    }
     return result;
   } finally {
     installing = false;

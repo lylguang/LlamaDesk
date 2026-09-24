@@ -1,0 +1,18 @@
+apps/studio/src/bun/agent-spill.test.ts::describe|capToolResultText
+apps/studio/src/bun/agent-spill.test.ts::describe|isSpillPath（那两处窄口子的边界）
+apps/studio/src/bun/agent-spill.test.ts::describe|spillToolOutput
+apps/studio/src/bun/agent-spill.test.ts::describe|truncateForModel
+apps/studio/src/bun/agent-spill.test.ts::test|写到会话目录、能原样读回，并带上工具名
+apps/studio/src/bun/agent-spill.test.ts::test|只保留最近 N 个转存文件
+apps/studio/src/bun/agent-spill.test.ts::test|字面在转存目录里就算（写之前文件还不存在）
+apps/studio/src/bun/agent-spill.test.ts::test|工具名进文件名前消毒（含路径分隔符也不会跑出目录）
+apps/studio/src/bun/agent-spill.test.ts::test|没超限就原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|目录外的路径不算，别处也不被认成转存
+apps/studio/src/bun/agent-spill.test.ts::test|目录里没有 .txt 时清理不动手
+apps/studio/src/bun/agent-spill.test.ts::test|硬上限之内原样返回
+apps/studio/src/bun/agent-spill.test.ts::test|超过内存硬上限时丢尾部并说明原因（bash 输出在读之前不知道有多大）
+apps/studio/src/bun/agent-spill.test.ts::test|超过写盘上限时截断，并在结果里如实标注
+apps/studio/src/bun/agent-spill.test.ts::test|超限时写清三件事：被截了、还差多少、去哪儿找原文
+apps/studio/src/bun/agent-spill.test.ts::test|转存失败（没有路径）时退化成旧文案，但不撒谎说原文还在
+apps/studio/src/bun/agent-spill.test.ts::test|软链接指向凭据文件时不算：否则三道门一起被绕过
+apps/studio/src/bun/agent-spill.test.ts::test|默认硬上限比展示上限大两个量级（先落盘、再截断给模型看）

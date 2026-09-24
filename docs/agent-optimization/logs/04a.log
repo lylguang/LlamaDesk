@@ -1,0 +1,105 @@
+Warning: No project session found with id 'omni-agent-04a'; creating a new session with that id.
+All verified. Here is the delivery report.
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent.ts`**（唯一改动的源码文件，+17/-1 共 18 行）：
+  1. **第 1161 行附近**（`const running = new Set<number>();` 之后）：新增模块级 `const starting = new Set<number>();`，带任务说明要求的注释（启动段两处 await、本地模式可长达几十秒、不算进「在跑」就会并发起第二轮）。
+  2. **`isAgentRunning`（原 1163–1165 行）**：`return running.has(conversationId);` → `return running.has(conversationId) || starting.has(conversationId);`
+  3. **原第 2444 行之前**（`if (getSetting("SERVER_MODE") === "local")` 上方、第一处 await 之前）：加 `starting.add(conversationId);`，注释「从这里开始有 await……必须先占位」。
+  4. **三处清除**：
+     - 原 2457 行的 `return { ok: false, error };`（推理服务未就绪，启动段唯一提前返回）之前加 `starting.delete(conversationId);`；
+     - 原 2562 行 `setAgentRunning(conversationId, true);` 之后紧跟 `starting.delete(conversationId);`；
+     - 原 2928 行 `finally` 块里 `setAgentRunning(conversationId, false);` 之后加 `starting.delete(conversationId);`（兜底）。
+- **`apps/studio/src/bun/agent-reentry.test.ts`**（新建，2 个用例）：照 `agent-turn.test.ts` / `agent-queue.test.ts` 搭架子（`startStubLlm` + `updateSettings` + `Chat.createConversation` + `runAgentTurn`）。命中启动窗口用的是任务推荐的「不 await 第一个 `runAgentTurn`、紧接着同一微任务里调 `followUpAgentMessage`」；桩让第一次模型请求挂在闸门上，使修好前跟进会真的把桩请求打到 2 次（可复现地失败，不是赌时序）。
+
+### 2 先红后绿的证据
+
+红（把 `agent.ts` 的改动整体还原后跑新用例，原样输出）：
+```
+bun test v1.4.2 (744846f84)
+
+81 |       // 缺陷：窗口内 isAgentRunning 为 false → 跟进被当成「没在跑」直接跑了
+82 |       // 第二轮（queued: false）；修好后走排队分支（queued: true）。
+83 |       expect(follow.queued).toBe(true);
+                                 ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-reentry.test.ts:83:29)
+(fail) runAgentTurn 启动窗口重入（starting 标记） > 启动窗口里再发消息会被排队，不会并发起第二轮 [59.81ms]
+110 |       const follow = await Agent.followUpAgentMessage({
+111 |         conversationId: conversation.id,
+112 |         content: "cleanup：第二句。",
+113 |         mode: "queue",
+114 |       });
+115 |       expect(follow.queued).toBe(true);
+                                  ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-reentry.test.ts:115:29)
+(fail) runAgentTurn 启动窗口重入（starting 标记） > 回合正常收尾后，会话不再显示「在跑」 [28.40ms]
+
+ 0 pass
+ 2 fail
+ 2 expect() calls
+Ran 2 tests across 1 file. [480.00ms]
+```
+
+绿（源码改完后跑新用例，原样输出）：
+```
+bun test v1.4.2 (744846f84)
+
+ 2 pass
+ 0 fail
+ 8 expect() calls
+Ran 2 tests across 1 file. [505.00ms]
+```
+
+另外按 manifest 的 mutation（只把 `isAgentRunning` 那行换回 `return running.has(conversationId);`，其余改动保留）也验证过变红（2 fail）。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-reentry.test.ts`：新建文件，编辑前 0 个 → 编辑后 2 个
+- 未编辑任何现有测试文件（`agent-turn.test.ts` / `agent-queue.test.ts` / `agent-goals.test.ts` 均未动）
+
+### 4 验收门输出
+
+```
+GATE: id=04a-reentrancy-gate mode=self head=fd02ce9
+GATE: out-of-bounds none
+GATE: size source-lines=18 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=25 now=28)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (22 pass, 4s)
+GATE: RESULT PASS id=04a-reentrancy-gate
+```
+
+### 5 逐项自检
+
+- [x] **`starting` 已加，`isAgentRunning` 把它算进去** —— 完成（`agent.ts` 第 1170 行 `const starting = new Set<number>();`，第 1173 行 `return running.has(conversationId) || starting.has(conversationId);`）
+- [x] **占位加在第一处 await 之前** —— 完成（第 2455 行 `starting.add(conversationId);`，位于 `ensureServerReady()` 之前；它上面的四道同步早退检查之后）
+- [x] **三处清除全部落实** —— 完成，逐条：
+  1. 推理服务未就绪提前返回前：第 2470 行 `starting.delete(conversationId);`（`emitDone` 与 `return { ok: false, error };` 之间）；
+  2. 置位之后：第 2577 行 `starting.delete(conversationId);`（紧跟第 2576 行 `setAgentRunning(conversationId, true);`）；
+  3. finally 兜底：第 2950 行 `starting.delete(conversationId);`（紧跟 `setAgentRunning(conversationId, false);`）
+- [x] **第 3136 / 3062 两个调用点没动** —— 完成（`isAgentRunning(opts.conversationId)` 两处原文未动，只改了 `isAgentRunning` 函数体）
+- [x] **第 2537 行那句没动** —— 完成（`stopRequests.delete(conversationId)` 未动）
+- [x] **用例 2 证明跑完之后运行态确实回落** —— 完成（跑完第一轮 + 排队轮都结束后断言 `isAgentRunning` 为 false；漏清除 `starting` 会永久为 true）
+- [x] **把 `agent.ts` 改动还原后第 1 条用例会变红** —— 完成（整份还原后两条都红；manifest mutation 单独还原 `isAgentRunning` 后两条也红，见第 2 节补充）
+- [x] **源码改动不超过 25 行** —— 完成（`git diff --numstat` = 17 insert + 1 delete = 18，gate 报 `size source-lines=18 limit=25`）
+
+### 6 我拿不准的地方
+
+无。
+
+（补充说明一处实现取舍，供验收参考：用例 2 里「回合正常收尾」的断言放在**排队轮也跑完之后**，因为第一轮收尾处是 `void drainQueuedMessages(...)` fire-and-forget——只等第一轮 resolve 时排队轮可能已把 `running` 重新置 true，那时断 false 会假红；等「排队轮的答复」出现再断 false，是 `agent-queue.test.ts` 既有的判据风格。）

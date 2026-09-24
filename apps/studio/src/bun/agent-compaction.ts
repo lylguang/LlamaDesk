@@ -37,7 +37,8 @@ function isToolResult(message: RoughMessage | undefined): boolean {
 
 /**
  * 按预算裁剪消息列表：
- * - 第一条消息一定是任务陈述，永远保留（丢了模型就不知道要干什么）；
+ * - 第一条消息与最后一条 user 消息（当前这轮的任务陈述）永远保留，
+ *   丢了模型就不知道要干什么（多轮会话里第一条是旧任务，不能代替当前这轮）；
  * - 从后往前保留，直到接近预算；
  * - 中间被省略的部分换成一条说明消息，明确告诉模型"这里断过"。
  *
@@ -54,23 +55,34 @@ export function compactMessages<T extends RoughMessage>(
   }
 
   const head = messages[0]!;
-  const headTokens = estimateMessagesTokens([head]);
-  let used = headTokens;
+  let used = estimateMessagesTokens([head]);
   const kept: T[] = [];
+  // 当前这轮的任务陈述 = 最后一条 user 消息（下标 ≥ 1）。多轮会话里第一条是
+  // 旧任务，长回合中它会被裁掉，而真正要干的活在这里——单独钉住它。
+  let taskIndex = -1;
+  for (let i = messages.length - 1; i >= 1; i -= 1) {
+    if (messages[i]?.role === "user") { taskIndex = i; break; }
+  }
+  if (taskIndex > 0) used += estimateMessagesTokens([messages[taskIndex]!]);
+  let firstKept = messages.length;
   for (let index = messages.length - 1; index >= 1; index -= 1) {
     const message = messages[index]!;
     const cost = estimateMessagesTokens([message]);
     // 至少保留最后 4 条（否则模型看不到刚刚发生了什么）。
     if (kept.length >= 4 && used + cost > budgetTokens) break;
     kept.unshift(message);
+    if (index < firstKept) firstKept = index;
+    // 命中任务陈述的那条开销已在循环前计入，这里不再加一次。
+    if (index === taskIndex) continue;
     used += cost;
   }
-
-  // 尾部不能以「工具结果」开头：它的 tool_call 已经被裁掉了，
-  // 真实的 OpenAI 兼容服务会因此直接 400（tool 消息必须紧跟带 tool_calls 的助手消息）。
+  // 先剥掉「尾部以工具结果开头」的悬空结果（它的 tool_call 已被裁掉，真实
+  // OpenAI 兼容服务会直接 400），再把被循环 break 掉的当前任务陈述补到最前：
+  // 顺序不能反，先插的话它后面那条工具结果就检查不到了。
   // 注意角色名：`transformContext` 拿到的是 AgentMessage，工具结果在这里叫 `toolResult`；
   // 线上协议里才叫 `tool`。两个都认，免得哪天又只匹配到其中一个。
   while (kept.length > 1 && isToolResult(kept[0])) kept.shift();
+  if (taskIndex > 0 && firstKept > taskIndex) kept.unshift(messages[taskIndex]!);
 
   const dropped = messages.length - kept.length - 1;
   if (dropped <= 0) {

@@ -1,0 +1,83 @@
+Warning: No project session found with id 'omni-agent-10'; creating a new session with that id.
+Gate passes. Delivering the report.
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent.ts`**（只新增，别处未动）：在 `stopAgentRun`（3236 行）之后、`getAgentRunState` 之前新增导出函数 `stopAllAgentRuns(): number`。语义：把 `running` 与 `starting` 两个集合合并去重成 `new Set<number>([...running, ...starting])`，对每个 id 调现成的 `stopAgentRun(id)`，每个调用包在 try/catch 里（一个失败不影响其余），计数返回处理过的会话数。全函数同步、无任何 await，不复现中止/落库/进程组回收（由 `stopAgentRun` → abort → finally 完成）。
+- **`apps/studio/src/bun/shutdown.ts`**：
+  - 新增一行 `import { stopAllAgentRuns } from "./agent";`（与现有 import 并列，未把 `app-log` 改成顶层 import，其按需 `import("./app-log")` 原样保留）；
+  - `teardownServices()` 里 `closeAllTerminals()` 之后加 `stopAllAgentRuns()`（带一行注释）；
+  - `teardownServicesSync()` 里 `closeAllTerminals()` 之后加 `stopAllAgentRuns()`。其余收尾项（隧道、推理服务、ASR、OCR、网关、技能、控制服务）一行未动。
+- **`apps/studio/src/bun/agent-shutdown.test.ts`**（新建）：照 `agent-reentry.test.ts` 的桩写法，用 `test-stub-llm` 起一个「第一个 chat 请求挂闸门」的桩，3 条用例。
+
+### 2 先红后绿的证据
+
+红（源码未改、`stopAllAgentRuns` 不存在）：
+```
+cd apps/studio && bun test src/bun/agent-shutdown.test.ts
+...
+TypeError: Agent.stopAllAgentRuns is not a function. (In 'Agent.stopAllAgentRuns()', 'Agent.stopAllAgentRuns' is undefined)
+      at startStuckTurn (.../agent-shutdown.test.ts:83:25)
+(fail) stopAllAgentRuns（应用退出时收尾 agent） > 有回合在跑时返回被停的会话数，之后运行态回落 [30.11ms]
+TypeError: Agent.stopAllAgentRuns is not a function. ...
+(fail) stopAllAgentRuns（应用退出时收尾 agent） > 没有回合在跑时返回 0 且不抛错 [0.04ms]
+TypeError: Agent.stopAllAgentRuns is not a function. ...
+(fail) stopAllAgentRuns（应用退出时收尾 agent） > 多个会话同时在跑时都被停，返回值为会话数 [11.06ms]
+
+ 0 pass
+ 3 fail
+Ran 3 tests across 1 file. [454.00ms]
+```
+
+绿（源码改完后）：
+```
+cd apps/studio && bun test src/bun/agent-shutdown.test.ts
+bun test v1.4.2 (744846f84)
+
+ 3 pass
+ 0 fail
+ 11 expect() calls
+Ran 3 tests across 1 file. [441.00ms]
+```
+
+回退验红（两个源码文件还原为 HEAD 后再跑，3 条全部变红，`0 pass / 3 fail`，随后已还原我的版本）——第 7 条自检完成。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-shutdown.test.ts`：新建文件，编辑前 0 个 → 编辑后 4 个（1 describe + 3 test）
+- 未编辑任何既有测试文件（`agent-turn.test.ts`、`agent-reentry.test.ts` 原样未动）
+
+### 4 验收门输出
+
+```
+bash docs/agent-optimization/gate.sh docs/agent-optimization/manifests/10-shutdown-stops-agents.json
+GATE: id=10-shutdown-stops-agents mode=self head=28d4c4f
+GATE: out-of-bounds none
+GATE: size source-lines=28 limit=35
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=7 now=11)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (8 pass, 4s)
+GATE: RESULT PASS id=10-shutdown-stops-agents
+```
+
+### 5 逐项自检
+
+- [x] `stopAllAgentRuns` 是同步函数，不 await 任何东西 —— **完成**（纯 for 循环 + 同步的 `stopAgentRun`）
+- [x] `running` 与 `starting` 都纳入，且去重 —— **完成**（`new Set<number>([...running, ...starting])`）
+- [x] 每个会话的停止包了 try/catch，一个失败不影响其余 —— **完成**
+- [x] `shutdown.ts` 的异步版与同步版都加上了 —— **完成**
+- [x] 没有 await agent 相关的东西 —— **完成**（`shutdown.ts` 里两处都是同步调用，无 await）
+- [x] `shutdown.ts` 现有收尾项一项没动，也没把 `app-log` 改成顶层 import —— **完成**（diff 仅 +1 import、+1 注释 +1 调用、+1 调用，共 4 行新增）
+- [x] 把两个源码文件还原后第 1 条用例会变红（已实测，3 条全红后还原）—— **完成**
+- [x] 源码改动不超过 35 行 —— **完成**（agent.ts +24、shutdown.ts +4，合计 28，门内 `size source-lines=28 limit=35`）
+
+### 6 我拿不准的地方
+
+- 「返回的会话数写进一条日志或注释说明都可以，但别引入新的日志依赖」：我选择了**注释**说明（在 `shutdown.ts` 调用点加了一行中文注释），没有在 `shutdown.ts` 里加任何日志调用，`app-log` 保持按需 import。如果期望的是把返回值喂给某个现有日志事件，请告知。
+- 用例 1「之后运行态回落」的实现方式：桩只卡第一个请求，`stopAllAgentRuns` 标记停止后闸门放行、回合被 abort、走 finally 收尾，然后断言 `isAgentRunning(id) === false`。这与任务说明「等回合结束后 `isAgentRunning` 为 false」一致。
+
+All done — gate PASS, 28 source lines, tests red-then-green verified, revert-red verified.

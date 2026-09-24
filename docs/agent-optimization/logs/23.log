@@ -1,0 +1,85 @@
+Warning: No project session found with id 'omni-agent-23'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/mainview/app/agent/use-follow-scroll.ts`**（新建）
+  - 导出 `FOLLOW_THRESHOLD_PX = 64`，与对话页同一口径。
+  - 纯函数 `isFollowing(el)`：`el.scrollHeight - el.scrollTop - el.clientHeight < FOLLOW_THRESHOLD_PX`（严格小于）。
+  - Hook `useFollowScroll(scrollRef)`：内部 `followingRef`（初值 `true`）；返回 `onScroll`（每次滚动用 `isFollowing` 更新 ref）和 `scrollToBottomIfFollowing`（仅当 `followingRef.current` 为真时 `scrollTop = scrollHeight`，否则什么都不做）。
+- **`apps/studio/src/mainview/app/agent/conversation.tsx`**（仅滚动相关改动）
+  - 新增一行 import `useFollowScroll`。
+  - 原 effect（157–163 行）保留原注释两行，追加一行跟随模式说明；effect 体改为调用 `scrollToBottomIfFollowing()`，**依赖数组一字未动**。
+  - 第 243 行滚动容器 `<div ref={scrollRef} className="thread-scroll">` 加 `onScroll={followOnScroll}`。
+- **`apps/studio/src/mainview/app/agent/use-follow-scroll.test.ts`**（新建）：只测 `isFollowing`，6 条用例（含任务要求的 5 条加一条阈值常量钉死）。
+
+### 2 先红后绿的证据
+
+红（源码文件尚未创建时跑测试）：
+
+```
+bun test v1.4.2 (744846f84)
+
+apps/studio/src/mainview/app/agent/use-follow-scroll.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+error: Cannot find module './use-follow-scroll' from '/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/app/agent/use-follow-scroll.test.ts'
+-------------------------------
+
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [5.00ms]
+```
+
+绿（源码就位后）：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 6 pass
+ 0 fail
+ 7 expect() calls
+Ran 6 tests across 1 file. [6.00ms]
+```
+
+（注：`use-follow-scroll.ts` 是本次新建的文件，HEAD 上不存在，回退即删除，红态即模块缺失。已按验收门 `--full` 的同一机制验证过回退变红。）
+
+### 3 用例数量
+
+- `use-follow-scroll.test.ts`：新建文件，编辑后 6 个用例（基线中该文件不存在，无既有用例可丢）。
+- `conversation.test.tsx`：**未编辑**（仍在门里跑过：3 个用例保持 3 个）。
+
+### 4 验收门输出
+
+```
+GATE: id=23-follow-scroll mode=self head=8780549
+GATE: out-of-bounds none
+GATE: size source-lines=8 limit=45
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=3 now=9)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (9 pass, 1s)
+GATE: RESULT PASS id=23-follow-scroll
+```
+
+### 5 逐项自检
+
+- [x] `isFollowing` 是纯函数，导出了，不依赖 DOM 类型 —— 完成（参数是 `{scrollHeight, scrollTop, clientHeight}` 结构类型）。
+- [x] 阈值用的是 64，判据是严格小于 —— 完成（`< FOLLOW_THRESHOLD_PX`，且有专门用例钉死 64 → 不跟随）。
+- [x] hook 在不跟随时**不**动 `scrollTop` —— 完成（`scrollToBottomIfFollowing` 首行 `if (!followingRef.current) return;`）。
+- [x] `conversation.tsx` 的依赖数组没动 —— 完成（`[activeMessages.length, lastForScroll?.content, lastForScroll?.reasoning, events.length]` 原样）。
+- [x] 滚动容器接上了 `onScroll` —— 完成。
+- [x] 第 157、158 行原注释保留 —— 完成（两行原注释原样保留，在其后补了一行跟随模式说明）。
+- [x] 没有动 `app/chat/index.tsx` —— 完成（`git status` 只有白名单三个文件）。
+- [x] 没有加「回到底部」按钮 —— 完成。
+- [x] 源码改动（两个文件合计）不超过 45 行 —— 完成（门报 `size source-lines=8 limit=45`；conversation.tsx +3/-2，新 hook 文件 33 行含注释）。
+
+### 6 我拿不准的地方
+
+无。
+
+（一个说明：任务示例里 `useFollowScroll` 的 ref 参数类型我写成了 `{ current: HTMLElement | null }`，这样既能接 `useRef<HTMLDivElement>(null)`，又不在 `use-follow-scroll.ts` 里引入具体 DOM 节点类型之外的依赖；`isFollowing` 本身完全不用 DOM 类型。如果希望参数类型直接写 `RefObject<HTMLDivElement | null>` 也没问题，但这会让 hook 文件依赖 `globalThis.HTMLElement`，与「判据抽纯函数是为了不用 DOM」的意图相悖，所以我选了更窄的结构类型。）

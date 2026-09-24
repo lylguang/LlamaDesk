@@ -72,7 +72,7 @@ const REMOTE = [
   "deepseek-ai/DeepSeek-V3",
 ];
 
-const updates: { id: string; models?: { id: string }[] }[] = [];
+const updates: { id: string; models?: { id: string; contextLength?: number }[] }[] = [];
 /** 「设为默认模型」下发的参数：必须带 providerId，见对应用例。 */
 const selectCalls: { type: string; value: string; providerId?: string }[] = [];
 
@@ -385,9 +385,47 @@ test("模型列里的 id 一定完整：换行不省略，也不靠悬浮提示�
   // 没有别名的条目：id 就是正文，同样完整
   const plain = view.container.querySelector<HTMLElement>('[data-model-id="BAAI/bge-m3"]');
   expect(plain!.textContent).toBe("BAAI/bge-m3");
-  const plainLine = plain!.querySelector<HTMLElement>("span");
+  // 取最内层那一行（外层的包裹 span 文本内容相同，但它不管换行）
+  const idLines = [...plain!.querySelectorAll<HTMLElement>("span")].filter(
+    (s) => s.textContent === "BAAI/bge-m3",
+  );
+  const plainLine = idLines[idLines.length - 1];
+  expect(plainLine).toBeDefined();
   expect(plainLine!.className).toContain("wrap-anywhere");
   expect(plainLine!.className).not.toContain("truncate");
+
+  await view.unmount();
+});
+
+test("模型行里有一键复制：点一下把完整 id 写进剪贴板", async () => {
+  const view = await renderPanel();
+
+  // 全站禁用了文字选择（body user-select:none），拖选这条路走不通 —— 复制按钮是唯一入口
+  const written: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: {
+      writeText: (text: string) => {
+        written.push(text);
+        return Promise.resolve();
+      },
+    },
+  });
+
+  const cell = view.container.querySelector<HTMLElement>('[data-model-id="Qwen/Qwen3-8B"]');
+  expect(cell).not.toBeNull();
+  // id 本身可拖选（select-text），不是只给一个按钮
+  expect(cell!.querySelector(".select-text")).not.toBeNull();
+
+  const copy = cell!.querySelector<HTMLButtonElement>("button");
+  expect(copy).not.toBeNull();
+  await act(async () => {
+    copy!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+
+  // 复制的是纯 id，不是别名、不带空白
+  expect(written).toEqual(["Qwen/Qwen3-8B"]);
 
   await view.unmount();
 });
@@ -474,6 +512,101 @@ test("自定义服务商：单开一栏、地址可改、可删除", async () =>
     // 自定义地址可改、可删（内置那两条规矩不该顺手锁死自建网关 / 中转）
     expect(view.container.querySelector('[data-provider-base="editable"]')).not.toBeNull();
     expect(view.container.querySelector('[data-provider-delete="custom-1700000000000"]')).not.toBeNull();
+
+    await view.unmount();
+  } finally {
+    providerList = { providers: [BUILTIN_PROVIDER], activeId: null };
+  }
+});
+
+/**
+ * 「上下文」列（云端窗口）：留空 = 自动判断，手填 = 覆盖，清空 = 回到自动。
+ *
+ * 这个数直接决定 Agent 的压缩线（窗口的 60%），所以钉住两件事：
+ *   1. 没手填时占位符给出**按模型算出来**的窗口（型号目录命中 1M / 128K，认不出 256K）
+ *      —— 以前云端只有一句 128K 兜底，1M 的模型被按 128K 压缩，历史被过早裁掉；
+ *   2. 手填的值原样落库到该模型条目上（`contextLength`），清空则把该字段摘掉。
+ */
+function inputOf(id: string): HTMLInputElement {
+  const cell = document.body.querySelector<HTMLElement>(`[data-model-context="${id}"]`);
+  expect(cell).not.toBeNull();
+  const input = cell!.querySelector<HTMLInputElement>("input");
+  expect(input).not.toBeNull();
+  return input!;
+}
+
+async function typeAndBlur(input: HTMLInputElement, text: string) {
+  await act(async () => {
+    // 直接赋 .value 会被 React 的 value tracker 吞掉：走原生 setter 才会触发 onChange。
+    const setValue = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")!.set!;
+    setValue.call(input, text);
+    input.dispatchEvent(new Event("input", { bubbles: true }));
+    // React 17+ 的 onBlur 接的是 focusout（bubbles），不是 blur。
+    input.dispatchEvent(new FocusEvent("focusout", { bubbles: true }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+}
+
+test("上下文列：留空时占位符给出按模型算出的窗口（1M 档不再被当 128K）", async () => {
+  providerList = {
+    providers: [
+      {
+        ...BUILTIN_PROVIDER,
+        models: [{ id: "deepseek-ai/DeepSeek-V3" }, { id: "gemini-2.5-pro" }, { id: "Qwen/Qwen3-8B" }],
+      },
+    ],
+    activeId: null,
+  };
+  try {
+    const view = await renderPanel();
+    // 型号目录：DeepSeek 官方 128K、Gemini 1M —— 都不是旧的"一刀切 128K"
+    expect(inputOf("deepseek-ai/DeepSeek-V3").placeholder).toBe("128K");
+    expect(inputOf("gemini-2.5-pro").placeholder).toBe("1M");
+    // 认不出的型号：256K 兜底（不是 8K 之类的短窗口）
+    expect(inputOf("Qwen/Qwen3-8B").placeholder).toBe("256K");
+    // 没手填过的都是空的（值来自自动判断，不落库）
+    expect(inputOf("gemini-2.5-pro").value).toBe("");
+    expect(view.text).toContain(zh("cloud.contextAuto"));
+    expect(view.errors).toEqual([]);
+
+    await view.unmount();
+  } finally {
+    providerList = { providers: [BUILTIN_PROVIDER], activeId: null };
+  }
+});
+
+test("上下文列：手填 1M 落库到该模型，别的模型不动", async () => {
+  updates.length = 0;
+  const view = await renderPanel();
+  const input = inputOf("Qwen/Qwen3-8B");
+  expect(input.placeholder).toBe("256K");
+  await typeAndBlur(input, "1m");
+
+  expect(updates.length).toBe(1);
+  const models = updates[0]!.models!;
+  expect(models.find((m) => m.id === "Qwen/Qwen3-8B")).toMatchObject({ contextLength: 1_048_576 });
+  expect(models.find((m) => m.id === "BAAI/bge-m3")).toEqual({ id: "BAAI/bge-m3" });
+
+  await view.unmount();
+});
+
+test("上下文列：已有覆盖值显示成手填，清空后把该字段摘掉（回到自动）", async () => {
+  updates.length = 0;
+  providerList = {
+    providers: [{ ...BUILTIN_PROVIDER, models: [{ id: "Qwen/Qwen3-8B", contextLength: 131_072 }] }],
+    activeId: null,
+  };
+  try {
+    const view = await renderPanel();
+    const cell = document.body.querySelector<HTMLElement>('[data-model-context="Qwen/Qwen3-8B"]')!;
+    const input = inputOf("Qwen/Qwen3-8B");
+    expect(input.value).toBe("128K");
+    expect(cell.textContent).toContain(zh("cloud.contextManual"));
+
+    await typeAndBlur(input, "");
+    expect(updates.length).toBe(1);
+    // contextLength 被摘掉：条目回到"按模型自动判断"
+    expect(updates[0]!.models![0]).toEqual({ id: "Qwen/Qwen3-8B" });
 
     await view.unmount();
   } finally {

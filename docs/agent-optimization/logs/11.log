@@ -1,0 +1,67 @@
+Warning: No project session found with id 'omni-agent-11'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent-goals.ts`**
+  - `goalPromptSection`（系统提示段落）：删除一行 `**进度**：${describeGoal(goal)}`。其余内容（目标、验收标准、那几条完成标准）一字未动。现在该段落逐字节稳定，不再随用量变化。
+  - `goalContinuationText`（自动续跑时推给模型的用户消息）：在「接着推进」那句之后、「验收标准」那句之前，新增一行 `` `进度：${describeGoal(goal)}` ``。易变内容挪到了缓存友好的位置。
+  - `describeGoal` 未动。
+- **`apps/studio/src/bun/agent-goals.test.ts`**：只加用例，现有用例一条没删没改。
+
+### 2 先红后绿的证据
+
+红（新增 3 用例，改源码前，`bun test src/bun/agent-goals.test.ts`）：
+```
+(fail) 注入与文案 > 用量变化不改变目标段落（系统提示必须逐字节稳定，否则前缀缓存每轮全作废） [0.58ms]
+(fail) 注入与文案 > 目标段落不含易变字样（tokens / 分钟 / 自动续跑都挪去续跑消息） [0.37ms]
+(fail) 注入与文案 > 续跑消息里带上进度（用量数字与续跑次数） [0.34ms]
+ 13 pass
+ 3 fail
+ 51 expect() calls
+Ran 16 tests across 1 file. [46.00ms]
+```
+
+绿（改源码后，同一命令）：
+```
+ 16 pass
+ 0 fail
+ 54 expect() calls
+Ran 16 tests across 1 file. [52.00ms]
+```
+
+### 3 用例数量
+
+`apps/studio/src/bun/agent-goals.test.ts`：编辑前 13 个 → 编辑后 16 个（新增 3 个）。
+
+注：任务说明称「现有 14 条」，实际文件里是 13 条。我只加未删，与「一条没删没改」的要求一致；数量差异可能是任务说明笔误。
+
+### 4 验收门输出
+
+`bash docs/agent-optimization/gate.sh docs/agent-optimization/manifests/11-goal-prefix-cache.json`：
+```
+GATE: id=11-goal-prefix-cache mode=self head=abe7316
+GATE: out-of-bounds none
+GATE: size source-lines=2 limit=15
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=16 now=19)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (16 pass)
+GATE: RESULT PASS id=11-goal-prefix-cache
+```
+
+### 5 逐项自检
+
+- [x] `goalPromptSection` 去掉了进度行，其余内容一字未动 —— 完成
+- [x] 用量变化前后段落逐字节相同 —— 完成（用例 1，`toBe` 相等）
+- [x] `goalContinuationText` 加上了进度 —— 完成
+- [x] `describeGoal` 没动 —— 完成
+- [x] 现有用例一条没删没改，全绿 —— 完成（13 → 16，只增）
+- [x] 把 `agent-goals.ts` 改动还原后第 1 条用例变红 —— 完成（我实测：还原后 13 pass / 3 fail，其中含用例 1；随后恢复）
+- [x] 源码改动不超过 15 行 —— 完成（`source-lines=2`，一删一加）
+
+### 6 我拿不准的地方
+
+1. 任务说明写「现有 14 条用例」，实际文件是 13 条。我按「只加不改」处理，未去凑 14。
+2. `--full` 模式（含回退验红 + 定点变异）由主 agent 跑；我未执行 `--full`（规则禁止额外 git 操作，且 gate 文档注明 `--full` 是主 agent 验收用）。我已单独验证：把 `describeGoal(goal)` 替换成 `""`（manifest 里的 mutation）后，续跑进度用例会变红，符合 mutation 预期。

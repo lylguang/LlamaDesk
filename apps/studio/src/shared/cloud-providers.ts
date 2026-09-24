@@ -8,6 +8,7 @@
  * （生图 / 语音 / OCR…）只列自己那一类的模型，用户不必再在页面里重填地址与密钥。
  */
 
+import { clampContext, resolveCloudContextWindow } from "./model-context";
 import { classifyModelName, type ModelCategory } from "./modelscope";
 
 /** 云模型的用途分类（与本地模型的 ModelCategory 同一套）。 */
@@ -23,6 +24,15 @@ export type CloudModelEntry = {
   group?: string;
   remark?: string;
   type?: CloudModelType;
+  /**
+   * 该模型的上下文窗口（token），**用户手填的覆盖值**：留空则按模型 id 自动判断
+   * （见 `shared/model-context.ts`：id 后缀 → 已知型号目录 → 256K 兜底）。
+   *
+   * 为什么允许覆盖：云端没有统一的地方能问到窗口大小，同一家在售型号的窗口又可能
+   * 从 32K 到 1M 不等；猜错会直接影响 Agent 的压缩节奏（猜大撞厂商 400，猜小过早
+   * 丢历史），所以把这个数交给用户，界面上（设置 → 云端模型 → 上下文列）随时可改。
+   */
+  contextLength?: number;
 };
 
 /**
@@ -383,6 +393,29 @@ export const CLOUD_PRESETS: readonly CloudPreset[] = [
     note: "官方 OpenAI 兼容端点；需海外网络环境",
     color: "#4285f4",
   },
+  {
+    id: "qwencloud",
+    name: "Qwen Cloud",
+    vendor: "阿里云 Qwen（国际站）",
+    // 国际站与国内百炼是**两套地址、两套密钥**：qwencloud.com 上申请的 Key 拿到
+    // dashscope.aliyuncs.com 用只会 401。所以它是独立的一行，不是"百炼的别名"。
+    baseUrl: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1",
+    section: "global",
+    apiKeyUrl: "https://home.qwencloud.com/api-keys",
+    models: [
+      // 非实时的 omni：音频进、文字出，走 Chat Completions —— 通话模式的
+      // 「omni 模式」用的就是它（见 shared/voice-call-omni.ts）。
+      "qwen3.8-omni-flash",
+      "qwen3.8-max-0902",
+      "qwen3.8-flash",
+      "qwen-image-3.0-pro",
+      "wan3.0-video",
+      "qwen-audio-3.0-tts-flash",
+      "qwen-audio-3.0-asr-flash",
+    ],
+    note: "国际站：需海外网络环境；实时语音的 wss 端点是 dashscope-intl",
+    color: "#615ced",
+  },
 ];
 
 export function getPreset(id: string): CloudPreset | undefined {
@@ -497,6 +530,30 @@ export function modelTypeOf(entry: CloudModelEntry): CloudModelType {
   return entry.type ?? classifyModelName(entry.id);
 }
 
+/**
+ * 模型条目的上下文窗口（token）：用户手填的覆盖值优先，否则按 id 自动判断。
+ * Agent / 对话侧走 `bun/chat-context.ts`（同一个解析函数），界面展示也用这个 ——
+ * 「用户看到的窗口」和「压缩按的窗口」必须是同一个数。
+ */
+export function modelContextOf(entry: Pick<CloudModelEntry, "id" | "contextLength">): number {
+  return resolveCloudContextWindow(entry.id, entry.contextLength);
+}
+
+/**
+ * 从 `CLOUD_MODELS` 槽位（激活厂商模型清单的 JSON 镜像）里取某个模型手填的窗口覆盖值。
+ *
+ * 单一真源：运行时（`bun/chat-context.ts`）与 `omi launch` 的 Codex/ChatGPT 目录
+ * 都要读这个值，各写一份查找逻辑早晚会有一边漏掉覆盖、两边报出不同的窗口。
+ */
+export function contextLengthForModel(
+  modelsJson: string | undefined | null,
+  modelId: string,
+): number | undefined {
+  if (!modelId) return undefined;
+  const entry = parseCloudModels(modelsJson).find((m) => m.id === modelId);
+  return entry?.contextLength == null ? undefined : clampContext(entry.contextLength);
+}
+
 /** 解析 CLOUD_MODELS 等旧 JSON 列表（兼容纯 id 字符串数组与对象数组）。 */
 export function parseCloudModels(raw: string | undefined | null): CloudModelEntry[] {
   try {
@@ -507,12 +564,17 @@ export function parseCloudModels(raw: string | undefined | null): CloudModelEntr
         if (typeof x === "string") return { id: x };
         if (x && typeof x === "object" && typeof (x as Record<string, unknown>).id === "string") {
           const o = x as Record<string, unknown>;
+          // 覆盖值只收合法区间内的正数（手滑填 0 / 负数 / 天文数字一律当没填）：
+          // 它在 bun 侧直接决定压缩预算，坏值比没有值危害大。
+          const rawCtx = typeof o.contextLength === "number" ? o.contextLength : Number(o.contextLength);
+          const contextLength = clampContext(rawCtx);
           return {
             id: o.id as string,
             name: typeof o.name === "string" ? o.name : undefined,
             group: typeof o.group === "string" ? o.group : undefined,
             remark: typeof o.remark === "string" ? o.remark : undefined,
             type: isCloudModelType(o.type) ? o.type : undefined,
+            contextLength,
           };
         }
         return null;

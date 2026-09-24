@@ -8,6 +8,7 @@ import { getSetting, updateSettings, getActiveServerPort } from "./db/settings";
 import * as CloudProviders from "./cloud-providers";
 import { getDataDir } from "./paths";
 import { getImagesBaseDir, resolveImageRef } from "./image-server";
+import { writeManifest } from "./install-manifest";
 import { chatImageUrl } from "../shared/server-info";
 import { ocrLangEntry, OCR_LANG_CATALOG, OCR_TESSDATA_BRANCH, OCR_TESSDATA_REPO } from "../shared/ocr";
 import { fetchAssetFromSources, githubRawUrls } from "./mirror-download";
@@ -251,6 +252,16 @@ export async function installTesseractEngine(): Promise<{ ok: boolean; error?: s
   const bin = await findTesseract();
   if (bin) {
     emitTessLog("tesseract 安装成功。");
+    // tesseract 装进用户 Homebrew（非托管目录），但这里记一份 manifest 到 tessdata 目录，
+    // 与 engine-catalog 的 probeTesseract 对齐（该探测恒返回 installComplete=true，这里只记事实）。
+    const tessdataDir = getDataDir("engines", "tessdata");
+    writeManifest(tessdataDir, {
+      engine: "tesseract",
+      version: null,
+      platform: process.platform,
+      arch: process.arch,
+      steps: 1,
+    });
     return { ok: true };
   }
   return { ok: false, error: "安装命令已成功执行，但未检测到 tesseract，请重启应用后再试。" };

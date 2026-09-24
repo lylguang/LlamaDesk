@@ -1,0 +1,28 @@
+{
+  "id": "07a-hook-payload-env",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-hooks.ts",
+    "apps/studio/src/bun/agent-hooks.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-hooks.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-hooks.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "按字符数而非字节数判断长度（中文/多字节负载会漏判）",
+      "file": "apps/studio/src/bun/agent-hooks.ts",
+      "find": "Buffer.byteLength(serialized, \"utf8\")",
+      "replace": "serialized.length"
+    }
+  ]
+}

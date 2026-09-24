@@ -207,7 +207,7 @@ export class SglangRuntime implements Runtime {
     this.appendLog(`$ ${cmd.join(" ")}\n`);
 
     try {
-      this.serverProcess = spawnServerProcess(cmd);
+      this.serverProcess = spawnServerProcess(cmd, undefined, "sglang");
       pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;

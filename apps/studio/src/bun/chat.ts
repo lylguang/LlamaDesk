@@ -8,6 +8,7 @@ import { getChatModelLabel, getChatProviderLabel, getChatRequestModelId } from "
 import { mergeSystemMessages, parseChatDelta } from "./chat-messages";
 import { computeTokenStats, parseMessageStats, type MessageStats } from "./chat-stats";
 import { estimateMessagesTokens, estimateTokens } from "../shared/token-estimate";
+import { CLOUD_MAX_OUTPUT_TOKENS, LOCAL_CTX_DEFAULT } from "../shared/model-context";
 import { chatImageDir, getImagesBaseDir } from "./image-server";
 import { logEvent } from "./app-log";
 import { currentTime } from "./current-time";
@@ -559,14 +560,21 @@ async function probeLocalServer(): Promise<boolean> {
  * 必须显式给：不传时各引擎用自己的默认值，而 mlx-lm 的 `--max-tokens` 默认只有 512 ——
  * 推理模型光"思考"就能用光它，正文一个字都出不来，界面上就是「空白回复 + 0 tokens」。
  *
- * 优先使用已安装模型的 contextLength（从 config.json 解析），如果未解析则回退到
- * SERVER_CTX_SIZE 设置（默认 8192）。这样大上下文模型（如 131072）不会被钳制在小窗口。
+ * 云端与本地是两套口径：
+ * - **云端**：统一 8k（`CLOUD_MAX_OUTPUT_TOKENS`）。厂商的输出天花板远低于窗口
+ *   （deepseek-chat 只让输出 8k），按窗口给会被 400 拒掉；而且这里**不能**读
+ *   `SERVER_CTX_SIZE` —— 那是本地 llama.cpp 的 KV 旋钮，本地调到 128k 后切到云端，
+ *   发出的 `max_tokens: 131072` 必然被厂商拒。
+ * - **本地**：优先用已安装模型的 contextLength（从 config.json 解析），否则
+ *   `SERVER_CTX_SIZE`（默认 8192），再封顶 256K。
  */
 export function maxOutputTokens(): number {
+  if (getSetting("SERVER_MODE") !== "local") return CLOUD_MAX_OUTPUT_TOKENS;
+
   // 尝试从当前模型读取 contextLength
   const model = getChatRequestModelId();
-  let ctx = Number(getSetting("SERVER_CTX_SIZE")) || 8192;
-  
+  let ctx = Number(getSetting("SERVER_CTX_SIZE")) || LOCAL_CTX_DEFAULT;
+
   if (model) {
     const models = ModelStore.listInstalledModels();
     const currentModel = models.find((m: ModelStore.InstalledModel) => m.runtimeTarget === model || m.path === model);
@@ -574,7 +582,7 @@ export function maxOutputTokens(): number {
       ctx = currentModel.contextLength;
     }
   }
-  
+
   return Math.min(Math.max(1024, ctx), 262144);
 }
 

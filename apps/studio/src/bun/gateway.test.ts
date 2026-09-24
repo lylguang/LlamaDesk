@@ -444,6 +444,57 @@ describe("gateway meta endpoints", () => {
     const body = (await res.json()) as { error: { message: string } };
     expect(body.error.message).toContain("未知路径");
   });
+
+  describe("browser-origin protection (browserOriginAllowed)", () => {
+    // 绑 0.0.0.0（任何机器都能绑，且 isLoopbackHost("0.0.0.0") === false，
+    // 满足「绑到非回环」的分支前提），请求走 127.0.0.1，再用显式 Host/Origin 头
+    // 伪造局域网来源 —— Bun 的 fetch 允许改写 Host，服务端收到 req.headers 里的 lan.test。
+    // 注意 Origin 必须是非回环的名字：回环 Origin 会被 isLocalOrigin 提前放行，就测不到本分支了。
+    const LAN_HOST = "0.0.0.0";
+    const LAN_BASE = "http://127.0.0.1:10123";
+    const LAN_ORIGIN = "http://lan.test";
+
+    /**
+     * 局域网场景的网关：绑到非回环（GATEWAY_HOST）+ 配了 API Key。
+     * 用例结束统一 stop/start 还原成回环，后面所有用 GATEWAY_BASE 的用例不受影响。
+     */
+    async function withLanGateway(key: string, fn: () => Promise<void>): Promise<void> {
+      const prevHost = SETTINGS.GATEWAY_HOST!;
+      const prevKey = SETTINGS.GATEWAY_API_KEY!;
+      try {
+        await stopGateway();
+        SETTINGS.GATEWAY_HOST = LAN_HOST;
+        SETTINGS.GATEWAY_API_KEY = key;
+        const res = await startGateway();
+        expect(res.ok).toBe(true);
+        await fn();
+      } finally {
+        SETTINGS.GATEWAY_HOST = prevHost;
+        SETTINGS.GATEWAY_API_KEY = prevKey;
+        await stopGateway();
+        const res = await startGateway();
+        expect(res.ok).toBe(true);
+      }
+    }
+
+    test("gateway bound to a non-loopback address: page's own same-origin assets load without a key, even with Origin header", async () => {
+      await withLanGateway("test-key-123", async () => {
+        const res = await fetch(`${LAN_BASE}/assets/main-abc123.js`, {
+          headers: { Host: "lan.test", Origin: LAN_ORIGIN },
+        });
+        expect(res.status).not.toBe(403);
+      });
+    });
+
+    test("same setup: a third-party page (foreign Origin) is still rejected with 403", async () => {
+      await withLanGateway("test-key-123", async () => {
+        const res = await fetch(`${LAN_BASE}/assets/main-abc123.js`, {
+          headers: { Host: "lan.test", Origin: "http://evil.example" },
+        });
+        expect(res.status).toBe(403);
+      });
+    });
+  });
 });
 
 describe("OpenAI-compatible endpoints", () => {

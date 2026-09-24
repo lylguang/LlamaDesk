@@ -1,0 +1,30 @@
+{
+  "id": "03-queued-message-double-insert",
+  "allowed_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/agent-queue.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-queue.test.ts",
+    "apps/studio/src/bun/agent-turn.test.ts",
+    "apps/studio/src/bun/agent-history.test.ts"
+  ],
+  "max_source_lines": 8,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "去掉 insertUserMessage: false（排队消息又被写库两次）",
+      "file": "apps/studio/src/bun/agent.ts",
+      "find": "      insertUserMessage: false,\n    });\n    if (!result.ok) return;",
+      "replace": "    });\n    if (!result.ok) return;"
+    }
+  ]
+}

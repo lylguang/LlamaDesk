@@ -1,0 +1,28 @@
+{
+  "id": "02a-bwrap-cred-files",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-sandbox.ts",
+    "apps/studio/src/bun/agent-sandbox.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-sandbox.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-sandbox.test.ts"
+  ],
+  "max_source_lines": 30,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "把目录/文件的区分去掉，一律 --ro-bind（目录也被当文件处理）",
+      "file": "apps/studio/src/bun/agent-sandbox.ts",
+      "find": "statSync(target).isDirectory()",
+      "replace": "false"
+    }
+  ]
+}

@@ -11,6 +11,7 @@
  */
 
 import { ENGINE_IDS, type InferenceEngine } from "./engines";
+import type { VerifyReason } from "../bun/install-manifest";
 
 export type LocalEngineId =
   | InferenceEngine
@@ -19,6 +20,7 @@ export type LocalEngineId =
   | "paddleocr"
   | "tesseract"
   | "mflux"
+  | "laya-mlx"
   | "cloudflared";
 
 /**
@@ -26,18 +28,28 @@ export type LocalEngineId =
  * network 只有一个 cloudflared —— 它不是 AI 引擎，但同样是「应用自己下载的二进制」，
  * 升级与卸载的口径一致，所以放在同一页里一起管。
  */
-export type LocalEngineCategory = "inference" | "voice" | "ocr" | "image" | "network";
+export type LocalEngineCategory = "inference" | "voice" | "ocr" | "image" | "systemone" | "network";
 
 export const LOCAL_ENGINE_CATEGORIES: readonly LocalEngineCategory[] = [
   "inference",
   "voice",
   "ocr",
   "image",
+  // 类型化判定（SystemOne / JEV）：laya-mlx 是"判定模型"，不是聊天模型 ——
+  // 混进 inference 那一组会让人以为它能拿去对话。
+  "systemone",
   "network",
 ];
 
 /** 这个引擎的模型权重在哪儿管（null = 没有独立权重，或是系统引擎自己管）。 */
-export type LocalEngineModelsTarget = "local-models" | "voice" | "ocr" | "image" | null;
+export type LocalEngineModelsTarget =
+  | "local-models"
+  | "voice"
+  | "ocr"
+  | "image"
+  /** JEV 页（`app/jev/`）：判定模型的权重在那里下 / 起 / 停。 */
+  | "jev"
+  | null;
 
 export type LocalEngineSpec = {
   id: LocalEngineId;
@@ -169,6 +181,19 @@ export const LOCAL_ENGINE_SPECS: readonly LocalEngineSpec[] = [
     modelsTarget: "image",
   },
   {
+    id: "laya-mlx",
+    category: "systemone",
+    name: "laya-mlx",
+    roleKey: "engines.laya.role",
+    usedByKey: "engines.laya.usedBy",
+    // 装在托管 venv 里（<dataDir>/engines/laya），所以"装一份托管的"这条路是通的。
+    installHint: null,
+    uninstallHint: null,
+    managedSupported: true,
+    // 权重在 JEV 页管：三个 checkpoint 各自能下 / 起 / 停，卸载引擎不删权重。
+    modelsTarget: "jev",
+  },
+  {
     id: "cloudflared",
     category: "network",
     name: "cloudflared",
@@ -199,6 +224,7 @@ export const LOCAL_ENGINE_CATEGORY_KEYS: Record<
   voice: { titleKey: "engines.cat.voice", descriptionKey: "engines.cat.voice.desc" },
   ocr: { titleKey: "engines.cat.ocr", descriptionKey: "engines.cat.ocr.desc" },
   image: { titleKey: "engines.cat.image", descriptionKey: "engines.cat.image.desc" },
+  systemone: { titleKey: "engines.cat.systemone", descriptionKey: "engines.cat.systemone.desc" },
   network: { titleKey: "engines.cat.network", descriptionKey: "engines.cat.network.desc" },
 };
 
@@ -229,6 +255,7 @@ export const LOCAL_ENGINE_DIRS: Record<LocalEngineId, string | null> = {
   paddleocr: "paddleocr",
   tesseract: "tessdata",
   mflux: "mflux",
+  "laya-mlx": "laya",
   cloudflared: "cloudflared",
 };
 
@@ -271,4 +298,14 @@ export type LocalEngineStatus = {
   canUninstall: boolean;
   /** 升级按钮的语义。 */
   upgradeKind: LocalEngineUpgradeKind;
+  /**
+   * 「这次安装到底完成了没有」（安装完整性 manifest，见 `bun/install-manifest.ts`）。
+   * 只对**托管安装**的引擎做判断；PATH / brew / conda 上那份不是我们装的，
+   * 没有也不该有 manifest，恒为 true —— 绝不能因为缺 manifest 就把它们标成「装坏了」。
+   * 老用户的已装引擎同样没有 manifest：这一版只把结果记进日志与返回值，
+   * **不拿它阻断任何操作**（「启动」按钮不禁用），先让数据跑起来，阻断逻辑以后再说。
+   */
+  installComplete: boolean;
+  /** `installComplete === false` 时的原因（`VerifyReason`，如 missing / corrupt / platform-changed）。 */
+  installIssue?: VerifyReason;
 };

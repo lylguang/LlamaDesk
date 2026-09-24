@@ -101,6 +101,9 @@ test("能力探测：四类能力都有 ready 与说明字段", () => {
     // 未就绪时 label 留给界面拼"缺什么"，不该带具体后端名
     if (!caps[key].ready) expect(caps[key].label).toBe("");
   }
+  // 本地超分与抠图一样：引擎随应用一起发，永远 ready（缺的只是可下载的权重）
+  expect(caps.upscale.ready).toBe(true);
+  expect(typeof caps.upscale.label).toBe("string");
 });
 
 test("一次性补全：空输入与超长输入在本地就被拒", async () => {

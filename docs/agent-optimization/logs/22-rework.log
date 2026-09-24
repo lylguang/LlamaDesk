@@ -1,0 +1,79 @@
+Red: 2 fail (test 1: 2 full requests; test 3: 0 incremental). Green: 3 pass. Test 2 (empty) passes in both red and green — it's a regression guard against the previous `known.length===0` approach, not against the original code.
+
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/mainview/app/agent/conversation.tsx`**（追平 `useEffect`，207–234 行）：
+- 在 `useEffect` 开头加了一行守卫：`if (!eventsQuery.isSuccess) return;`
+- `afterId` 那行**恢复成原来的写法**：`known.length > 0 ? known[known.length - 1]!.id : 0`（上一版被我改成了 `if (known.length === 0) return`，现在还原）。
+- 依赖数组从 `[running, conversationId]` 改成 `[running, conversationId, eventsQuery.isSuccess]`（`isSuccess` 从 false→true 只发生一次，effect 只多跑一次）。
+- 注释跟着改了：「首次全量查询落地之前不追平」。
+
+**`apps/studio/src/mainview/app/agent/conversation.test.tsx`**（新建，3 条用例）：
+1. **打开会话：首次全量查询还在飞时，不带 afterId 的请求只有 1 次** — 用 `fullQueryPending=true` 让 `listAgentEvents` 的全量调用永远挂起（模拟"还在飞"），断言不带 afterId 的请求只有 1 次（来自 `eventsQuery` 的 queryFn 本身），不应该有第二次（追平）。
+2. **首次全量落地之后，空会话也会追平一次** — 全量返回空数组，落地后 catchUp 发一次 `afterId=0` 的请求。这条是回归守卫：防止上一版 `known.length===0` 的写法把空会话的追平关死。
+3. **首次全量落地之后，有事件的会话追平发的是带 afterId 的增量请求** — 全量返回 id=1/2 两条事件，落地后 catchUp 发 `afterId=2` 的增量请求。
+
+### 2 先红后绿的证据
+
+红（源码是 HEAD 原版，2 条失败）：
+```
+error: expect(received).toBe(expected)
+
+Expected: 1
+Received: 2
+
+      at <anonymous> (.../conversation.test.tsx:231:38)
+(fail) 打开会话：首次全量查询还在飞时，不带 afterId 的请求只有 1 次（不会多发一遍全量） [47.78ms]
+error: expect(received).toBeGreaterThan(expected)
+
+Expected: > 0
+Received: 0
+
+      at <anonymous> (.../conversation.test.tsx:260:45)
+(fail) 首次全量落地之后，有事件的会话追平发的是带 afterId 的增量请求 [24.63ms]
+
+ 1 pass
+ 2 fail
+ 3 expect() calls
+Ran 3 tests across 1 file. [333.00ms]
+```
+
+绿（源码改完后，3 条全过）：
+```
+ 3 pass
+ 0 fail
+ 4 expect() calls
+Ran 3 tests across 1 file. [333.00ms]
+```
+
+### 3 用例数量
+- `conversation.test.tsx`：新建，编辑前 0 个 → 编辑后 **3** 个。
+- 另两个既有测试文件（`composer-slash.test.tsx` / `message.test.tsx`）本次未编辑，数量不变（合计 27，门基线一致）。
+
+### 4 验收门输出
+```
+GATE: id=22-events-double-load mode=self head=cbafc6a
+GATE: out-of-bounds none
+GATE: size source-lines=10 limit=15
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=27 now=30)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (30 pass, 3s)
+GATE: RESULT PASS id=22-events-double-load
+```
+
+### 5 逐项自检
+- **首次全量落地之前不发追平请求** — 完成。`if (!eventsQuery.isSuccess) return` 挡住了落地前的追平；用例 1 断言落地前只有 1 次不带 afterId 的请求（eventsQuery 本身），修之前是 2 次。
+- **落地之后追平照常工作（含 4 秒轮询那条路）** — 完成。用例 3 验证落地后发带 `afterId=2` 的增量请求；4 秒轮询分支与一次性分支共用同一个 `catchUp`，逻辑等价，未单独卡 4 秒边界（任务说明确认不用补）。
+- **`afterId` 的算法没动** — 完成。恢复成原写法 `known.length > 0 ? known[known.length - 1]!.id : 0`，一字未改。
+- **`eventsQuery` / `setEvents` / `mergeEvents` / 间隔 / 清理逻辑都没动** — 完成。均保持原样。
+- **空会话也能追平** — 完成。用例 2 专门验证：全量返回空数组、store 一直为空，落地后 catchUp 仍发一次 `afterId=0` 的请求。这条是回归守卫，防止上一版 `known.length===0` 的写法。
+- **新测试文件能跑，且不依赖真实网络** — 完成。`@lib/rpc` 被 `mock.module` 替换成记录调用的 Proxy，无网络。
+- **把 `conversation.tsx` 改动还原后第 1 条用例会变红（自己先试一遍）** — 完成。已实际验证：还原源码后用例 1 红（Expected 1 Received 2）、用例 3 红（Expected >0 Received 0）；用例 2 在原版下也绿（原版的 catchUp 确实会发 `afterId=0`，它守卫的是上一版 `known.length===0` 的写法，不是原版）。
+- **源码改动不超过 15 行** — 完成。`git diff --numstat` 报 9 增 2 删 = 11 行（门报 10，是 net code lines），`size source-lines=10 limit=15`。
+
+### 6 我拿不准的地方
+- **用例 2 在原版源码下也绿**（原版的 catchUp 在 mount 时就发 `afterId=0`，所以 `fullEventRequests().length=2>1` 通过）。它的真正价值是守卫上一版 `known.length===0` 的写法（那种写法下空会话不发追平，`fullEventRequests().length=1`，用例 2 会红）。如果任务方希望用例 2 在原版源码下也红，需要把它改成"断言追平请求是**在落地之后**才发的"（而非只数总数），但那样会引入时序断言，脆弱。当前写法已经把"空会话要能追平"这个语义钉住了，对两版修复都正确。

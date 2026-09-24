@@ -22,6 +22,7 @@ const READY: MiniAppCapabilitySnapshot = {
   chat: { ready: true, label: "本地 · qwen3-8b" },
   asr: { ready: false, label: "" },
   bgRemove: { ready: true, label: "本地 · silueta" },
+  upscale: { ready: true, label: "本地 · realesrgan-x4plus" },
   local: { ready: true, label: "仅本机处理" },
 };
 

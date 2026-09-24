@@ -124,13 +124,23 @@ mock.module("@lib/rpc", () => ({
         voice: "longanqian",
       },
     }),
+    voicecallGetOmniConfig: async () => ({
+      config: {
+        providerId: "",
+        providerName: "",
+        apiKey: "",
+        baseUrl: "",
+        model: "qwen3.8-omni-flash",
+        configured: false,
+      },
+    }),
   },
 }));
 
 const { act, createElement } = await import("react");
 const { createRoot } = await import("react-dom/client");
 const { QueryClient, QueryClientProvider } = await import("@tanstack/react-query");
-const { CloudSetupGuide } = await import("./voice-call-screen");
+const { CloudSetupGuide, OmniSetupGuide } = await import("./voice-call-screen");
 
 afterAll(() => {
   for (const [key, value] of savedGlobals) {
@@ -139,18 +149,14 @@ afterAll(() => {
   delete (globalThis as unknown as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT;
 });
 
-async function renderGuide() {
+async function renderGuide(Guide: typeof CloudSetupGuide = CloudSetupGuide) {
   const container = document.createElement("div");
   document.body.appendChild(container);
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const root = createRoot(container);
   await act(async () => {
     root.render(
-      createElement(
-        QueryClientProvider,
-        { client },
-        createElement(CloudSetupGuide, { configured: false }),
-      ),
+      createElement(QueryClientProvider, { client }, createElement(Guide, { configured: false })),
     );
   });
   // 一拍给查询解析，一拍给渲染。
@@ -224,5 +230,30 @@ test("换厂商时模型与音色一起跟着换（阶跃的模型名和音色�
   expect(inputs).toContain("linjiajiejie");
   const text = document.body.textContent ?? "";
   expect(text).toContain("stepaudio-3-realtime-preview");
+  await cleanup();
+});
+
+test("omni 引导面板能渲染，且模型下拉只给能吃音频的模型", async () => {
+  const { cleanup } = await renderGuide(OmniSetupGuide);
+  // 与云引导同一个崩溃条件（回调里读后面的 useState），这里一并守住。
+  const text = document.body.textContent ?? "";
+  expect(text).toContain("omni");
+  // 没选厂商时给的是兜底候选，默认那条要在里面（它是这一档的默认模型）。
+  expect(text).toContain("qwen3.8-omni-flash");
+  // 这几个厂商清单里只有实时模型：实时族一个都不能出现在 omni 的模型下拉里 ——
+  // 选了它拨号只会等来一句"连不上"，因为它要的是 WebSocket 而不是 Chat Completions。
+  const selects = document.querySelectorAll('[data-slot="select-trigger"]');
+  expect(selects.length).toBeGreaterThanOrEqual(2);
+  const modelTrigger = selects[1] as unknown as HTMLElement;
+  await act(async () => modelTrigger.click());
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  });
+  const options = [...document.querySelectorAll('[role="option"]')].map((el) =>
+    (el.textContent ?? "").trim(),
+  );
+  expect(options).toContain("qwen3.8-omni-flash");
+  expect(options).not.toContain("qwen-audio-3.0-realtime-plus");
+  expect(options).not.toContain("stepaudio-3-realtime-preview");
   await cleanup();
 });

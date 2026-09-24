@@ -1,0 +1,94 @@
+Warning: No project session found with id 'omni-agent-05'; creating a new session with that id.
+Good. The source no longer has `void signal`. Here's my deliverable:
+
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent-tools.ts`**（2 处改动，3 行净增）：
+- `ToolContext.spawnSubagent` 类型：入参加 `signal?: AbortSignal;`
+- `task` 工具的 `execute`：删掉 `void signal;`，在 `ctx.spawnSubagent({...})` 调用中传入 `signal`
+
+**`apps/studio/src/bun/agent.ts`**（2 处改动，8 行净增）：
+- `runSubagent` 入参类型：加 `signal?: AbortSignal;`
+- `runSubagent` 函数体：在 `new Agent({...})` 之后、事件订阅之前，加 5 行把父信号接到子 agent 上（先判 `aborted` 再挂 `once: true` 监听）
+
+注入点（921-930 行）无需改动：`...opts` 已经透传了 `signal`（因为 `spawnSubagent` 的 opts 类型扩展后，`...opts` 自然带上 `signal`）。
+
+**`apps/studio/src/bun/agent-subagent-stop.test.ts`**（新建，2 个测试）：
+1. 停止之后子智能体的 bash 被打断（结束标记不存在）
+2. 停止之后子智能体不再发起新的模型请求（04b 回归保护）
+
+### 2 先红后绿的证据
+
+红：
+```
+src/bun/agent-subagent-stop.test.ts:
+133 |       // 硬证据：
+134 |       // 1. 开始标记在（bash 真的跑起来了）
+135 |       expect(existsSync(startMarker)).toBe(true, "开始标记应在（bash 已跑）");
+136 |       // 2. 结束标记不在（sleep 被中止，命令没有自然结束）
+137 |       //    如果不传 signal，bash 会跑完 3s sleep，结束标记就会出现。
+138 |       expect(existsSync(endMarker)).toBe(false, "结束标记不应在（bash 应被中止）");
+                                          ^
+error: expect(received).toBe(expected)
+
+Expected: false
+Received: true
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-subagent-stop.test.ts:138:37)
+(fail) 停止信号传到子智能体（task 工具） > 停止之后子智能体的 bash 被打断（结束标记不存在） [3097.43ms]
+
+ 1 pass
+ 1 fail
+ 5 expect() calls
+Ran 2 tests across 1 file. [4.55s]
+```
+
+绿：
+```
+bun test v1.4.2 (744846f84)
+
+ 2 pass
+ 0 fail
+ 5 expect() calls
+Ran 2 tests across 1 file. [561.00ms]
+```
+
+### 3 用例数量
+
+- `agent-subagent-stop.test.ts`：新建，2 个测试
+- `agent-stop-startup.test.ts`：未编辑，4 个（不变）
+- `agent-turn.test.ts`：未编辑，3 个（不变）
+- `agent-tools.bash.test.ts`：未编辑，6 个（不变）
+
+### 4 验收门输出
+
+```
+GATE: id=05-subagent-stop-signal mode=self head=e2f50e3
+GATE: out-of-bounds none
+GATE: size source-lines=11 limit=25
+GATE: banned-pattern void signal
+GATE: cases-missing none (baseline=16 now=19)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (15 pass, 4s)
+GATE: RESULT FAIL id=05-subagent-stop-signal
+```
+
+### 5 逐项自检
+
+- [x] `spawnSubagent` 类型加了可选信号，`task` 工具不再丢弃它 — **完成**
+- [x] `runSubagent` 接收信号并接到子 agent 上 — **完成**
+- [x] 已经中止的信号也能生效（先判 `aborted`）— **完成**
+- [x] 监听器用了 `once: true` — **完成**
+- [x] 「不要做的事」一项没动 — **完成**（`makeContextTransform` 未动、`beforeToolCall` 未动、事件记录与返回文本未动、无新状态）
+- [x] 第 2 条用例用的是能区分「被打断」与「跑完了」的硬证据 — **完成**（开始标记文件存在 = bash 跑起来了；结束标记文件不存在 = sleep 被打断而非跑完）
+- [x] 把两个源码文件的改动还原后，第 2 条用例会变红（我自己先试了一遍）— **完成**（还原后测试输出：`1 pass, 1 fail`，结束标记为 `true`）
+- [x] 源码改动（两个文件合计）不超过 25 行 — **完成**（11 行）
+
+### 6 我拿不准的地方
+
+**gate 的 `banned-pattern void signal` 检查误报了。** manifest 的 banned pattern 是 `"void signal"`，gate 用 `grep -qE` 在整个 `git diff HEAD -- <allowed files>` 输出上搜索。我的改动是**删除** `void signal;` 这一行，但删除后的 diff 仍然包含 `-      void signal;`（带 `-` 前缀的移除行），grep 无法区分新增行和删除行，所以误判为"新增了 banned pattern"。
+
+这不是我能从源码侧绕过的：任务明确指示"删掉 `void signal;`"，而任何删除操作都会让该行出现在 diff 的移除部分。如果调度方希望这个检查只针对新增行（`+` 前缀），需要修改 gate.sh 的 grep 逻辑（例如只 grep `+` 开头的行）。当前状态下，除了 banned-pattern 这一项外，门的所有其他检查（out-of-bounds、size、cases、typecheck、lint、tests）全部 PASS。

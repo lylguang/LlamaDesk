@@ -1,0 +1,7 @@
+apps/studio/src/bun/agent-reentry.test.ts::describe|runAgentTurn 启动窗口重入（starting 标记）
+apps/studio/src/bun/agent-reentry.test.ts::test|启动窗口里再发消息会被排队，不会并发起第二轮
+apps/studio/src/bun/agent-reentry.test.ts::test|回合正常收尾后，会话不再显示「在跑」
+apps/studio/src/bun/agent-turn.test.ts::describe|runAgentTurn 收尾返回值
+apps/studio/src/bun/agent-turn.test.ts::test|失败那一轮轨迹里仍有 error 事件，正文仍带 ⚠️（原有可见行为没动）
+apps/studio/src/bun/agent-turn.test.ts::test|模型持续报错时返回 ok: false 且带上原因
+apps/studio/src/bun/agent-turn.test.ts::test|正常成功的回合仍返回 ok: true

@@ -25,6 +25,7 @@ import { ConversationRecordList } from "../chat/record-list";
 import { SkillsSidebar } from "../skills/sidebar";
 import { MemorySidebar } from "../memory/sidebar";
 import { KbSidebar } from "../kb/sidebar";
+import { JevSidebar } from "../jev/sidebar";
 
 export function AppSidebar() {
   const t = useT();
@@ -44,7 +45,9 @@ export function AppSidebar() {
       </SidebarHeader>
 
       <SidebarContent>
-        {activeApp === "ocr" ? (
+        {activeApp === "jev" ? (
+          <JevSidebar />
+        ) : activeApp === "ocr" ? (
           <OcrRecordList />
         ) : activeApp === "voice" ? (
           <VoiceRecordList />

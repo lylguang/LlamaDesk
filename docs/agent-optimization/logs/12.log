@@ -1,0 +1,106 @@
+Warning: No project session found with id 'omni-agent-12'; creating a new session with that id.
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent-compaction.ts`**（只改 `compactMessages` 一个函数，含其上方注释）：
+
+- 函数头注释第 40 行改为：「第一条消息与最后一条 user 消息（当前这轮的任务陈述）永远保留……（多轮会话里第一条是旧任务，不能代替当前这轮）」。
+- 循环前从后往前找 `role === "user"` 且下标 ≥ 1 的消息，记下 `taskIndex`（找不到为 -1）；其估算开销提前计入 `used`（`if (taskIndex > 0) used += estimateMessagesTokens([messages[taskIndex]!])`）。
+- 主循环里新增 `firstKept`（初值 `messages.length`）跟踪实际保留到的最小下标；遇到 `index === taskIndex` 时 `kept.unshift(...)` 后 `continue`，不加开销、不受预算 break 影响。
+- 循环之后的顺序：**先**执行原有的 `while (kept.length > 1 && isToolResult(kept[0])) kept.shift()`，**再** `if (taskIndex > 0 && firstKept > taskIndex) kept.unshift(messages[taskIndex]!)`（循环提前 break 导致任务陈述没进来时补到 `kept` 最前）。
+- 原有 `dropped`（`messages.length - kept.length - 1`）、第 52 行提前返回、「至少保留最后 4 条」、占位消息位置（`[head, placeholder(dropped), ...kept]`）全部未动。
+
+**`apps/studio/src/bun/agent-compaction.test.ts`**（只加用例，`compactMessages` describe 里）：
+
+- 加 3 条用例：①多轮会话长回合时当前这轮任务陈述不被裁掉；②`messages[0]` 仍保留、占位仍在第 2 位；③任务陈述后面不会跟着悬空 toolResult（先剥后插顺序）。
+
+### 2 先红后绿的证据
+
+红（加完 3 条新用例、源码未改时，`bun test src/bun/agent-compaction.test.ts`）：
+
+```
+src/bun/agent-compaction.test.ts:
+148 |           : message("tool", `又一段工具结果 ${i}，同样很长用来撑预算`),
+149 |       );
+150 |     }
+151 |     const result = compactMessages(messages, 200, placeholder);
+152 |     expect(result.dropped).toBeGreaterThan(0);
+153 |     expect(result.messages.some((m) => m === currentTask)).toBe(true);
+                                                                 ^
+error: expect(received).toBe(expected)
+
+Expected: true
+Received: false
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-compaction.test.ts:153:60)
+(fail) compactMessages > 多轮会话长回合时，当前这轮的任务陈述不会被裁掉 [0.21ms]
+177 |       messages.push(message("tool", `导出过程中的一段工具结果 ${i}`));
+178 |       messages.push(message("assistant", `继续推进 ${i}`));
+179 |     }
+180 |     const result = compactMessages(messages, 150, placeholder);
+181 |     const index = result.messages.findIndex((m) => m === currentTask);
+182 |     expect(index).toBeGreaterThan(0);
+                        ^
+error: expect(received).toBeGreaterThan(expected)
+
+Expected: > 0
+Received: -1
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-compaction.test.ts:182:19)
+(fail) compactMessages > 任务陈述后面不会跟着被裁断的工具结果（先剥尾部再插任务陈述）[0.10ms]
+
+ 16 pass
+ 2 fail
+ 41 expect() calls
+Ran 18 tests across 1 file. [8.00ms]
+```
+
+绿（源码按五步结构改完后，同命令）：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 18 pass
+ 0 fail
+ 43 expect() calls
+Ran 18 tests across 1 file. [6.00ms]
+```
+
+另做过一遍「源码还原回 HEAD」的自检（上面红输出即来自这次还原，随后源码已恢复，见第 5 节末条）。
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-compaction.test.ts`：编辑前 15 个（12 条 compact/estimate + …实际为 15 个 test）→ 编辑后 18 个（+3，无删改；任务说明说的「现有 14 条」与基线文件里的实际计数略有出入，按实际：baseline 共 22 条含 pipeline 文件，该文件本身 15 → 18，一条没删没改）
+- `agent-compaction-pipeline.test.ts`：未编辑（3 → 3）
+
+### 4 验收门输出
+
+```
+GATE: id=12-pin-current-task mode=self head=e92e882
+GATE: out-of-bounds none
+GATE: size source-lines=26 limit=30
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=22 now=25)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (21 pass)
+GATE: RESULT PASS id=12-pin-current-task
+```
+
+### 5 逐项自检
+
+- [x] 完成 — 最后一条 user 消息被钉住（`taskIndex` 循环内跳过预算 break；循环提前 break 时由 `firstKept > taskIndex` 补插），新用例 ① 覆盖且改前变红。
+- [x] 完成 — 开销提前计入 `used`（循环前一次性加），循环命中 `taskIndex` 时 `continue` 不再加一次，无重复计算。
+- [x] 完成 — while 剥尾部工具结果在前，补插任务陈述在后；新用例 ③ 断言任务陈述下一条不是 tool/toolResult。
+- [x] 完成 — `dropped` 仍为 `messages.length - kept.length - 1`；提前返回、最后 4 条、占位第 2 位均未动（用例 ② 及既有 15 条全绿验证）。
+- [x] 完成 — `pruneSupersededReads` 未动（diff 只含 `compactMessages` 区域与注释）。
+- [x] 完成 — 第 40 行注释已改写准确。
+- [x] 完成 — 既有 15 条一条没删没改，全绿（gate 显示 baseline=22 → now=25，无 lost）。
+- [x] 完成 — 把 `agent-compaction.ts` 还原成 HEAD 后，用例 ①③ 变红（见第 2 节红输出），随后已还原回修复版。
+- [x] 完成 — 源码 diff 为 26 行（20 增 + 6 删），≤ 30。
+
+### 6 我拿不准的地方
+
+- 任务说明写「现有 14 条不许删」，但该测试文件实际有 15 个 test（compactMessages 7 + estimateTokens 3 + pruneSupersededReads 5）；基线文件（baseline 共 22 条）与实际文件一致，我按「一条不删不改」执行，15 条全部保留。
+- 找 `taskIndex` 的搜索循环我写成紧凑形式（一行体 `if (...) { taskIndex = i; break; }`），而 gate 的定点变异针对的是 `for (let i = messages.length - 1; i >= 1; i -= 1)` 这一模式串——我的写法不含该精确串，所以 manifest 的 mutation 在 self 模式下不会被触发（self 模式本就不跑 mutation），--full 验收时 mutation 步骤可能报 find-not-present / SKIPPED（manifest 过期）。若调度方认为这是个问题，需改 manifest 而不是改我的代码（语义上方向正确：从后往前找最后一条 user）。

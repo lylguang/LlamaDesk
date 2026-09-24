@@ -17,6 +17,7 @@ import meetingNotesHtml from "../../miniapps/meeting-notes.html?raw";
 import copywriterHtml from "../../miniapps/copywriter.html?raw";
 import notesHtml from "../../miniapps/notes.html?raw";
 import stickerHtml from "../../miniapps/sticker.html?raw";
+import upscaleHtml from "../../miniapps/upscale.html?raw";
 
 export const MINIAPP_HTML: Record<string, string> = {
   "bg-remove": bgRemoveHtml,
@@ -27,4 +28,5 @@ export const MINIAPP_HTML: Record<string, string> = {
   copywriter: copywriterHtml,
   notes: notesHtml,
   sticker: stickerHtml,
+  upscale: upscaleHtml,
 };

@@ -1,0 +1,34 @@
+{
+  "id": "05-subagent-stop-signal",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/agent-subagent-stop.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-subagent-stop.test.ts",
+    "apps/studio/src/bun/agent-stop-startup.test.ts",
+    "apps/studio/src/bun/agent-turn.test.ts",
+    "apps/studio/src/bun/agent-tools.bash.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "void signal"
+  ],
+  "mutations": [
+    {
+      "name": "只挂监听、不判已中止（停止发生在派子智能体之前就失效）",
+      "file": "apps/studio/src/bun/agent.ts",
+      "find": "if (opts.signal.aborted) agent.abort();",
+      "replace": ""
+    }
+  ]
+}

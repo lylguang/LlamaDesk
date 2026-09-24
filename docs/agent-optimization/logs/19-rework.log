@@ -1,0 +1,83 @@
+Gate passes. Final deliverable:
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent-tools.ts`**（本轮只动一处，其余沿用上一轮已验收的改动）
+  - 常量区（第 141 行 `COMMAND_TIMEOUT_MS` 旁）：把上一轮内联在三元表达式里的夹取逻辑抽成导出的纯函数 `resolveCommandTimeout(requested: unknown, ctxTimeout?: number): number` —— 有限正数夹到 `[1000, MAX_COMMAND_TIMEOUT_MS]`，否则 `ctxTimeout ?? COMMAND_TIMEOUT_MS`，行为与上一轮完全一致。
+  - `createBash` 里原 4 行三元表达式换成一行调用 `resolveCommandTimeout(params.timeout_ms, ctx.commandTimeoutMs)`。
+- **`apps/studio/src/bun/agent-tools.bash.test.ts`**
+  - 第 86 行那条等 600 秒的用例**整条删掉**，换成对 `resolveCommandTimeout` 的直接断言（9 条：上限夹取 / 下限夹取 / 0 退回 ctx / 负数 / NaN / +Infinity / 双 undefined / ctx 生效 / 参数优先于 ctx），毫秒级跑完，无 sleep、无 `timeout` 选项。
+  - 第 71 行「传了 timeout_ms 就按它来」保留不动。
+
+### 2 先红后绿的证据
+
+红（先写测试，导出还不存在）：
+
+```
+bun test src/bun/agent-tools.bash.test.ts -t "resolveCommandTimeout"
+
+src/bun/agent-tools.bash.test.ts:
+
+# Unhandled error between tests
+-------------------------------
+SyntaxError: Export named 'resolveCommandTimeout' not found in module '/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.ts'.
+-------------------------------
+
+ 0 pass
+ 1 fail
+ 1 error
+Ran 1 test across 1 file. [217.00ms]
+```
+
+绿（抽函数后）：
+
+```
+bun test --parallel src/bun/agent-tools.bash.test.ts
+
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+ 6 pass
+ 0 fail
+ 20 expect() calls
+Ran 6 tests across 1 file. [2.36s]
+
+real	0m2.384s
+user	0m0.405s
+sys	0m0.129s
+```
+
+### 3 用例数量
+
+`apps/studio/src/bun/agent-tools.bash.test.ts`：本轮编辑前 6 个（describe 1 + test 5）→ 编辑后 6 个（原有 4 条 + 第 71 行端到端 1 条 + 新纯函数 1 条）。现有 4 条用例一条没删没改；换掉的是上一轮我自己加的那条 600s 用例。
+
+### 4 验收门输出
+
+```
+GATE: id=19-bash-timeout-param mode=self head=40ee6dd
+GATE: out-of-bounds none
+GATE: size source-lines=25 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=37 now=39)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (32 pass)
+GATE: RESULT PASS id=19-bash-timeout-param
+```
+
+### 5 逐项自检
+
+- [x] `timeout_ms` 是可选参数，优先级高于 `ctx.commandTimeoutMs` —— 完成（`resolveCommandTimeout` 参数分支在前，测试 `30_000 vs ctx 4_000 → 30_000`）
+- [x] 夹在 `[1000, 600000]` 区间内 —— 完成（`300 → 1_000`、`999_999_999 → 600_000`）
+- [x] 非法值（NaN / 0 / 负数 / Infinity）退回默认，不会当成 0 用 —— 完成（四条断言全绿）
+- [x] 工具描述补了说明，原有两句没删 —— 完成（上一轮已做，本轮未动，`git diff` 可见原两句仍在）
+- [x] 没有动杀进程组 / abort / 沙箱包装 / 默认值 —— 完成（本轮 diff 仅函数抽取与调用点，`COMMAND_TIMEOUT_MS = 120_000` 未动）
+- [x] 现有 4 条用例一条没删没改，全绿 —— 完成（6 pass 0 fail，其中 4 条原始用例在内）
+- [x] 把 `agent-tools.ts` 的改动还原后，用例会变红 —— 完成（红证据见第 2 节：还原到「无 `resolveCommandTimeout` 导出」的状态时测试红；上一轮端到端用例也已证明参数缺失时红）
+- [x] 源码改动不超过 25 行 —— 完成（numstat 22 insertions + 3 deletions = 25，gate `size source-lines=25 limit=25` 未超限）
+- [x] 新用例毫秒级、无 sleep、无 timeout 选项 —— 完成（整个文件 2.36s 跑完）
+
+### 6 我拿不准的地方
+
+无。

@@ -144,19 +144,26 @@ export function discoverInstructionFiles(
   return files;
 }
 
-/** 按上限截断；被截掉时在结尾写明，模型不会把"截断"当成文件末尾。 */
+/**
+ * 按上限截断；被截掉时在结尾写明，模型不会把"截断"当成文件末尾。
+ * 预算从**最具体**的一层（数组末尾）开始吃，但输出仍按传入顺序（泛在前、具体在后）。
+ * 某层放不下时：截断点之后的更泛层全部丢弃（不再给它们分配），该层截一段塞进去；
+ * 截断点本身（remaining = 0）则该层整个丢掉。
+ */
 export function truncateInstructions(
   files: InstructionFile[],
   maxBytes: number,
 ): { files: InstructionFile[]; truncated: boolean } {
   if (maxBytes <= 0) return { files, truncated: false };
   let remaining = maxBytes;
-  const kept: InstructionFile[] = [];
+  const kept = new Set<number>();
+  const keptFiles = new Map<number, InstructionFile>();
   let truncated = false;
-  for (const file of files) {
+  for (let i = files.length - 1; i >= 0; i -= 1) {
+    const file = files[i]!;
     const size = Buffer.byteLength(file.contents, "utf8");
     if (size <= remaining) {
-      kept.push(file);
+      kept.add(i);
       remaining -= size;
       continue;
     }
@@ -164,12 +171,13 @@ export function truncateInstructions(
       const slice = Buffer.from(file.contents, "utf8").subarray(0, remaining);
       // 别把多字节字符切成半个：截断处往前收到最后一个完整字符。
       const text = new TextDecoder("utf-8").decode(slice).replace(/\uFFFD+$/, "");
-      kept.push({ ...file, contents: text });
+      kept.add(i);
+      keptFiles.set(i, { ...file, contents: text });
     }
     truncated = true;
     break;
   }
-  return { files: kept, truncated };
+  return { files: [...kept].sort((a, b) => a - b).map((i) => keptFiles.get(i) ?? files[i]!), truncated };
 }
 
 /** 段落去重的最小长度：比这短的行（"用 bun。"）删不删都省不下什么，还容易误伤。 */

@@ -78,7 +78,7 @@ mock.module("@lib/rpc", () => ({
       openFileDialogCalls.push(params);
       return { paths: [] as string[] };
     },
-    kbAddFiles: async () => ({ docs: [] }),
+    kbAddFiles: async () => ({ docs: [], skipped: 0 }),
     kbAddFolder: async () => ({ docs: [] }),
     kbAddNote: async () => ({ doc: {} }),
     kbAddWeb: async () => ({ doc: {} }),
@@ -245,7 +245,7 @@ async function mountDocs() {
   };
 }
 
-test("添加文件的 accept 列表含音视频扩展名（与 bun 目录导入白名单同源）", async () => {
+test("添加文件不再用原生扩展名过滤器（否则 Windows 默认只显示 .txt，.md/.pdf 被藏起来）", async () => {
   const view = await mountDocs();
   expect(view.errors).toEqual([]);
   const addFile = [...view.container.querySelectorAll("button")].find((b) =>
@@ -257,13 +257,13 @@ test("添加文件的 accept 列表含音视频扩展名（与 bun 目录导入�
   });
   await flush();
   expect(openFileDialogCalls.length).toBe(1);
-  const exts = (openFileDialogCalls[0]!.allowedFileTypes ?? "").split(",");
-  for (const ext of ["mp3", "wav", "m4a", "mp4", "mov", "mkv", "webm"]) {
-    expect(exts).toContain(ext);
-  }
-  // 既有名单没缩水
-  for (const ext of ["txt", "md", "pdf", "png", "jpg"]) {
-    expect(exts).toContain(ext);
+  // "*" = 不过滤：Electrobun 在 Windows 上把逗号分隔的每个扩展名渲染成一条独立过滤器，
+  // 首条即默认，多类型名单必然把其余类型藏进下拉框（issue #28）。
+  expect(openFileDialogCalls[0]!.allowedFileTypes).toBe("*");
+  // 白名单本身没缩水 —— 判定已移到主进程（shared/knowledge.ts），这里守住单一来源。
+  const { KB_SUPPORTED_EXT } = await import("../../../shared/knowledge");
+  for (const ext of ["txt", "md", "pdf", "png", "jpg", "mp3", "wav", "m4a", "mp4", "mov", "mkv", "webm"]) {
+    expect(KB_SUPPORTED_EXT as readonly string[]).toContain(ext);
   }
   await view.unmount();
 });

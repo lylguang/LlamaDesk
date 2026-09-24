@@ -5,7 +5,7 @@ import { existsSync, rmSync, copyFileSync, mkdirSync } from "fs";
 
 import { db, sqliteClient } from "../db";
 import { documents, pages } from "../db/schema";
-import { getAllSettings, getSetting, isConfigured, updateSettings } from "../db/settings";
+import { getAllSettings, getSetting, isConfigured, updateSettings, type SettingsKey } from "../db/settings";
 import {
   getImagesBaseDir,
   getUploadsBaseDir,
@@ -24,6 +24,7 @@ import { safeBaseName, safeJoin } from "../path-safety";
 import { exportHtmlReport } from "../report-export";
 import { processDocumentPages } from "../queue";
 import { updateState, checkForUpdate, type UpdateInfo } from "../updates";
+import * as Update from "../updates";
 import * as ReleaseCheck from "../release-check";
 import type { ReleaseCheckResult } from "../../shared/release";
 import { getUserDataDir } from "../paths";
@@ -152,6 +153,7 @@ import * as VoiceCall from "../voice-call";
 import type { VoiceCallOutgoing, VoiceCallPhase, VoiceCallPreflight } from "../voice-call";
 import * as RealtimeVoice from "../realtime-voice";
 import type { RealtimeProviderConfig } from "../realtime-voice";
+import type { OmniCallConfig } from "../omni-call";
 import * as Translate from "../translate";
 import {
   listChatModels,
@@ -209,6 +211,13 @@ import {
 } from "../benchmark";
 import { listEvalSuites, type EvalSuiteInfo } from "../eval";
 import { downloadManager, type DownloadTask } from "../download-manager";
+import {
+  buildLaunchPlanKeyFromSettings,
+  refreshLaunchPlan,
+  type LaunchPlan,
+} from "../launch-plan";
+import { effectiveFlashAttnForPlan } from "../runtimes/llama";
+import { readGgufMeta, type GgufReadFailure } from "../gguf-meta";
 import * as Voice from "../voice";
 import type { VoiceRecordRow, VoiceRecordKind, VoiceClone } from "../voice";
 import * as Asr from "../asr";
@@ -233,7 +242,19 @@ import type {
 } from "../ocr";
 import * as PpOcr from "../ppocr";
 import type { PpOcrModelSize } from "../../shared/ocr";
+import * as SystemOne from "../systemone";
+import type { SystemOneAvailability, SystemOneDiscovery } from "../systemone";
+import * as Laya from "../systemone-laya";
+import * as SystemOneDraft from "../systemone-draft";
+import {
+  SYSTEMONE_DEFAULT_MODEL,
+  newSystemOneRequestId,
+  systemOneValidationBody,
+  validateSystemOneRequest,
+} from "../../shared/systemone";
+import type { SystemOneQuestions, SystemOneResponse } from "../../shared/systemone";
 import * as BgRemove from "../bg-remove";
+import * as Upscale from "../upscale";
 import * as ImageGen from "../image-gen";
 import type { ImageGenConfig, ImageRecordRow, ImageGenBackend } from "../image-gen";
 import * as MediaSetup from "../media-setup";
@@ -624,6 +645,87 @@ export type AppRPC = {
         params: { rangeDays?: number } | undefined;
         response: UsageStats;
       };
+      /**
+       * SystemOne / JEV（Agent → JEV 面板）：跑一次类型化判定。
+       *
+       * 与网关 `/v1/systemone` 共用同一条后端解析与调用路径，所以面板里看到的结果
+       * 与外部 agent 通过网关拿到的完全一致。请求体就是官方形状（`{state, model, questions}`），
+       * 校验失败时 `status` = 422 且 `body` 是 FastAPI 形状的 detail。
+       */
+      systemoneRun: {
+        params: { state: string; questions: Record<string, unknown>; model?: string };
+        response:
+          | { ok: true; response: SystemOneResponse; backend: string; requestId: string }
+          | { ok: false; status: number; body: unknown; message: string; backend: string | null };
+      };
+      /** 后端可用性（当前会走本地还是云端、本地运行时的安装状态、价格 0）。 */
+      systemoneStatus: {
+        params: undefined;
+        response: SystemOneAvailability;
+      };
+      /** 一键安装本地运行时（venv + laya-mlx；Apple Silicon / macOS）。 */
+      /** 依赖缺失时一键补齐（装 uv，它再按需取解释器）。 */
+      systemoneInstallDeps: {
+        params: undefined;
+        response: { ok: boolean; error?: string; tool?: string };
+      };
+      systemoneInstallRuntime: {
+        params: undefined;
+        response: { ok: boolean; error?: string; version?: string };
+      };
+      /** 卸载本地运行时（只删 venv，权重留在 Hugging Face 缓存里）。 */
+      systemoneUninstallRuntime: {
+        params: undefined;
+        response: { ok: boolean; error?: string };
+      };
+      /** 停掉常驻的本地 worker（释放内存；下次调用会自动重启）。 */
+      systemoneStopWorker: {
+        params: undefined;
+        response: { ok: boolean };
+      };
+      /**
+       * 自然语言 → SystemOne 请求体（`state` + `questions`）。
+       *
+       * 用的是当前配置的聊天模型（不是 JEV 后端），目的只是"把人话翻成请求体"；
+       * 生成结果照常填进编辑器，用户可以手改，也可以直接跑。
+       */
+      systemoneDraft: {
+        params: { instruction: string; text?: string };
+        response:
+          | { ok: true; state: string; questions: SystemOneQuestions; modelUsed: string }
+          | { ok: false; error: string };
+      };
+      /** 下载某个本地权重（laya-mlx 的 repo）到 Hugging Face 缓存；进度走 systemoneModelProgress。 */
+      systemoneDownloadModel: {
+        params: { weights: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 把某个本地权重加载成常驻实例（引擎页的「启动」，不等推理）。 */
+      systemoneStartModel: {
+        params: { weights: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 卸载某个常驻权重（不动 worker 进程）。 */
+      systemoneStopModel: {
+        params: { weights: string };
+        response: { ok: boolean };
+      };
+      /** 试连当前后端（引擎页的「测试连接」）：跑一个最小 noul 问题。 */
+      systemoneTest: {
+        params: undefined;
+        response:
+          | { ok: true; model: string; backend: string; noul: number; latencyMs: number }
+          | { ok: false; status: number; message: string; backend: string | null };
+      };
+      /**
+       * 自动发现：把一个地址上有哪些模型、判定端点挂在哪读出来（不写设置）。
+       * 参数留空就用已保存的云端配置 —— 用户刚填完 Base URL 还没失焦时，界面把
+       * 正在输入的那一份直接传进来。
+       */
+      systemoneDiscover: {
+        params: { baseUrl?: string; apiKey?: string } | undefined;
+        response: SystemOneDiscovery;
+      };
       clearServerLogs: {
         params: undefined;
         response: { ok: boolean };
@@ -821,7 +923,8 @@ export type AppRPC = {
       };
       applyUpdate: {
         params: undefined;
-        response: undefined;
+        /** 没有已下载好的更新时 `ok:false` —— 界面据此提示，而不是静默什么都不发生。 */
+        response: { ok: boolean; error?: string };
       };
       /** 检查 GitHub 仓库最新 release（10 分钟缓存，force 跳过）。 */
       checkReleaseUpdate: {
@@ -1657,13 +1760,13 @@ export type AppRPC = {
         params: undefined;
         response: { workspace: string; isDefault: boolean };
       };
-      // 实时语音通话（本地 ASR + agent + TTS / 云端 Qwen Realtime）
+      // 实时语音通话（本地 ASR + agent + TTS / 云端实时语音 / omni 音频直送）
       voicecallPreflight: {
         params: undefined;
         response: VoiceCallPreflight;
       };
       voicecallStart: {
-        params: { conversationId?: number; provider?: "local" | "cloud" };
+        params: { conversationId?: number; provider?: "local" | "cloud" | "omni" };
         response: { ok: boolean; conversation?: Conversation; error?: string };
       };
       voicecallPushAudio: {
@@ -1688,7 +1791,7 @@ export type AppRPC = {
       };
       voicecallSaveProviderConfig: {
         params: {
-          provider?: "local" | "cloud";
+          provider?: "local" | "cloud" | "omni";
           /** 选中的云厂商：API Key 从厂商行取（页面不再手填）。 */
           providerId?: string;
           baseUrl?: string;
@@ -1696,6 +1799,19 @@ export type AppRPC = {
           voice?: string;
         };
         response: { ok: boolean };
+      };
+      /** omni 模式（音频直送多模态模型）的厂商与模型：密钥 / 地址都从厂商行取。 */
+      voicecallGetOmniConfig: {
+        params: undefined;
+        response: { config: OmniCallConfig };
+      };
+      voicecallSaveOmniConfig: {
+        params: { providerId?: string; model?: string };
+        response: { ok: boolean };
+      };
+      voicecallTestOmni: {
+        params: { providerId?: string; model?: string };
+        response: { ok: boolean; error?: string; latencyMs?: number };
       };
       voicecallDebug: {
         params: { line: string };
@@ -1749,6 +1865,12 @@ export type AppRPC = {
           size?: number | null;
           /** 用户单独点的文件插队优先（批量下载不传）。 */
           explicit?: boolean;
+          /**
+           * 「下载整个模型」时把仓库文件清单带过来（`listModelFiles` 的同款数据，
+           * `{path, size}`）。下载开跑前写成 manifest，完成后拿它和磁盘比对；
+           * 单文件下载不传（写不出来也没法比，不如只记这一个文件）。
+           */
+          manifestFiles?: Array<{ path?: string; name?: string; size?: number | null }>;
         };
         response: { task: DownloadTask };
       };
@@ -1771,6 +1893,17 @@ export type AppRPC = {
       listInstalledModels: {
         params: undefined;
         response: { models: InstalledModel[] };
+      };
+      /**
+       * 「运行模型」页的自动启动参数预览（SERVER_AUTO_TUNE）：用当前设置 + 硬件画像
+       * 现算一份 llama.cpp 启动计划返回给 UI。算不出来（不是 GGUF / 读不到 / 元数据不足）
+       * 返回 ok:false + 原因，不抛 —— UI 据此显示「将使用手动参数」而不是崩掉页面。
+       * key 的构造与 llama.ts 启动时用的是同一个 `buildLaunchPlanKeyFromSettings`，
+       * 预览到的就是真正会用的那份计划。
+       */
+      getLaunchPlanPreview: {
+        params: { path: string };
+        response: { ok: true; plan: LaunchPlan } | { ok: false; error: string; reason: string };
       };
       toggleFavoriteModel: {
         params: { path: string };
@@ -2181,6 +2314,40 @@ export type AppRPC = {
           width?: number;
           height?: number;
           model?: string;
+          inferenceMs?: number;
+          totalMs?: number;
+          error?: string;
+        };
+      };
+      // 本地 AI 超分（放大糊图 / 老照片）—— 与抠图同一条路线：模型在本机跑，不出进程
+      upscaleModels: {
+        params: {};
+        response: {
+          models: Upscale.UpscaleModelStatus[];
+          defaultModel: string;
+          /** 当前可用模型：优先默认模型，否则任意一个已下载的；都没有时 null。 */
+          ready: string | null;
+          /** 正在跑的超分进度（块数）；空闲时 null。小应用靠轮询它显示进度。 */
+          progress: { done: number; total: number } | null;
+        };
+      };
+      upscaleDownloadModel: {
+        params: { model: string };
+        response: { ok: boolean; error?: string };
+      };
+      /** 把用户刚在系统对话框里选中的图片收进 images/ 并返回 ref（小应用靠它拿到可加载的 URL）。 */
+      upscaleStageSource: {
+        params: { path: string };
+        response: { ref?: string; url?: string; error?: string };
+      };
+      upscaleRun: {
+        params: { ref: string; model?: string; tile?: number };
+        response: {
+          out?: { ref: string; url: string; dataUrl?: string };
+          width?: number;
+          height?: number;
+          model?: string;
+          scale?: number;
           inferenceMs?: number;
           totalMs?: number;
           error?: string;
@@ -2759,7 +2926,8 @@ export type AppRPC = {
       };
       kbAddFiles: {
         params: { kbId: number; paths: string[] };
-        response: { docs: Knowledge.KbDocView[] };
+        /** skipped = 白名单外 / 不存在的文件数（选择器不再靠原生过滤器挡类型）。 */
+        response: { docs: Knowledge.KbDocView[]; skipped: number };
       };
       kbAddFolder: {
         params: { kbId: number; path: string };
@@ -3042,6 +3210,12 @@ export type AppRPC = {
     requests: {};
     messages: {
       updateStatus: UpdateInfo;
+      /** JEV 本地运行时（laya-mlx）安装日志：整批推送，与引擎安装同一套 UI 复用。 */
+      systemoneInstallLog: { lines: string[] };
+      /** JEV 本地运行时的阶段（安装 / 加载权重 / 就绪 / 出错）。 */
+      systemonePhase: { phase: string; message: string };
+      /** JEV 本地权重下载进度（真实已落盘字节，按权重名合并推送）。 */
+      systemoneModelProgress: { weights: string; phase: "downloading" | "done"; bytes: number };
       documentChanged: { id: number };
       serverLog: { text: string };
       serverStatusChanged: { status: ServerStatus };
@@ -3157,6 +3331,8 @@ export type AppRPC = {
       ppOcrModelProgress: PpOcr.PpOcrModelProgress;
       /** 本地抠图模型下载进度（字节 + 百分比），模型卡与抠图页实时进度条。 */
       bgRemoveProgress: BgRemove.BgDownloadProgress;
+      /** 本地超分模型下载进度（字节 + 百分比），模型卡实时进度条。 */
+      upscaleProgress: Upscale.UpscaleDownloadProgress;
       /** Tesseract 引擎一键安装（brew install）日志，实时推送。 */
       tesseractInstallLog: { lines: string[] };
       /** 推理引擎一键安装（llama.cpp 下载官方构建 / Python 引擎建 venv）的日志与阶段。 */
@@ -3208,6 +3384,23 @@ let bgRemoveProgressSink: ((p: BgRemove.BgDownloadProgress) => void) | null = nu
 const bgRemoveProgress = {
   push: (p: BgRemove.BgDownloadProgress) => bgRemoveProgressSink?.(p),
 };
+
+let upscaleProgressSink: ((p: Upscale.UpscaleDownloadProgress) => void) | null = null;
+const upscaleProgress = {
+  push: (p: Upscale.UpscaleDownloadProgress) => upscaleProgressSink?.(p),
+};
+
+/**
+ * 超分结果图内联回小应用的体积上限。超过就不内联（改走媒体 URL）—— 4096px 的 PNG
+ * 可能有几十 MB，塞进 RPC 响应既慢又没必要（那种尺寸本来就该用 URL 引用）。
+ */
+const MAX_INLINE_RESULT_BYTES = 20 * 1024 * 1024;
+
+/**
+ * 正在跑的超分进度（块数）。小应用收不到推送，只能轮询 —— `upscaleModels` 会把它
+ * 一起带回去（与模型下载进度靠 localBytes 轮询是同一套路）。跑完/出错清空。
+ */
+let upscaleActive: { done: number; total: number } | null = null;
 
 const rpcRequests: NonNullable<
   Parameters<typeof BrowserView.defineRPC<AppRPC>>[0]["handlers"]["requests"]
@@ -3368,6 +3561,108 @@ const rpcRequests: NonNullable<
 
   getUsageStats: async ({ rangeDays } = {}) => {
     return getUsageStats(rangeDays);
+  },
+
+  // --- SystemOne / JEV（Agent → JEV 面板）---
+  // 与网关 /v1/systemone 走同一条 runSystemOne：面板里跑出来的结果 = 外部 agent 拿到的结果。
+  systemoneRun: async ({ state, questions, model }) => {
+    const validated = validateSystemOneRequest({ state, model: model || SYSTEMONE_DEFAULT_MODEL, questions });
+    if (!validated.ok) {
+      return {
+        ok: false,
+        status: 422,
+        body: systemOneValidationBody(validated.errors),
+        message: validated.errors.map((e) => `${e.loc.join(".")}: ${e.msg}`).join("; "),
+        backend: null,
+      };
+    }
+    const result = await SystemOne.runSystemOne(validated.value);
+    if (!result.ok) {
+      return { ok: false, status: result.status, body: result.body, message: result.message, backend: result.backend };
+    }
+    return { ok: true, response: result.response, backend: result.backend, requestId: newSystemOneRequestId() };
+  },
+
+  systemoneStatus: async () => {
+    return SystemOne.systemOneAvailability();
+  },
+
+  systemoneDraft: async ({ instruction, text }) => {
+    return SystemOneDraft.draftSystemOneRequest({ instruction, text: text ?? "" });
+  },
+
+  systemoneInstallDeps: async () => {
+    const result = await Laya.installLayaDeps();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneInstallRuntime: async () => {
+    const result = await Laya.installLayaRuntime();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneUninstallRuntime: async () => {
+    const result = await Laya.uninstallLayaRuntime();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneStopWorker: async () => {
+    const result = await Laya.stopLayaWorker();
+    SystemOne.invalidateLocalModels();
+    return result;
+  },
+
+  systemoneDownloadModel: async ({ weights }) => {
+    if (!weights?.trim()) return { ok: false, error: "缺少权重名" };
+    const result = await Laya.layaDownloadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  },
+
+  systemoneStartModel: async ({ weights }) => {
+    if (!weights?.trim()) return { ok: false, error: "缺少权重名" };
+    const result = await Laya.layaLoadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return result.ok ? { ok: true } : { ok: false, error: result.error };
+  },
+
+  systemoneStopModel: async ({ weights }) => {
+    if (weights?.trim()) await Laya.layaUnloadModel(weights.trim());
+    SystemOne.invalidateLocalModels();
+    return { ok: true };
+  },
+
+  systemoneDiscover: async (params) => {
+    const cfg = SystemOne.systemOneConfig();
+    // 界面会把正在编辑的那一份传进来（还没失焦保存）；没传就用已保存的配置。
+    const baseUrl = params?.baseUrl?.trim() || cfg.cloudBaseUrl;
+    const apiKey = params?.apiKey?.trim() || cfg.cloudApiKey;
+    return SystemOne.discoverSystemOne({ baseUrl, apiKey });
+  },
+
+  systemoneTest: async () => {
+    const started = Date.now();
+    const result = await SystemOne.runSystemOne({
+      state: "The deployment finished but the smoke test still reports one failure.",
+      model: SYSTEMONE_DEFAULT_MODEL,
+      questions: {
+        reachable: { type: "noul", instructions: "Is the state a short, self-contained sentence?" },
+      },
+    });
+    if (!result.ok) {
+      return { ok: false, status: result.status, message: result.message, backend: result.backend };
+    }
+    const answer = result.response.answers.reachable;
+    return {
+      ok: true,
+      model: result.response.model,
+      backend: result.backend,
+      noul: answer && answer.type === "noul" ? answer.noul : 0,
+      latencyMs: Date.now() - started,
+    };
   },
 
   getLaunchCommand: async ({ path }) => {
@@ -3659,8 +3954,13 @@ const rpcRequests: NonNullable<
   openFileDialog: async (params) => {
     const canChooseDirectory = params?.canChooseDirectory === true;
     const paths = await Utils.openFileDialog({
+      // 目录选择必须是 "*"，不能是 undefined：Electrobun 的 Utils.openFileDialog 用 `...opts`
+      // 展开覆盖默认值，显式 undefined 会原样送到原生封装的 toCString()，在那里对 undefined
+      // 调 .endsWith 抛 `undefined is not an object (evaluating 'jsString.endsWith')` ——
+      // 知识库「导入目录」整条路径就是这么挂的（issue #28）。"*" 是两端原生实现都显式
+      // 跳过类型过滤的哨兵值。
       allowedFileTypes: canChooseDirectory
-        ? undefined
+        ? "*"
         : (params?.allowedFileTypes ?? "pdf,png,jpg,jpeg,webp,tiff,bmp,heic,heif"),
       canChooseFiles: params?.canChooseFiles ?? true,
       canChooseDirectory,
@@ -3852,7 +4152,9 @@ const rpcRequests: NonNullable<
 
   applyUpdate: async () => {
     console.log("Applying update...");
-    Updater.applyUpdate();
+    // 必须走 updates.applyUpdateNow：它会先 await 停服再交给 Updater，
+    // 否则上一版的 detached 子进程会活过升级（见 shutdown.ts）。
+    return Update.applyUpdateNow();
   },
 
   checkReleaseUpdate: async ({ force }) => {
@@ -4569,6 +4871,16 @@ const rpcRequests: NonNullable<
   voicecallGetProviderConfig: async () => {
     return { config: RealtimeVoice.getRealtimeProviderConfig() };
   },
+  voicecallGetOmniConfig: async () => {
+    return { config: VoiceCall.getOmniCallConfig() };
+  },
+  voicecallSaveOmniConfig: async (params) => {
+    VoiceCall.saveOmniCallConfig(params ?? {});
+    return { ok: true };
+  },
+  voicecallTestOmni: async (params) => {
+    return VoiceCall.testOmniCallConnection(params ?? {});
+  },
   voicecallSaveProviderConfig: async (params) => {
     RealtimeVoice.saveRealtimeProviderConfig(params);
     return { ok: true };
@@ -4666,8 +4978,8 @@ const rpcRequests: NonNullable<
     return { tasks: downloadManager.list() };
   },
 
-  startModelDownload: async ({ repo, fileName, category, source, size, explicit }) => {
-    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit }) };
+  startModelDownload: async ({ repo, fileName, category, source, size, explicit, manifestFiles }) => {
+    return { task: downloadManager.start(repo, fileName, category, source, { size, explicit, manifestFiles }) };
   },
 
   pauseModelDownload: async ({ id }) => {
@@ -4688,6 +5000,36 @@ const rpcRequests: NonNullable<
 
   listInstalledModels: async () => {
     return { models: ModelStore.listInstalledModels() };
+  },
+
+  getLaunchPlanPreview: async ({ path }) => {
+    const modelPath = path.trim();
+    if (modelPath === "") {
+      return { ok: false as const, error: "no model path", reason: "not-found" };
+    }
+    // 与 llama.ts 启动时完全同源的 key：同一函数、同一设置读法、同一个
+    // 「设置 + 上次实测」的 FA 折算（预览端没有 Runtime 实例，实测值读设置里回写的
+    // SERVER_FLASH_ATTN_EFFECTIVE —— 启动过之后两者必然相等）。
+    const key = buildLaunchPlanKeyFromSettings(
+      modelPath,
+      (k) => getSetting(k as SettingsKey),
+      effectiveFlashAttnForPlan(
+        getSetting("SERVER_FLASH_ATTN") as "" | "off" | "on",
+        getSetting("SERVER_FLASH_ATTN_EFFECTIVE") as "" | "off" | "on" | null | undefined,
+      ),
+    );
+    const plan = await refreshLaunchPlan(key);
+    if (plan !== null) return { ok: true as const, plan };
+
+    // refreshLaunchPlan 对「读不到 GGUF」静默返回 null，这里补一次读取只为拿到
+    // 失败原因码（该读取自身有 mtime 缓存，成本可忽略）。
+    const read = await readGgufMeta(modelPath);
+    if (read.ok) {
+      // GGUF 读得到但计划算不出来：元数据不足以估算 KV cache。
+      return { ok: false as const, error: read.data.filePath, reason: "no-metadata" };
+    }
+    const reason: GgufReadFailure = read.reason;
+    return { ok: false as const, error: read.error, reason };
   },
 
   toggleFavoriteModel: async ({ path }) => {
@@ -5360,6 +5702,104 @@ const rpcRequests: NonNullable<
         level: "error",
         source: "image",
         event: "bgremove.run.failed",
+        message,
+        detail: { ref, model, error: e },
+      });
+      return { error: message };
+    }
+  },
+
+  // 本地 AI 超分：模型清单 / 下载 / 暂存源图 / 跑一次（放大）
+  upscaleModels: async () => {
+    return {
+      models: Upscale.listUpscaleModels(),
+      defaultModel: Upscale.DEFAULT_UPSCALE_MODEL,
+      ready: Upscale.anyReadyUpscaleModel(),
+      // 正在跑的话带上进度：界面靠轮询这个值显示"第 n/N 块"。
+      progress: upscaleActive,
+    };
+  },
+
+  upscaleDownloadModel: async ({ model }) => {
+    return Upscale.downloadUpscaleModel(model, {
+      onProgress: (p) => upscaleProgress.push(p),
+    });
+  },
+
+  upscaleStageSource: async ({ path }) => {
+    try {
+      const staged = await ImageGen.stageEditImage(
+        acceptedDialogPaths("image", "upscale.stage", [path]),
+      );
+      const first = staged[0];
+      if (!first) {
+        return { error: "图片无法读取：仅支持 PNG / JPG / WebP" };
+      }
+      return { ref: first.ref, url: first.url };
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "warn",
+        source: "image",
+        event: "upscale.stage.failed",
+        message: `超分源图暂存失败：${message}`,
+        detail: { error: message },
+      });
+      return { error: message };
+    }
+  },
+
+  upscaleRun: async ({ ref, model, tile }) => {
+    try {
+      const abs = resolveImageRef(ref);
+      if (!abs) return { error: `找不到图片：${ref}` };
+      upscaleActive = { done: 0, total: 0 };
+      const res = await Upscale.upscaleImage({
+        imagePath: abs,
+        model,
+        tile,
+        onProgress: (p) => {
+          upscaleActive = p;
+        },
+      });
+      upscaleActive = null;
+      if (!res.ok) return { error: res.error };
+      const r = res.result;
+      // 结果图**同时**给媒体 URL 与一个内联 dataUrl。
+      //
+      // 为什么要 dataUrl：媒体服务是固定端口，当**另一个实例**（不同数据目录）占着它时，
+      // 按设计会拒绝服务这台的图片 —— 于是小应用里结果图预览不出来、保存也失败，
+      // 而模型其实已经跑完了。内联一份结果图让小应用不依赖那个端口，单实例时两者都可用。
+      // 体积上限压过：超过 MAX_INLINE 就不内联（宁可让页面用 URL 兜底，也不塞巨型 base64）。
+      let dataUrl: string | undefined;
+      try {
+        const outAbs = resolveImageRef(r.outRef);
+        if (outAbs) {
+          const file = Bun.file(outAbs);
+          const size = file.size;
+          if (size > 0 && size <= MAX_INLINE_RESULT_BYTES) {
+            dataUrl = `data:image/png;base64,${Buffer.from(await file.arrayBuffer()).toString("base64")}`;
+          }
+        }
+      } catch {
+        // 内联失败不是错误：URL 那条路还在。
+      }
+      return {
+        out: { ref: r.outRef, url: chatImageUrl(r.outRef), dataUrl },
+        width: r.width,
+        height: r.height,
+        model: r.model,
+        scale: r.scale,
+        inferenceMs: r.inferenceMs,
+        totalMs: r.totalMs,
+      };
+    } catch (e) {
+      upscaleActive = null;
+      const message = e instanceof Error ? e.message : String(e);
+      logEvent({
+        level: "error",
+        source: "image",
+        event: "upscale.run.failed",
         message,
         detail: { ref, model, error: e },
       });
@@ -6106,7 +6546,7 @@ const rpcRequests: NonNullable<
     return Knowledge.listDocs(kbId);
   },
   kbAddFiles: async ({ kbId, paths }) => {
-    return { docs: Knowledge.addFileDocs(kbId, paths ?? []) };
+    return Knowledge.addFileDocs(kbId, paths ?? []);
   },
   kbAddFolder: async ({ kbId, path: dirPath }) => {
     return Knowledge.addFolderDocs(kbId, dirPath);
@@ -6884,6 +7324,12 @@ const REMOTE_METHODS = new Set<string>([
   "deleteMessage",
   "translateMessage",
   "readChatImage",
+  // JEV / SystemOne（类型化判定）：只读推理调用（不写盘、不装引擎），网页端也能用
+  "systemoneRun",
+  "systemoneStatus",
+  "systemoneTest",
+  // 生成请求体只是一次模型调用（不写盘、不装东西），网页端一并放开。
+  "systemoneDraft",
   // Agent
   "sendAgentMessage",
   "stopAgentRun",
@@ -7053,7 +7499,9 @@ export function initRemoteBroadcast(broadcast: (name: string, payload: unknown) 
   initMlxModelDownloadBroadcast(fakeWin);
   initMediaSetupBroadcast(fakeWin);
   initPpOcrBroadcast(fakeWin);
+  initSystemOneBroadcast(fakeWin);
   initBgRemoveBroadcast(fakeWin);
+  initUpscaleBroadcast(fakeWin);
   initTessInstallBroadcast(fakeWin);
   initSkillsBroadcast(fakeWin);
   initBackupBroadcast(fakeWin);
@@ -7160,6 +7608,31 @@ export function initPpOcrBroadcast(win: BrowserWindowWithRPC) {
   PpOcr.onPpOcrModelProgress((p) => send.push(p));
 }
 
+/** JEV 本地运行时（laya-mlx）的安装日志与阶段，推送到前端（日志整批、阶段合并到最新）。 */
+export function initSystemOneBroadcast(win: BrowserWindowWithRPC) {
+  const logs = throttleBatch((lines) => {
+    try {
+      win.webview.rpc?.send.systemoneInstallLog({ lines });
+    } catch {}
+  });
+  Laya.onLayaInstallLog((text) => logs.push(text));
+  const phase = throttleLatest<[{ phase: string; message: string }]>((payload) => {
+    try {
+      win.webview.rpc?.send.systemonePhase(payload);
+    } catch {}
+  });
+  Laya.onLayaPhase((next, message) => phase.push({ phase: next, message }));
+  // 下载进度按权重名合并推送：一次下载几十次回调，逐条推等于把界面打成轮询。
+  const progress = throttleLatest<[{ weights: string; phase: "downloading" | "done"; bytes: number }]>(
+    (payload) => {
+      try {
+        win.webview.rpc?.send.systemoneModelProgress(payload);
+      } catch {}
+    },
+  );
+  Laya.onLayaModelProgress((p) => progress.push(p));
+}
+
 /** 抠图模型下载进度，推送到前端（合并推送：整个下载只关心最新百分比）。 */
 export function initBgRemoveBroadcast(win: BrowserWindowWithRPC) {
   const send = throttleLatest<[BgRemove.BgDownloadProgress]>((p) => {
@@ -7168,6 +7641,16 @@ export function initBgRemoveBroadcast(win: BrowserWindowWithRPC) {
     } catch {}
   });
   bgRemoveProgressSink = (p) => send.push(p);
+}
+
+/** 超分模型下载进度，推送到前端（合并推送：整个下载只关心最新百分比）。 */
+export function initUpscaleBroadcast(win: BrowserWindowWithRPC) {
+  const send = throttleLatest<[Upscale.UpscaleDownloadProgress]>((p) => {
+    try {
+      win.webview.rpc?.send.upscaleProgress(p);
+    } catch {}
+  });
+  upscaleProgressSink = (p) => send.push(p);
 }
 
 /** Tesseract 引擎一键安装日志，推送到前端（整批，同 MLX）。 */

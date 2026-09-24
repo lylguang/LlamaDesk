@@ -25,7 +25,11 @@ import { proxyWebSocketOptions } from "./proxy";
  * `transcript` 字段（百炼在 `text`）。方言判定见 `realtimeDialectFor`。
  */
 
-export type VoiceCallProvider = "local" | "cloud";
+/**
+ * 通话模式的三种接法：`local`（ASR + 对话模型 + TTS）、`cloud`（实时语音 WebSocket）、
+ * `omni`（整段音频直送多模态对话模型，见 `omni-call.ts`）。
+ */
+export type VoiceCallProvider = "local" | "cloud" | "omni";
 
 // 常量与方言判定定义在 shared（通话页与采集团也要用；webview 不能值导入本模块，
 // 见那边的说明）。
@@ -53,7 +57,10 @@ export type RealtimeProviderConfig = {
 };
 
 export function getVoiceCallProvider(): VoiceCallProvider {
-  return getSetting("VOICE_CALL_PROVIDER") === "cloud" ? "cloud" : "local";
+  const stored = getSetting("VOICE_CALL_PROVIDER");
+  if (stored === "cloud" || stored === "omni") return stored;
+  // 空值 / 老配置一律按 local（本功能最初的实现）。
+  return "local";
 }
 
 /**

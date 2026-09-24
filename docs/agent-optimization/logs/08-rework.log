@@ -1,0 +1,99 @@
+门全绿。汇报:
+
+## 交付汇报
+
+### 1 改了什么
+
+- **`apps/studio/src/bun/agent-tools.glob.test.ts`**(唯一改动的文件,源码未动):
+  1. `beforeEach` 里扩充工作区:根层新增 `b.ts`、`c.ts`(原有 `a.ts`、`ab.ts`、`readme.md` 保留);`src/` 下新增 `ab.ts`(原有 `b.ts`、`deep/c.ts`、`deep/d.test.ts` 保留);新建 `x/c.ts`、`src/x/c.ts`、`ax/c.ts` 三个目录各带一个 `c.ts`。
+  2. describe 末尾追加两个用例(原有 6 条一字未动):
+     - `**/b.ts 前缀必须在斜杠处结束,不匹配 src/ab.ts`:断言同时含 `b.ts`、`src/b.ts`,且不含 `src/ab.ts`。
+     - `**/x/*.ts 目录段必须完整,不匹配 ax/c.ts`:断言同时含 `x/c.ts`、`src/x/c.ts`,且不含 `ax/c.ts`。
+- 两条断言都写了「该匹配」与「不该匹配」两半。
+
+### 2 先红后绿的证据
+
+本轮是「只加测试」,先红后绿体现为**变异验证**(把源码里正确的 `(?:.*/)?` 换成朴素 `.*`,新用例应红;改回后应全绿):
+
+变异(`re += "(?:.*/)?"` → `re += ".*"`,`i += 2` 保持不变,测试变红):
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-tools.glob.test.ts:
+ 98 | 
+ 99 |   test("**/b.ts 前缀必须在斜杠处结束，不匹配 src/ab.ts", async () => {
+100 |     const matches = await globMatches("**/b.ts");
+101 |     expect(matches).toContain("b.ts");
+102 |     expect(matches).toContain("src/b.ts");
+103 |     expect(matches).not.toContain("src/ab.ts");
+                              ^
+error: expect(received).not.toContain(expected)
+
+Expected to not contain: "src/ab.ts"
+Received: [ "ab.ts", "b.ts", "src/ab.ts", "src/b.ts" ]
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.glob.test.ts:103:25)
+(fail) glob 工具的 ** 语义 > **/b.ts 前缀必须在斜杠处结束，不匹配 src/ab.ts [0.50ms]
+105 | 
+106 |   test("**/x/*.ts 目录段必须完整，不匹配 ax/c.ts", async () => {
+107 |     const matches = await globMatches("**/x/*.ts");
+108 |     expect(matches).toContain("x/c.ts");
+109 |     expect(matches).toContain("src/x/c.ts");
+110 |     expect(matches).not.toContain("ax/c.ts");
+                              ^
+error: expect(received).not.toContain(expected)
+
+Expected to not contain: "ax/c.ts"
+Received: [ "ax/c.ts", "src/x/c.ts", "x/c.ts" ]
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-tools.glob.test.ts:110:25)
+(fail) glob 工具的 ** 语义 > **/x/*.ts 目录段必须完整，不匹配 ax/c.ts [0.51ms]
+
+ 6 pass
+ 2 fail
+ 16 expect() calls
+Ran 8 tests across 1 file. [339.00ms]
+```
+(恰好新补的 2 条红、原 6 条绿——新用例钉住了 `(?:.*/)?` 与 `.*` 的差别,且没碰原有行为。)
+
+恢复源码后(变绿):
+```
+bun test v1.4.2 (744846f84)
+
+ 8 pass
+ 0 fail
+ 16 expect() calls
+Ran 8 tests across 1 file. [343.00ms]
+```
+
+### 3 用例数量
+
+- `apps/studio/src/bun/agent-tools.glob.test.ts`:编辑前 6 个 → 编辑后 8 个(新增 2,未删未改任何旧用例)
+
+### 4 验收门输出
+
+```
+GATE: id=08-glob-doublestar mode=self head=37af816
+GATE: out-of-bounds none
+GATE: size source-lines=11 limit=25
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=0 now=9)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (8 pass)
+GATE: RESULT PASS id=08-glob-doublestar
+```
+
+### 5 逐项自检
+
+- 只改 `agent-tools.glob.test.ts` 一个文件,源码未动 — **完成**(`git diff` 里 `agent-tools.ts` 仍是上一轮的 11 行改动,本轮未再动;变异时临时改过、已按原样恢复并复跑验证)
+- 现有 6 条用例一条不删、一条不改 — **完成**(6 → 8,纯追加)
+- 新用例 1:`**/b.ts` 匹配 `b.ts`、`src/b.ts`,不匹配 `src/ab.ts`,两半都断言 — **完成**
+- 新用例 2:`**/x/*.ts` 匹配 `x/c.ts`、`src/x/c.ts`,不匹配 `ax/c.ts`,两半都断言 — **完成**
+- 变异验证:`(?:.*/)?` → `.*` 后新两条变红、原 6 条仍绿;改回后全绿 — **完成**(输出见第 2 节)
+- 用例数 6 → 8 — **完成**
+- 门 `RESULT PASS` — **完成**(输出见第 4 节)
+
+### 6 我拿不准的地方
+
+无。

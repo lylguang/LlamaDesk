@@ -50,6 +50,74 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
 
 （新条目写在这里，发布时整体归入下一个版本小节。）
 
+## [0.1.5] - 2026-09-23
+
+### Added / 新增
+
+- **JEV 板块一轮功能：云端接入自动发现、判定模型侧栏选择、数据驾驶舱、游乐场**（合并 PR #30）。云端后端接入时读 `/v1/models`（兼容 TypeSafe `models[]` 与 OpenAI `data[]`，同名合并），空请求体探活 `/v1/systemone`（422 = 可用，不产生判定），并翻 `openapi.json` 找网关 pass-through 下的其它判定服务（如 LiteLLM 的 `/jev/<名字>`）。
+  - **侧栏判定模型选择**：本地 / 云端切换 + 模型下拉，同名模型带路径出处，选另一条路径下的模型会连 Base URL 一起切，进页即自动发现。
+  - **数据驾驶舱**：三条判定路径记录端到端耗时，显示最近一次、趋势、平均、P95、区间与失败数。
+  - **游乐场**（原演练场）：网格寻路可调边长 / 障碍（BFS 保证可解、同档设置盘面确定），SVG 图标棋盘 + 实时路径 + 撞墙反馈，随窗口缩放不出滚动条；判定模型对题目无信号时直接提示；新增行情回放、打砖块及其视觉版场景。
+  - **一键装依赖 / 让 Agent 解决**：本地运行时缺依赖时一键装 uv；JEV 本地运行时与本地模型（模型库、控制台）的启动失败处都有「让 Agent 解决」，开新会话并把报错、环境与日志末尾（去 ANSI 颜色码）填进输入框，不自动发送。
+  - **本地 JEV 运行时三处卡死修复**：没有系统 Python 3.11–3.13 时即使装了 uv 也被拦住；uv `--clear` 拒绝清带标记文件的新目录；`layaDownloadModel` 自带的 id 覆盖了请求 id，回包永远对不上。另外启动失败时如实报出真实原因。
+  - **「主模型 + mmproj」GGUF 仓库起不来修复**：扫描器聚成目录条目后 llama.cpp 的 `-m` 收到目录（`failed to read magic`），运行时层改为取目录里的主 GGUF（`mainGgufInDir`），该报错也补进根因识别规则——与本地已有的 `isMmprojFile` 判名共用同一份实现。
+  - **演练场一点就崩 / 「开始」打转修复**：`JevScreen` 一串 hook 中间按 view 提前 return，切换时少跑 hook，分叉提到父层；`advance` 从渲染闭包读局面导致连跑每步都基于旧局面，改为 ref 为准、state 镜像。
+  - **回归**：新增用例覆盖 hook 数量回归、连跑推进局面、盘面生成可解性与确定性、发现逻辑、请求帧 id、GGUF 目录选文件、根因识别、诊断草稿格式与跳转。
+
+- **小应用中心新增「高清修复」：把糊照片、老照片用本地 AI 放大 4 倍并补充细节**（对应开源软件 Upscayl / Real-ESRGAN 的能力，做成一键小应用）。照片、动漫图、壁纸都能救，专治"放大全是马赛克"；重点是**完全本地运行、不上传** —— 与抠图换底同一套路线：Real-ESRGAN 的 ONNX 权重在主进程里用 `onnxruntime-web` 的 WASM 后端跑（`bun/upscale.ts`），图片不出进程、不需要任何云端厂商配置。
+  - **三个模型、三档速度**（都是 4×）：`realesrgan-x4plus`（通用画质最好，适合老照片 / 糊照片）、`realesrgan-x4plus-anime`（动漫 / 插画，均衡，默认）、`realesr-animevideov3`（最轻最快）。权重首次使用时在页面里下载（与抠图的 downloader 同一套：多源轮换 + 断点续传 + 进度轮询），之后离线可用。
+  - **开 WASM 多线程 + 逐块进度**：超分比抠图重得多，单线程实测 ~73s/块，一张 600×800 要 4 块就是 5 分钟 —— 界面只显示一句"正在放大"，用户会以为卡死。现在 `ort.env.wasm.numThreads` 按核数开（上限 8，起不来退回单线程），实测 8 线程 10.2s/块（~7×）；同时每跑完一块上报进度，小应用轮询 `upscale.status` 显示「第 n/N 块」。
+  - **超大图也能跑**：推理按模型声明的输入边长切片（社区导出多为**固定 512×512**）、相邻块留重叠带、拼接时**加权平均**（`blendTiles`）—— 否则 512px 的硬拼缝在照片上就是明显的横竖条纹。输出长边上限 4096，源图据此预缩放。几千像素的扫描件不会一次吃满内存。
+  - **按模型声明的类型喂张量**：社区 Real-ESRGAN ONNX 导出不少是 **fp16**，喂 `tensor(float32)` 会被 ORT 直接拒（`Unexpected input data type … expected: (tensor(float16))`）；输出侧同理，新 ORT 给 `Float16Array`（值已是浮点）、旧版本给 `Uint16Array`（半精度位模式），两种都处理。固定 512 的模型还必须正好喂 512（喂 128 报 shape 不匹配）。
+  - **结果图内联一份 dataUrl**：媒体服务是固定端口，当**另一个实例**（不同数据目录）占着它时按设计会拒绝服务本实例的图片 —— 此时预览/保存都会失败，而模型其实跑完了。所以 `upscale.run` 同时返回媒体 URL 与内联 PNG（≤20MB），小应用两者择一，不再被端口冲突卡死。
+  - 三档入口全连通：小应用卡片（`shared/miniapps.ts`，能力 `upscale` 本地永就绪）、`omni.upscale` 运行时动作、`upscale.*` RPC（模型清单 / 下载 / 暂存源图 / 放大）。回归：`upscale.test.ts`（切片网格 / 区域提取 / NCHW→8bit / 重叠加权平均 / 半精度往返）。
+
+### Fixed / 修复
+
+- **本地 GGUF 视觉模型上传图片不再报「缺 mmproj」——投影文件现在真的被用上了**。现场是：投影文件（如 `mmproj-Qwen3.8-27B-BF16.gguf`）已经下好躺在模型目录里，可一上传图片就被拒，提示缺 mmproj。根因是 `--mmproj` 只在**嵌入实例**上注入（原先注释里写死"聊天实例永不注入"）：GGUF 的视觉塔本来就在这个独立文件里，不传 `--mmproj` 的多模态模型**起得来、纯文本也完全正常**，只有图片请求会被服务端拒 —— 所以看起来像"文件没生效"，实际是它从来没进过命令行。现在聊天实例与嵌入实例走同一套按目录自动配对，不看模型名（`Qwen3.8-27B-Q4_K_M.gguf` 这类名字里根本没有视觉线索，按名字猜只会继续把能用的视觉模型挡在门外）。
+  - **判名放宽到三种上游写法**（`shared/modelscope.ts` 的 `isMmprojFileName`，市场页与扫描层共用同一份）：`mmproj-F16.gguf`、`mmproj-model-f16.gguf`，以及模型名在前的 `Qwen3-VL-4B-Instruct-mmproj-BF16.gguf`（ModelScope 镜像常见，旧的 `^mmproj-` 前缀会整个漏掉）。
+  - **配对前先剔除坏文件**：llama-server 遇到加载不了的投影文件会**直接退出**（实测 0.4.0/b10809：文件内容不是 GGUF、以及文件合法但不属于这个模型，两种都是 `[mtmd] failed to load multimodal model` → `exiting due to model loading error`）——猜错一次就能把本来跑得好好的模型变成"起不来"。所以内容非 GGUF 的、以及**没下完的**（侧车字节没齐，尺寸看不出）一律不配；万一还是配错（文件合法但属于别的模型，只有运行时才暴露），启动失败时**去掉投影重试一次**并说明「本模型本次运行不接受图片输入」——视觉没了但模型可用，反过来不行。`engine.mmproj.rejected` 记入 `app.log`。
+  - **下载卡把投影文件算成模型的一部分**（`model-detail/download-button.tsx`）：GGUF 的单模型下载卡原先只下推荐的量化，投影文件得用户自己在一堆文件行里找到 —— 只下权重正是"缺 mmproj"的一半现场。现在权重与投影一起下、一起算「已下载」（扫描层把它登记为同目录模型条目的 `supportFiles`：不单列成模型，但市场页的判定能看见它，否则下完那张卡会永远差这一个文件）。
+  - **Agent 的视觉能力判定与启动注入对齐**（`chat-model.ts`）：本地模型目录里有 mmproj 就直接算支持图片输入 —— 否则模型带着视觉能力起来了，Agent 却因为名字猜不出来而不给 `view_image` 工具。
+  - **回归**：`llama.test.ts`（聊天实例注入 / 三种命名 / 坏文件与半成品不配 / `isProjectorFailure` 只认投影相关日志）、`model-scan.tests.ts`（不单列但登记进同目录条目的 supportFiles、按目录配对）、`installed-models.test.ts`（投影文件算「已下载」）。
+
+## [0.1.4] - 2026-09-21
+
+### Added / 新增
+
+- **JEV / SystemOne 类型化判定：把「是/否」「选哪个」「打几分」变成一次结构化调用**（左侧一级菜单新增 **JEV** 页，默认排在 Agent 与通话之间）。用聊天模型做分类、打分、判断，拿回来的是**生成的一段话** —— 要写解析、格式会飘、同一个输入跑两次可能不一致、一次问几件事还会互相"带节奏"。JEV 换了一条路：`noul`（是/否）、`choice`（在给定选项里选一个）、`score`（在有序档位上打分）三个原语各自返回**概率分布与置信度**，答案被约束在你给的选项或档位里，多个问题一次请求、彼此独立，而且**输出 0 个 token**（一次双向前向，不逐字解码），所以也就不存在"输出跑偏"这件事。
+  - **三个入口、一套协议、同一个后端**（都走 `bun/systemone.ts` 的 `runSystemOne`，所以页面上看到的结果与外部 agent 拿到的必然一致）：**JEV 页**给人用，Agent 工具 **`jev_evaluate`**（只读、免授权，plan 模式也给了 —— 分类 / 打标 / 打分恰好是"先出方案"阶段最需要的东西），网关 **`POST /v1/systemone`** 给外部 agent 与脚本。
+  - **页面结构对齐语音合成页**（左栏参数、右栏产物）：左栏顶部是「判定引擎」分段切换 —— **本地运行**（装 laya-mlx 引擎 → 下权重 → 启动模型）与**云端接入**（Base URL + Key + 测试连接），下面是 state、问题清单与运行按钮；右栏是概率分布，没跑之前是空态。**切 tab 就是换后端**（直接写 `SYSTEMONE_BACKEND`），所以不会再出现"在云端接入里填了 Key 却一直走本地"这种事 —— 此前 tab 只是个视图，真正走哪条由 `auto` 的本地优先决定，本地地址一配云端就永远轮不到。
+  - **这一页最大的门槛是"我该问什么"**，所以应用侧栏放了五个中英双语内置示例（工单分派 / 简历评分 / 内容护栏 / 检索重排 / 意图路由），点一下就把 state 与问题一起装进左栏；中文界面给中文示例，而模型名 / 原语名 / 路径这类要照抄的标识符保持英文。左栏另有一个**一句话生成请求**：把"按技术深度、带人经历、工作年限给这份简历打分"交给当前配置的聊天模型翻成强类型请求体（只输出一个 JSON、按官方契约校验、失败时把校验错误回喂再修一轮），**生成不等于调用** —— 生成失败不会顺带丢一次推理。
+  - **协议与 TypeSafe 官方逐字段对齐**（依据是实测，不是转述）：`POST /v1/systemone` 收发 `{state, model, questions}` / `{model, answers, usage}`；鉴权按官方的两种分法 —— **缺 Key → 403**、**Key 无效 → 401**（body 都是 `{"detail":{"error_type","message"}}`）；校验失败 422，且是 FastAPI 的 `{"detail":[{loc,msg,type,…}]}` 形状；成功与失败都带 `x-typesafe-request-id`。于是**官方 SDK 只改两行**（`TYPESAFE_BASE_URL` / `TYPESAFE_API_KEY`）就能从官方切到本机网关，`typesafe-sdk` / `@typesafe-ai/sdk` 都行。`/v1/models` 是刻意的**超集**：OpenAI 的 `data` 与 TypeSafe 的 `models` 同时给 —— 官方 JS SDK 只读后者、OpenAI 客户端只读前者，分两个端点就做不到"换 Base URL 就能用"。
+  - **本地优先，但后端是硬选择**：装了托管运行时就走本机，也可以指向自建的 TypeSafe 兼容服务；云端用你自己的 Key。`auto` 只作"没选过"时的兜底（本地能用就本地，本地**连不上** —— 只有 502/504 —— 才回落云端并记一条日志；本地正常回的 4xx **不**回落：那是请求的问题，换云端只会再错一次还多花钱）。另外**模型名归一化只对托管运行时做**：自建服务原样转发（那是别人自己的服务器，模型名由它定义，改名会让它认不出来），云端收到 `laya-*` 才换成云端默认模型。
+  - **本地运行时是托管 venv**（`<dataDir>/engines/laya`，仅 Apple Silicon，其他平台如实说"不支持"，不会留下一个装到一半的 venv）：同时登记进**设置 → 模型引擎**（自成一类「类型化判定」），安装 / 卸载 / 占用在那页统一管、「管理模型」跳回 JEV 页，两页共用同一份实现。**卸载只删 venv，权重留在 Hugging Face 缓存里**（引擎与权重分开管，重装不必重下几百 MB）；引擎页还能显式下权重，界面上的「已下载 / 下载中 / 运行中」直接来自 worker 的 `models` / `download` / `load` / `unload` 四条命令。不预先下也行 —— 第一次判定时它自己会拉，只是那时才慢，所以本地那条超时单独一个设置项（`SYSTEMONE_LOCAL_TIMEOUT_MS`，默认 600s；HTTP 那条仍是 60s）。
+  - **免费**：`SYSTEMONE_PRICING` 恒为 0 —— 本地是你自己的机器，云端是你自己的 Key。用量账本照记一行（渠道「JEV 类型化判定」），只记次数与 tokens，**不记金额**；界面上的「免费」标签直接读这个常量。
+  - **附带一个内置技能** `jev-typed-decisions`（`bun/builtin-skills/`，启动时播种到中央技能库）：怎么写问题、怎么读答案、可复制的例子；外部 agent 想知道"什么时候该用类型化判定"也能直接读它。
+  - **回归**：`shared/systemone.test.ts`（校验 / 模型目录 / 错误体 / 请求 id）、`bun/gateway.systemone.test.ts`（拿官方 `@typesafe-ai/sdk` 真调一次，含 401→`AuthenticationError` / 403→`PermissionDeniedError` / 422→`UnprocessableEntityError` 的错误分类、`models.list()`、后端由设置决定、本地名归一化只在托管运行时发生）、`bun/systemone-tools.test.ts`（答案 → 可读文本、问题数夹取、概率只列前几名）、`bun/systemone-laya.test.ts`、`app/jev/drafts.test.ts`（草稿 → 官方请求体）、`app/jev/examples.test.ts`（每个内置示例都能通过官方校验）、`app/jev/index.test.tsx`（切 tab 即换后端）；端到端 `scripts/systemone-smoke.ts` 也进了 `test:smoke`。
+
+### Fixed / 修复
+
+- **设置 → 网关的端点列表漏了 `/v1/systemone`**：网关从这条路由加上开始就一直支持 JEV（根索引与 `/openapi.json` 里都有它），但设置页那张端点清单只列了 OpenAI 兼容的那几套协议，照着它看会得出"网关不支持 JEV"的结论。现在这一行在「模型列表」与「对话补全」之间，标签写明它是**类型化判定**而不是对话模型，下面另补一句说明：它是第二套协议、返回概率而非生成文本、官方 SDK 只改 Base URL 与 Key 即可直连。回归见 `gateway-screen.test.tsx`（这一行必须存在且可复制）。
+
+## [0.1.3] - 2026-09-21
+
+### Fixed / 修复
+
+- **云端对话 / Agent 的上下文窗口不再"一刀切 128K"**：以前云端只有一句兜底 128K —— 真实窗口 1M 的模型（Gemini、MiniMax M1、千问 turbo/flash…）也被按 128K 算，Agent 的自动压缩线（窗口的 60%）因此只有 78K，长任务跑到一半就被裁掉中间历史，体感就是"上下文太短没法用"；反过来把 32K 的模型当 128K 又压缩过晚，撞上厂商的 `context_length_exceeded`。
+  - **窗口按模型定**（`shared/model-context.ts`，界面与主进程共用同一个数）：用户手填的覆盖值 → 模型 id 里的尺寸后缀（`-8k` / `-128k` / `-1m`）→ 已知型号目录（DeepSeek 128K、Gemini 1M、Claude 200K、Kimi K2 256K、千问 turbo/flash 1M…）→ **认不出的默认 256K**。本地模式行为不变（仍看 `SERVER_CTX_SIZE`），云端依旧**不读**那个本地 KV 旋钮（2026-09 空回合事故的根因）。
+  - **可以手动改**：设置 → 云端模型 的模型表格新增「上下文」列 —— 空着表示自动判断（占位符显示算出来的值），填 `256K` / `1M` / `131072` 即覆盖，清空回到自动；添加模型弹框也能直接填。这个数同时驱动 Agent 压缩、上下文占用展示与设置页显示，三处不会再各说各话。
+  - DeepSeek 按官方文档取 **128K**（不是 1M）：按 1M 声明会把压缩线抬到 600K，请求在 128K 处稳定被厂商 400 拒掉；如果你用的中转确实给了 1M，在那一列就地改掉即可。
+  - **回归**：`shared/model-context.test.ts`（优先级 / 非法值 / 后缀优先于目录 / 格式化与输入解析）、`bun/chat-context.test.ts`（云端 256K 兜底、目录命中、手填覆盖生效与清空）。
+
+- **同一类问题一并清掉**：凡是"每个模型各不相同、却被写成同一个常量"的地方，都改成按模型解析（同一个解析器，界面 / 主进程 / CLI 共用）。
+  - **对话页的云端 `max_tokens` 不再读本地 KV 旋钮**（`bun/chat.ts`）：以前它从 `SERVER_CTX_SIZE` 推输出上限 —— 本地把上下文调到 128k 后切到云端，请求会带上 `max_tokens: 131072`，稳定被厂商的输出天花板拒掉。现在云端统一用 `CLOUD_MAX_OUTPUT_TOKENS`（8k，与 Agent 同一个常量、同一个理由：厂商的输出上限普遍远低于窗口）。
+  - **`omi launch` 写进 Codex / ChatGPT 的目录不再对所有云端模型写死 128k**（`cli/commands/launch.ts`）：外部工具拿 `context_window` 当自动压缩基准，1M 的云端模型被报成 128k 就会提前丢历史。现在云端走同一个解析器，并且会读你在设置页手填的覆盖值；`codexCatalogJson` 也改成接收真实窗口，而不是给本地模型（8k）和云端模型（1M）都写 128k。
+  - **本地默认窗口 8192 只留一处**：`shared/model-context.ts` 的 `LOCAL_CTX_DEFAULT`（设置默认值与 `bun/chat.ts` 的兜底都指向它），云端覆盖值的查找则统一走 `cloud-providers.ts` 的 `contextLengthForModel`（运行时与 CLI 共用），不再各写一份。
+  - **回归**：`cli/commands/launch.test.ts`（`context_window` 用传进来的真实窗口）、`shared/cloud-providers.test.ts`（覆盖值查找 / 坏值当没填 / `modelContextOf` 与运行时同一口径）。
+
+## [0.1.2] - 2026-09-20
+
 ### Added / 新增
 
 - **小应用新增「动态表情包」：一张照片做整套表情，再让它们动起来**。两条链路都在同一个页面里 —— **做一套静态表情**（选画风、选张数，得到 4 / 9 / 16 张同一个人、不同情绪的贴纸，可选把短文案画进图里）和 **让表情动起来**（挑一张，选动作，得到循环播放的 GIF，可改尺寸与速度）。提示词按三段拼装：基础规则（单人物、方图留边、缩到 120px 仍要看得清、不要水印与多余文字）＋ 画风（像素风 / 简笔画 / 可爱 3D / Q 版贴纸 / 自定义）＋ 这一张的动作与文案，四个画风各自一句画风定义，16 个情绪各自一条动作描述。
@@ -83,6 +151,15 @@ Format follows [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/), and 
   - **回归**：`app/chat/turns.test.ts`（一问一答 / 多轮 / 同轮多条助手消息 / 开场无提问 / 连续两条用户消息 / 不改动入参）。
 
 ### Fixed / 修复
+
+- **升级后打不开（图标闪一下、窗口都不出）：迁移时间戳在两份构建之间对不上，且失败时没有任何提示**。迁移器判断"某条迁移跑过没有"只比较 `__drizzle_migrations` 里已应用记录的最大 `created_at` 与**当前构建** journal 的 `when`，从不校验 hash。同一个库会被两份不同的构建打开 —— 安装版（stable 渠道）与你在仓库里跑的那份源码 —— 而历史上一批迁移的 `when` 是伪造的递增未来戳；两边一旦不一致，任一方跑过一次迁移，另一方下次启动就认为"这些迁移还没跑过"，重跑建表直接撞 `table already exists` 并中止启动。
+  - **只读进程不再迁移别人的库**：`omi` 的本地兜底（`src/cli/db.ts`）此前会以真实数据目录打开 `./db`，也就是**顺手对安装版的库跑一遍迁移与自愈** —— 这正是"跑过一次 `omi`／更新完之后再也打不开"的引信。现在它用 `OMNI_SKIP_MIGRATIONS=1` 打开（`bun/db/index.ts`）：只读、不自愈、不改时间戳；库还没建好时给一句明确指引，而不是替应用建库。迁移与自愈交回**应用**（它知道自己是哪一版）。
+  - **起不来要看得见**：新增启动守卫（`bun/startup-guard.ts`，`index.ts` 的第一行导入）。此前主进程启动是一条模块求值链，`./db` 一抛就整个 Worker 退出 —— 没有窗口、没有对话框，用户只看到闪退，而那条报错（含库路径与迁移前备份位置）没人看得到。现在**启动期**的致命错误会落进 `<数据目录>/logs/startup-error.log` 与 `app.log`（`app.start.failed`），并尽力弹一条系统原生提示框（macOS `osascript` / Windows PowerShell / Linux `zenity`，都是子进程，不依赖原生事件循环 —— 出问题的正是事件循环还没起来的那一段）。启动完成即交班（`markStartupReady()`），运行期异常仍走原有处理器。
+  - **启动不再被"读版本号"带崩**：`Updater.localInfo` 走的是 `Bun.file("../Resources/version.json")` 这个**相对工作目录**的读取，正常 `open` 拉起时正好命中，换一种启动方式就可能落空 —— 而它是同步抛错的，`getMainViewUrl()` 恰好在建窗口之前 await 它（等于"连窗口都没有的闪退"）。现在版本 / 渠道读取永不抛错（失败按打包版处理），并且**在打 `app.start` 之前**先对齐版本：此前日志里永远是 `version: 0.0.0`，事后分不清是哪一版写的现场。
+  - **升级会留痕**：本次启动版本与上一次不同时记一条 `update.applied from→to`（`LAST_RUN_VERSION`），"更新完起不来"能直接对上时间线。
+  - **升级前先真的把服务停干净**：`Updater.applyUpdate()` 内部是 Electrobun 的 `quit()`，它只**发出** before-quit、不等我们的停服 Promise 就 `forceExit` —— 于是上一版的 **detached 子进程活过升级**（真机上能查到好几天前启动、pid 早已不属于任何窗口的 `llama-server`），新版本一起来就抢不到端口与显存。收尾逻辑收敛成 `bun/shutdown.ts`（幂等、逐项 `allSettled`），升级路径先 `await teardownServices()` 再交给 Updater；窗口 close / before-quit / SIGTERM 共用同一份实现，不再各写一遍。
+  - 「重启并更新」被拒时（没有已下载好的更新）界面不再毫无反应：RPC 返回 `{ok:false,error}` 并在卡片上显示原因。
+  - **回归**：`bun/db/db-migrate-timestamps.tests.ts` 新增「只读进程不迁移、不自愈，也不因中毒库而失败」（钉住时间戳与列都原样不动）、`bun/startup-guard.test.ts`（崩溃文件位置、三平台弹框命令的参数转义与长度夹取）。
 
 - **从 ModelScope 下载的 MLX 模型下完却「找不到」：权重被当成"别的仓库已经下过"而整批跳过**（模型库里显示「已下载」，运行模型的列表里却没有它）。根因是市场页判断"这个文件下过没有"时**只比对文件名**，而 `model-00001-of-00002.safetensors` 这类分片名在几乎每个 safetensors 仓库里都一样 —— 本机 HF 缓存里的 `mlx-community/Qwen3.5-4B-MLX-bf16` 有同名分片，于是 `mlx-community/K2-Horizon-7B-Uno-oQ6e` 与 `rapid-mlx/Qwen3.8-27B-4bit-MTP-MLX` 的权重在「下载整个模型」时被整个跳过，落盘只剩 config / tokenizer；而权重文件不存在时仓库目录**根本不算一个模型**（`isRepoModelDir` 要求真有权重），所以它既不会出现在运行模型的下拉里，也跑不起来 —— 一个"下载成功"的假象。用户机上实测：K2-Horizon-7B-Uno-oQ6e 的 2 个分片（5.0 GB + 2.5 GB）、Qwen3.8-27B-4bit-MTP-MLX 的 3 个分片（约 16 GB）都是这么丢的。
   - 判定改为**按仓库**（`installedFilesForRepo`，`mainview/lib/installed-models.ts`）：市场里的 repo id（`org/repo`）与落盘目录名（`safeRepoId` 编码的 `org__repo`）、HF 缓存条目（`org/repo`）三种写法归一后比对，同名分片属于别的仓库不算已下载 —— 宁可让用户重下一个已存在的文件（多花流量），也不能把没下的权重当成下过（模型直接不可用）。

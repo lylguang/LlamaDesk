@@ -1,0 +1,209 @@
+$ bun run --cwd apps/studio test
+$ bun test --parallel
+bun test v1.4.2 (744846f84) 32x PARALLEL
+
+src/mainview/app/agent/composer-slash.test.tsx:
+Received NaN for the `strokeDashoffset` attribute. If this is expected, cast the value to a string.
+
+src/bun/image-server.conflict.test.ts:
+媒体服务端口 19798 被占用，稍后重试 warn: Failed to start server. Is port 19798 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at bindMediaServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:294:7)
+      at startImageServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:534:5)
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.conflict.test.ts:59:3)
+
+媒体服务端口 19798 被占用，稍后重试 warn: Failed to start server. Is port 19798 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at bindMediaServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:294:7)
+      at startImageServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:534:5)
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.conflict.test.ts:70:3)
+
+Image server running on http://127.0.0.1:19798
+媒体服务端口 19798 被占用，稍后重试 warn: Failed to start server. Is port 19798 in use?
+ syscall: "listen",
+   errno: 0,
+    code: "EADDRINUSE"
+
+      at bindMediaServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:294:7)
+      at startImageServer (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.ts:534:5)
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/image-server.conflict.test.ts:90:3)
+
+
+src/bun/gateway.systemone.test.ts:
+Gateway running on http://127.0.0.1:10133 (API key enabled)
+
+src/bun/image-server.route.test.ts:
+Image server running on http://127.0.0.1:19799
+
+src/mainview/app/voice-call-screen.test.tsx:
+Warning: KaTeX doesn't work in quirks mode. Make sure your website has a suitable doctype.
+
+src/bun/prompt-library.test.ts:
+[prompt-library] seeded image: +638 prompts
+[prompt-library] seeded video: +2060 prompts
+[prompt-library] seeded llm: +35 prompts
+
+src/bun/gateway.test.ts:
+Gateway running on http://127.0.0.1:10123
+Gateway running on http://127.0.0.1:10125 (configured 10124 busy)
+Gateway running on http://127.0.0.1:10123
+
+src/mainview/components/error-boundary.test.tsx:
+65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: 渲染炸了
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performWorkOnRootViaSchedulerTask (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18957:7)
+
+
+The above error occurred in the <Boom> component.
+
+React will try to recreate this component tree from scratch using the error boundary you provided, ErrorBoundary.
+
+[render error] 65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: 渲染炸了
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performWorkOnRootViaSchedulerTask (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18957:7)
+ 
+    at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+    at ErrorBoundary (unknown:1:28)
+65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: boom
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performWorkOnRootViaSchedulerTask (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18957:7)
+
+
+The above error occurred in the <Boom> component.
+
+React will try to recreate this component tree from scratch using the error boundary you provided, ErrorBoundary.
+
+[render error] 65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: boom
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performWorkOnRootViaSchedulerTask (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18957:7)
+ 
+    at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+    at ErrorBoundary (unknown:1:28)
+65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: boom
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performSyncWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18972:7)
+
+
+The above error occurred in the <Boom> component.
+
+React will try to recreate this component tree from scratch using the error boundary you provided, ErrorBoundary.
+
+[render error] 65 | 
+66 | const { ErrorBoundary } = await import("./error-boundary");
+67 | const { useRouter } = await import("@stores/router");
+68 | 
+69 | function Boom({ message = "boom" }: { message?: string }): ReactNode {
+70 |   throw new Error(message);
+                 ^
+error: boom
+      at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+      at react_stack_bottom_frame (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:25904:20)
+      at renderWithHooks (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:7662:22)
+      at updateFunctionComponent (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:10166:19)
+      at runWithFiberInDEV (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:874:13)
+      at performUnitOfWork (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17641:22)
+      at workLoopSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17469:41)
+      at renderRootSync (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:17450:11)
+      at performWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:16583:35)
+      at performSyncWorkOnRoot (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/node_modules/.bun/react-dom@19.2.4+b1ab299f0a400331/node_modules/react-dom/cjs/react-dom-client.development.js:18972:7)
+ 
+    at Boom (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/mainview/components/error-boundary.test.tsx:70:13)
+    at ErrorBoundary (unknown:1:28)
+
+src/bun/gateway-web.test.ts:
+[gateway-web.test] 没找到 vite 产物（apps/studio/dist），跳过两条依赖产物的用例；在 apps/studio 下跑一次 `bun x vite build` 就会跑起来。
+
+src/bun/user-prompt.test.ts:
+[prompt-library] seeded image: +638 prompts
+[prompt-library] seeded video: +2060 prompts
+[prompt-library] seeded llm: +35 prompts
+
+src/mainview/app/agent/message.test.tsx:
+Warning: KaTeX doesn't work in quirks mode. Make sure your website has a suitable doctype.
+
+ 2267 pass
+ 3 skip
+ 0 fail
+ 13763 expect() calls
+Ran 2270 tests across 220 files. [10.57s]

@@ -1,11 +1,12 @@
 /**
  * 上下文窗口解析（`chat-context.ts`）的单测。
  *
- * 钉住的取舍（2026-09 MiniMax-M3 云端空回合事故的教训，见模块注释）：
+ * 钉住的取舍：
  *   1. 云端模式**不读** `SERVER_CTX_SIZE` —— 那是 llama.cpp 的 KV 旋钮，
- *      沿用它会把 128k 窗口的云端模型当 8k 算，max_tokens 被钳到 1；
- *   2. 模型 id 自带尺寸后缀的按 id 认（`-8k` / `-32k` / `-128k` / `-1m`），
- *      认不出的回落保守的 128k；
+ *      沿用它会把 128k 窗口的云端模型当 8k 算，max_tokens 被钳到 1
+ *      （2026-09 MiniMax-M3 云端空回合事故）；
+ *   2. 云端窗口按模型定：**用户手填的覆盖值** → id 尺寸后缀 → 已知型号目录
+ *      → 256K 兜底（值是 1M 的型号不再被按 128K 压缩）；
  *   3. 本地模式行为与旧版完全一致（`SERVER_CTX_SIZE || 8192`）。
  */
 import { describe, expect, test } from "bun:test";
@@ -32,7 +33,7 @@ describe("contextWindowFromModelId", () => {
     expect(contextWindowFromModelId("some-model-1m")).toBe(1_048_576);
   });
 
-  test("没有尺寸后缀的 id 返回 undefined（交给兜底，不瞎猜）", () => {
+  test("没有尺寸后缀的 id 返回 undefined（交给目录 / 兜底，不瞎猜）", () => {
     expect(contextWindowFromModelId("MiniMax-M3")).toBeUndefined();
     expect(contextWindowFromModelId("deepseek-chat")).toBeUndefined();
     expect(contextWindowFromModelId("glm-4.5")).toBeUndefined();
@@ -60,22 +61,52 @@ describe("chatContextWindow", () => {
     expect(chatContextWindow()).toBe(8192);
   });
 
-  test("云端模式无视引擎旋钮：id 带尺寸按 id，否则 128k 兜底", () => {
+  test("云端模式无视引擎旋钮：id 带尺寸按 id，认不出的走 256K 兜底", () => {
     SETTINGS.SERVER_MODE = "remote";
     // 引擎旋钮即便被设过也不串门 —— 它只管本地 KV 分配。
     SETTINGS.SERVER_CTX_SIZE = "8192";
+    SETTINGS.CLOUD_MODELS = "[]";
     SETTINGS.VLLM_MODEL_NAME = "MiniMax-M3";
-    expect(chatContextWindow()).toBe(131_072);
-    SETTINGS.VLLM_MODEL_NAME = "ernie-4.5-turbo-128k";
-    expect(chatContextWindow()).toBe(131_072); // 128k = 131072，恰好同值
+    expect(chatContextWindow()).toBe(262_144);
     SETTINGS.VLLM_MODEL_NAME = "moonshot-v1-8k";
     expect(chatContextWindow()).toBe(8 * 1024);
+  });
+
+  test("云端模式：已知型号走目录（1M 档不会被按 128K 算）", () => {
+    SETTINGS.SERVER_MODE = "remote";
+    SETTINGS.CLOUD_MODELS = "[]";
+    SETTINGS.VLLM_MODEL_NAME = "gemini-2.5-pro";
+    expect(chatContextWindow()).toBe(1_048_576);
+    SETTINGS.VLLM_MODEL_NAME = "deepseek-chat";
+    expect(chatContextWindow()).toBe(131_072);
+  });
+
+  test("云端模式：设置页手填的覆盖值优先于一切自动判断", () => {
+    SETTINGS.SERVER_MODE = "remote";
+    SETTINGS.VLLM_MODEL_NAME = "deepseek-chat"; // 目录里是 128K
+    SETTINGS.CLOUD_MODELS = JSON.stringify([
+      { id: "deepseek-chat", contextLength: 1_048_576 },
+      { id: "bad-model", contextLength: 0 }, // 非法值：当没填（目录/兜底接手）
+    ]);
+    expect(chatContextWindow()).toBe(1_048_576);
+
+    // 覆盖值写的是别的模型：当前模型仍按目录走。
+    SETTINGS.VLLM_MODEL_NAME = "glm-4.5";
+    expect(chatContextWindow()).toBe(131_072);
+
+    // 清掉覆盖值 → 回到自动判断。
+    SETTINGS.CLOUD_MODELS = "[]";
+    expect(chatContextWindow()).toBe(131_072);
+    SETTINGS.VLLM_MODEL_NAME = "deepseek-chat";
+    SETTINGS.CLOUD_MODELS = JSON.stringify([{ id: "deepseek-chat" }]);
+    expect(chatContextWindow()).toBe(131_072);
   });
 
   test("SERVER_MODE 未设置时按云端处理（远端是推理服务的默认形态）", () => {
     delete SETTINGS.SERVER_MODE;
     SETTINGS.VLLM_MODEL_NAME = "MiniMax-M3";
+    SETTINGS.CLOUD_MODELS = "[]";
     delete SETTINGS.SERVER_CTX_SIZE;
-    expect(chatContextWindow()).toBe(131_072);
+    expect(chatContextWindow()).toBe(262_144);
   });
 });

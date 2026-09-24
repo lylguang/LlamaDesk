@@ -229,7 +229,7 @@ export class VllmRuntime implements Runtime {
     this.appendLog(`$ ${cmd.join(" ")}\n`);
 
     try {
-      this.serverProcess = spawnServerProcess(cmd);
+      this.serverProcess = spawnServerProcess(cmd, undefined, "vllm");
       pumpServerOutput(this.serverProcess, this.appendLog.bind(this));
 
       const self = this;

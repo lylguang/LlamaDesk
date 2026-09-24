@@ -1,0 +1,17 @@
+{
+  "id": "18c-smoke-recalibrate",
+  "allowed_files": [
+    "apps/studio/scripts/agent-resilience-smoke.ts"
+  ],
+  "source_files": [],
+  "test_files": [
+    "apps/studio/src/bun/agent-spill.test.ts",
+    "apps/studio/src/bun/agent-compaction.test.ts"
+  ],
+  "max_source_lines": 0,
+  "banned_patterns": [
+    "AGENT_COMPACT_MODE: \"off\"",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ]
+}

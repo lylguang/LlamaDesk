@@ -30,8 +30,9 @@ import type { GpuKind } from "../shared/hardware";
 import type { LocalEngineId } from "../shared/local-engines";
 import { logEvent } from "./app-log";
 import { defaultCommandRunner, type CommandRunner } from "./command-runner";
-import { engineVersionFilePath, llamaCppRootDir, type PythonEngineId } from "./engine-paths";
+import { engineVersionFilePath, llamaCppRootDir, pythonEngineDir, type PythonEngineId } from "./engine-paths";
 import { getHardwareInfo } from "./hardware";
+import { removeManifest, writeManifest } from "./install-manifest";
 import { fetchAssetFromSources, githubReleaseUrls } from "./mirror-download";
 import {
   installPythonEngine,
@@ -480,6 +481,19 @@ export async function installLlamaCpp(deps: LlamaInstallDeps): Promise<EngineIns
 
   const staging = join(rootDir, `.staging-${process.pid}`);
   try {
+    // manifest 先于一切文件操作删掉：这次安装要么最终把它写回来，要么永远没有。
+    if (!removeManifest(rootDir)) {
+      const error = "无法清除上次的安装记录（.omni-install.json），请检查 engines 目录是否被占用或只读";
+      reporter.log(`${error}\n`);
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "engine.install.manifest_locked",
+        message: `llama.cpp 安装中止：${error}`,
+        detail: { engine: "llama.cpp", rootDir },
+      });
+      return finish({ ok: false, error }, "manifest-locked");
+    }
     rmSync(staging, { recursive: true, force: true });
     // 已装过还来点一次 = 想升级（界面在已就绪的行上不给按钮，但 RPC 是通的）：说清楚
     // 这次是重新装，而不是让用户以为点了个没反应的按钮。
@@ -507,6 +521,24 @@ export async function installLlamaCpp(deps: LlamaInstallDeps): Promise<EngineIns
         // 是靠回退才装上的，就在日志里（why）留个记号：用户看到"显存 0%"时有据可查。
         const fellBack = tried.size > 0;
         const isCpu = plan.label.includes("（CPU）");
+        // manifest 是全部步骤完成后的最后一道原子写：写失败只记日志，
+        // 安装本身已经成功（VERSION / 二进制都已落位），不能反过来说它失败。
+        const manifestOk = writeManifest(rootDir, {
+          engine: "llama.cpp",
+          version: release.tag,
+          platform,
+          arch,
+          steps: 1 + tried.size,
+        });
+        if (!manifestOk) {
+          logEvent({
+            level: "warn",
+            source: "server",
+            event: "engine.install.manifest_write_failed",
+            message: "llama.cpp 安装成功，但安装完整性标记没写进（下次验证会显示「未完成」）",
+            detail: { engine: "llama.cpp", version: release.tag, rootDir },
+          });
+        }
         return finish({ ok: true, version: release.tag }, fellBack ? (isCpu ? "cpu-fallback" : "gpu-fallback") : undefined);
       }
       lastError = attempt.error ?? "安装失败";
@@ -666,6 +698,20 @@ export async function installInferenceEngine(
       return await installLlamaCpp({ reporter, ...overrides });
     }
     const target = PYTHON_ENGINE_TARGETS[engine];
+    // Python 引擎的 manifest 由 python-engine 在内核里写（它的目录与版本就在那里），
+    // 这里只负责安装开始前的清除。
+    if (!removeManifest(pythonEngineDir(target.id))) {
+      const error = "无法清除上次的安装记录（.omni-install.json），请检查该引擎目录是否被占用或只读";
+      reporter.log(`${error}\n`);
+      logEvent({
+        level: "warn",
+        source: "server",
+        event: "engine.install.manifest_locked",
+        message: `${ENGINE_SHORT_NAMES[engine]} 安装中止：${error}`,
+        detail: { engine, dir: pythonEngineDir(target.id) },
+      });
+      return { ok: false, error };
+    }
     const result = await installPythonEngine({
       id: target.id,
       label: ENGINE_SHORT_NAMES[engine],
@@ -676,9 +722,41 @@ export async function installInferenceEngine(
       findPython: overrides.findPython,
       upgrade: overrides.upgrade,
     });
+    if (result.ok) {
+      // 跳过的（已装好）与真装的都写一份：老用户升级/重装后从此有标记，
+      // 新装则让「装完了」变成可验证事实。步骤数只记真实执行的（跳过 = 1）。
+      finishPythonManifest(
+        target.id,
+        ENGINE_SHORT_NAMES[engine],
+        result.version ?? null,
+        overrides.upgrade ? 4 : 1,
+      );
+    }
     return { ok: result.ok, error: result.error, version: result.version };
   } finally {
     installing = null;
+  }
+}
+
+/**
+ * Python 引擎安装成功后的 manifest（由 python-engine 的最后一步调用：探针通过、
+ * VERSION 已写）。写失败只记日志 —— 安装已经成功，不能让标记反过来说它失败。
+ */
+function finishPythonManifest(
+  id: PythonEngineId,
+  label: string,
+  version: string | null,
+  steps: number,
+): void {
+  const dir = pythonEngineDir(id);
+  if (!writeManifest(dir, { engine: id, version, platform: process.platform, arch: process.arch, steps })) {
+    logEvent({
+      level: "warn",
+      source: "server",
+      event: "engine.install.manifest_write_failed",
+      message: `${label} 安装成功，但安装完整性标记没写进（下次验证会显示「未完成」）`,
+      detail: { engine: id, version, dir },
+    });
   }
 }
 

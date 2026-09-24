@@ -1,0 +1,893 @@
+$ oxlint --report-unused-disable-directives
+
+  ! eslint(no-unused-vars): Variable 'view' is declared but never used. Unused variables should start with a '_'.
+     ,-[apps/studio/src/mainview/components/start-failure-details.test.tsx:255:9]
+ 254 |   await seedServedModel("model-format");
+ 255 |   const view = await renderDetails();
+     :         ^^|^
+     :           `-- 'view' is declared here
+ 256 |   expect(buttonByText("一键安装")).toBeUndefined();
+     `----
+  help: Consider removing this declaration.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has a missing dependency: 'translateSeg'
+     ,-[apps/studio/src/mainview/app/live-translate/use-live-translate.tsx:287:6]
+ 284 |       pendingRef.current.add(`${d.key}|${d.lang}`);
+ 285 |       translateSeg.mutate(d);
+     :       ^^^^^^|^^^^^
+     :             `-- useEffect uses `translateSeg` here
+ 286 |     }
+ 287 |   }, [segments, targets, translations, translatedFrom]);
+     :      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 288 | 
+     `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useEffect depends on `providers`, which changes every render
+     ,-[apps/studio/src/mainview/app/benchmark/use-benchmark-config.ts:133:7]
+ 118 |   // 云端：cloud_providers 表直连，与全局激活状态无关。
+ 119 |   const providers = providersQuery.data?.providers ?? [];
+     :         ^^^^|^^^^
+     :             `-- `providers` is declared here
+ 120 |   const cloudActiveId = providersQuery.data?.activeId ?? null;
+ 121 |   useEffect(() => {
+ 122 |     if (providers.length === 0) {
+ 123 |       setProviderId(null);
+ 124 |       return;
+ 125 |     }
+ 126 |     if (!providerId || !providers.some((p) => p.id === providerId)) {
+ 127 |       // 内置厂商目录整份常驻（20 多家），默认落在激活行 → 第一个配好 Key 的行 →
+ 128 |       // 第一行：不然一进来选中的是"还没配 Key 的那家"，模型清单也是空的。
+ 129 |       const configured =
+ 130 |         providers.find((p) => p.apiKey.trim()) ?? providers.find((p) => p.models.length > 0);
+ 131 |       setProviderId(cloudActiveId ?? configured?.id ?? providers[0]!.id);
+ 132 |     }
+ 133 |   }, [providers, cloudActiveId, providerId]);
+     :       ^^^^|^^^^
+     :           `-- it will always cause this hook to re-evaluate
+ 134 |   const selectedProvider = providers.find((p) => p.id === providerId) ?? null;
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `records`, which changes every render
+    ,-[apps/studio/src/mainview/app/benchmark/use-benchmark-config.ts:77:9]
+ 76 | 
+ 77 |   const records = recordsQuery.data?.records ?? [];
+    :         ^^^|^^^
+    :            `-- `records` is declared here
+ 78 | 
+    `----
+     ,-[apps/studio/src/mainview/app/benchmark/use-benchmark-config.ts:241:7]
+ 240 |     return null;
+ 241 |   }, [records, recordDetail, run, selectedRecordId]);
+     :       ^^^|^^^
+     :          `-- it will always cause this hook to re-evaluate
+ 242 | 
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useCallback has a missing dependency: 'setRoute'
+    ,-[apps/studio/src/mainview/app/main-layout/drop-zone.tsx:51:5]
+ 44 |         navigatedRef.current = true;
+ 45 |         setRoute({ path: "document", id });
+    :         ^^^^|^^^
+    :             `-- useCallback uses `setRoute` here
+ 46 |       }
+ 47 |       rpcClient.processDocument({ id }).then(() => {
+ 48 |         queryClient.invalidateQueries({ queryKey: ["documents"] });
+ 49 |       });
+ 50 |     },
+ 51 |     [queryClient],
+    :     ^^^^^^^^^^^^^
+ 52 |   );
+    `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useEffect depends on `kbs`, which changes every render
+     ,-[apps/studio/src/mainview/app/kb/index.tsx:130:38]
+ 121 | 
+ 122 |   const kbs = listQuery.data?.kbs ?? [];
+     :         ^|^
+     :          `-- `kbs` is declared here
+ 123 |   const selected: KbView | null = kbs.find((k) => k.id === selectedKbId) ?? null;
+ 124 | 
+ 125 |   // 选中项被删除后回落到第一个
+ 126 |   useEffect(() => {
+ 127 |     if (listQuery.isSuccess && !selected && kbs.length > 0) {
+ 128 |       setSelectedKbId(kbs[0]!.id);
+ 129 |     }
+ 130 |   }, [listQuery.isSuccess, selected, kbs, setSelectedKbId]);
+     :                                      ^|^
+     :                                       `-- it will always cause this hook to re-evaluate
+ 131 | 
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint(no-unused-vars): Variable 'CHIP_TIMEOUT_MS' is declared but never used. Unused variables should start with a '_'.
+    ,-[apps/studio/src/bun/hardware.ts:29:7]
+ 28 | 
+ 29 | const CHIP_TIMEOUT_MS = DEFAULT_COMMAND_TIMEOUT_MS;
+    :       ^^^^^^^|^^^^^^^
+    :              `-- 'CHIP_TIMEOUT_MS' is declared here
+ 30 | /** system_profiler 是秒级命令，给宽一点，超时也要能继续（显存缺失只影响预算口径）。 */
+    `----
+  help: Consider removing this declaration.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has missing dependencies: 'envQuery', and 'isCustom'
+     ,-[apps/studio/src/mainview/app/setup-screen/local-flow.tsx:291:6]
+ 284 |     if (step !== "start") return;
+ 285 |     void envQuery.refetch();
+     :          ^^^^^^^^
+ 286 |     if (!isCustom) {
+     :          ^^^^^^^^
+ 287 |       void rpcClient
+ 288 |         .listDownloads()
+ 289 |         .then(({ tasks }) => useModelDownloadStore.getState().setTasks(tasks));
+ 290 |     }
+ 291 |   }, [step]);
+     :      ^^^^^^
+ 292 | 
+     `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has a missing dependency: 'installedQuery'
+     ,-[apps/studio/src/mainview/app/setup-screen/local-flow.tsx:345:6]
+ 342 |     if (ours.length > 0 && ours.every((t) => t.status === "completed")) {
+ 343 |       void installedQuery.refetch();
+     :            ^^^^^^^|^^^^^^
+     :                   `-- useEffect uses `installedQuery` here
+ 344 |     }
+ 345 |   }, [downloadTasks, plan, isCustom]);
+     :      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 346 | 
+     `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint(no-control-regex): Unexpected control character
+    ,-[apps/studio/src/bun/path-safety.ts:62:12]
+ 61 |   if (!trimmed || trimmed === "." || trimmed === "..") return null;
+ 62 |   if (/[/\\\0]/.test(trimmed)) return null;
+    :            ^|
+    :             `-- '\0' matches the null character (U+0000), which is a control character.
+ 63 |   return trimmed;
+    `----
+  help: Avoid matching control characters in regular expressions. If intentional, consider using a Unicode escape instead.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `files`, which changes every render
+    ,-[apps/studio/src/mainview/app/model-detail/index.tsx:74:6]
+ 68 | 
+ 69 |   const files = filesQuery.data?.files ?? [];
+    :         ^^|^^
+    :           `-- `files` is declared here
+ 70 |   const effectiveFilter: "all" | ModelFileKind =
+ 71 |     formatFilter ?? (engine === "llama.cpp" ? "gguf" : "safetensors");
+ 72 |   const visibleFiles = useMemo(
+ 73 |     () => (effectiveFilter === "all" ? files : files.filter((f) => f.kind === effectiveFilter)),
+ 74 |     [files, effectiveFilter],
+    :      ^^|^^
+    :        `-- it will always cause this hook to re-evaluate
+ 75 |   );
+    `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `installed`, which changes every render
+     ,-[apps/studio/src/mainview/app/model-detail/index.tsx:110:6]
+ 106 |   // 编码过的仓库标签（`Qwen__X`）才能对上。
+ 107 |   const installed = installedData?.models ?? [];
+     :         ^^^^|^^^^
+     :             `-- `installed` is declared here
+ 108 |   const managedEntries = useMemo(
+ 109 |     () => installed.filter((m) => m.origin === "managed" && m.repo === safeRepoId(repo ?? "")),
+ 110 |     [installed, repo],
+     :      ^^^^|^^^^
+     :          `-- it will always cause this hook to re-evaluate
+ 111 |   );
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `installed`, which changes every render
+     ,-[apps/studio/src/mainview/app/model-detail/index.tsx:116:6]
+ 106 |   // 编码过的仓库标签（`Qwen__X`）才能对上。
+ 107 |   const installed = installedData?.models ?? [];
+     :         ^^^^|^^^^
+     :             `-- `installed` is declared here
+ 108 |   const managedEntries = useMemo(
+ 109 |     () => installed.filter((m) => m.origin === "managed" && m.repo === safeRepoId(repo ?? "")),
+ 110 |     [installed, repo],
+ 111 |   );
+ 112 |   const externalOnly = useMemo(
+ 113 |     () =>
+ 114 |       !managedEntries.length &&
+ 115 |       installed.some((m) => m.origin !== "managed" && safeRepoId(m.repo) === safeRepoId(repo ?? "")),
+ 116 |     [installed, managedEntries.length, repo],
+     :      ^^^^|^^^^
+     :          `-- it will always cause this hook to re-evaluate
+ 117 |   );
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `files`, which changes every render
+     ,-[apps/studio/src/mainview/app/model-detail/index.tsx:135:6]
+  68 | 
+  69 |   const files = filesQuery.data?.files ?? [];
+     :         ^^|^^
+     :           `-- `files` is declared here
+  70 |   const effectiveFilter: "all" | ModelFileKind =
+  71 |     formatFilter ?? (engine === "llama.cpp" ? "gguf" : "safetensors");
+  72 |   const visibleFiles = useMemo(
+  73 |     () => (effectiveFilter === "all" ? files : files.filter((f) => f.kind === effectiveFilter)),
+  74 |     [files, effectiveFilter],
+  75 |   );
+  76 | 
+  77 |   const recommended = useMemo(() => {
+  78 |     if (visibleFiles.length === 0) return null;
+  79 |     const quant = source?.kind === "preset" ? source.preset.defaultQuant : null;
+  80 |     if (quant) {
+  81 |       const hit = visibleFiles.find((f) => matchQuant(f.name, quant));
+  82 |       if (hit) return hit;
+  83 |     }
+  84 |     // No quant match (or a search result): fall back to the largest weight
+  85 |     // file — works for GGUF / safetensors / bin / pt / onnx / ckpt.
+  86 |     const weights = visibleFiles.filter((f) => f.isWeight);
+  87 |     if (weights.length === 0) return null;
+  88 |     return weights.reduce<MarketFile>(
+  89 |       (best, f) => (best.size < f.size ? f : best),
+  90 |       weights[0]!,
+  91 |     );
+  92 |   }, [visibleFiles, source]);
+  93 | 
+  94 |   const { data: installedData } = useQuery({
+  95 |     queryKey: ["installed-models"],
+  96 |     queryFn: () => rpcClient.listInstalledModels(),
+  97 |   });
+  98 |   const installedNames = useMemo(
+  99 |     () => installedFilesForRepo(installedData?.models ?? [], repo ?? ""),
+ 100 |     [installedData, repo],
+ 101 |   );
+ 102 | 
+ 103 |   // 类别改键（③-C2）：只对应用下载目录（managed）里的模型生效 —— setModelMeta 按仓库
+ 104 |   // 目录写 `.vllm-meta.json`，外部目录 / HF 缓存模型没有这个目录，写了也落不了盘。
+ 105 |   // repo 两侧都过 safeRepoId：市场页带斜杠的原始 repo id（`Qwen/X`）与安装列表里
+ 106 |   // 编码过的仓库标签（`Qwen__X`）才能对上。
+ 107 |   const installed = installedData?.models ?? [];
+ 108 |   const managedEntries = useMemo(
+ 109 |     () => installed.filter((m) => m.origin === "managed" && m.repo === safeRepoId(repo ?? "")),
+ 110 |     [installed, repo],
+ 111 |   );
+ 112 |   const externalOnly = useMemo(
+ 113 |     () =>
+ 114 |       !managedEntries.length &&
+ 115 |       installed.some((m) => m.origin !== "managed" && safeRepoId(m.repo) === safeRepoId(repo ?? "")),
+ 116 |     [installed, managedEntries.length, repo],
+ 117 |   );
+ 118 |   const setCategoryMutation = useMutation({
+ 119 |     // repo 目录下的多个文件条目共享同一份仓库元数据，用第一个条目的 path 落盘即可。
+ 120 |     mutationFn: async (category: ModelCategory) => {
+ 121 |       const res = await rpcClient.setModelCategory({ path: managedEntries[0]!.path, category });
+ 122 |       if (!res.ok) throw new Error(res.error || "Failed to update category");
+ 123 |       return res.model;
+ 124 |     },
+ 125 |     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["installed-models"] }),
+ 126 |   });
+ 127 | 
+ 128 |   // safetensors / MLX 这类"整仓库"模型：权重分片必须和 config / tokenizer 一起下载，
+ 129 |   // 否则 vLLM / SGLang / mlx-lm 加载不了（只下一个 safetensors 是跑不起来的）。
+ 130 |   const supportFiles = useMemo(
+ 131 |     () =>
+ 132 |       effectiveFilter === "gguf"
+ 133 |         ? []
+ 134 |         : files.filter((f) => f.kind === "other" && SUPPORT_FILE_RE.test(fileBaseName(f.name))),
+ 135 |     [files, effectiveFilter],
+     :      ^^|^^
+     :        `-- it will always cause this hook to re-evaluate
+ 136 |   );
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint(no-useless-escape): Unnecessary escape character '['
+     ,-[apps/studio/src/bun/app-log.ts:186:23]
+ 185 |     pattern:
+ 186 |       /((?:^|[?&\s"'`,\[(])(?:key|token|secret|credential|pat)\b"?\s*[:=]\s*"?)([^\s"'`,;&)\]}]{8,})/gi,
+     :                       ^^
+ 187 |     replacement: "$1***",
+     `----
+  help: Replace `\[` with `[`.
+
+  ! eslint(no-control-regex): Unexpected control character
+   ,-[apps/studio/src/bun/runtimes/errors.ts:1:23]
+ 1 | const ANSI_PATTERN = /\x1b\[[0-9;]*m/g;
+   :                       ^^|^
+   :                         `-- 'U+001B' is a control character.
+ 2 | const ERROR_LINE_PATTERN =
+   `----
+  help: Avoid matching control characters in regular expressions. If intentional, consider using a Unicode escape instead.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useEffect depends on `providers`, which changes every render
+     ,-[apps/studio/src/mainview/app/main-layout/cloud-provider-panel.tsx:296:7]
+ 271 | 
+ 272 |   const providers = providersQuery.data?.providers ?? [];
+     :         ^^^^|^^^^
+     :             `-- `providers` is declared here
+ 273 |   const activeId = providersQuery.data?.activeId ?? null;
+ 274 |   const remoteMode = (settingsQuery.data?.settings.SERVER_MODE ?? "local") === "remote";
+ 275 |   const cloudActive = !!activeId && remoteMode;
+ 276 |   const currentModel = (settingsQuery.data?.settings.VLLM_MODEL_NAME ?? "").trim();
+ 277 | 
+ 278 |   const invalidate = () => {
+ 279 |     queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
+ 280 |     queryClient.invalidateQueries({ queryKey: ["settings"] });
+ 281 |     queryClient.invalidateQueries({ queryKey: ["connection-status"] });
+ 282 |     queryClient.invalidateQueries({ queryKey: ["chat-models"] });
+ 283 |   };
+ 284 | 
+ 285 |   // 默认选中：激活行 → 第一个配好 Key 的行 → 列表第一个。
+ 286 |   // 装上就整份目录都在，第一眼看哪家都行，但别落在"一家还没配的空行"上。
+ 287 |   useEffect(() => {
+ 288 |     if (providers.length === 0) {
+ 289 |       setSelectedId(null);
+ 290 |       return;
+ 291 |     }
+ 292 |     if (!selectedId || !providers.some((p) => p.id === selectedId)) {
+ 293 |       const configured = providers.find((p) => p.apiKey.trim() || isLocalBaseUrl(p.baseUrl));
+ 294 |       setSelectedId(activeId ?? configured?.id ?? providers[0]!.id);
+ 295 |     }
+ 296 |   }, [providers, activeId, selectedId]);
+     :       ^^^^|^^^^
+     :           `-- it will always cause this hook to re-evaluate
+ 297 | 
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `providers`, which changes every render
+     ,-[apps/studio/src/mainview/app/main-layout/cloud-provider-panel.tsx:332:7]
+ 271 | 
+ 272 |   const providers = providersQuery.data?.providers ?? [];
+     :         ^^^^|^^^^
+     :             `-- `providers` is declared here
+ 273 |   const activeId = providersQuery.data?.activeId ?? null;
+ 274 |   const remoteMode = (settingsQuery.data?.settings.SERVER_MODE ?? "local") === "remote";
+ 275 |   const cloudActive = !!activeId && remoteMode;
+ 276 |   const currentModel = (settingsQuery.data?.settings.VLLM_MODEL_NAME ?? "").trim();
+ 277 | 
+ 278 |   const invalidate = () => {
+ 279 |     queryClient.invalidateQueries({ queryKey: ["cloud-providers"] });
+ 280 |     queryClient.invalidateQueries({ queryKey: ["settings"] });
+ 281 |     queryClient.invalidateQueries({ queryKey: ["connection-status"] });
+ 282 |     queryClient.invalidateQueries({ queryKey: ["chat-models"] });
+ 283 |   };
+ 284 | 
+ 285 |   // 默认选中：激活行 → 第一个配好 Key 的行 → 列表第一个。
+ 286 |   // 装上就整份目录都在，第一眼看哪家都行，但别落在"一家还没配的空行"上。
+ 287 |   useEffect(() => {
+ 288 |     if (providers.length === 0) {
+ 289 |       setSelectedId(null);
+ 290 |       return;
+ 291 |     }
+ 292 |     if (!selectedId || !providers.some((p) => p.id === selectedId)) {
+ 293 |       const configured = providers.find((p) => p.apiKey.trim() || isLocalBaseUrl(p.baseUrl));
+ 294 |       setSelectedId(activeId ?? configured?.id ?? providers[0]!.id);
+ 295 |     }
+ 296 |   }, [providers, activeId, selectedId]);
+ 297 | 
+ 298 |   const selected = providers.find((p) => p.id === selectedId) ?? null;
+ 299 |   const isSelectedActive = !!selected && selected.id === activeId && remoteMode;
+ 300 |   /** 选中行的预设（内置厂商才有）：备注 / 取密钥地址 / 官方 API 地址都从它来。 */
+ 301 |   const selectedPreset = selected ? getPreset(selected.id) : undefined;
+ 302 |   /** 地址是不是"内置厂商的官方地址"：是则只读（写库也会被拒，见 bun/cloud-providers.ts）。 */
+ 303 |   const baseLocked = !!selected && isBuiltinBaseUrl(selected);
+ 304 |   /** 用了内置厂商但还没填 Key：把这行提示放在最显眼处，用户只需要做这一件事。 */
+ 305 |   const selectedNeedsKey = !!selected && !selected.apiKey.trim() && !isLocalBaseUrl(selected.baseUrl);
+ 306 |   /** 「获取密钥」跳转地址：预设的密钥页 → 退回 API 域名根。 */
+ 307 |   const keyUrl = selectedPreset
+ 308 |     ? presetApiKeyUrl(selectedPreset)
+ 309 |     : (() => {
+ 310 |         try {
+ 311 |           return selected?.baseUrl.trim() ? new URL(selected.baseUrl.trim()).origin : "";
+ 312 |         } catch {
+ 313 |           return "";
+ 314 |         }
+ 315 |       })();
+ 316 | 
+ 317 |   // ------------------------------------------------------------------
+ 318 |   // 中栏：服务商列表（内置目录按分栏列出，自定义单开一栏）
+ 319 |   // ------------------------------------------------------------------
+ 320 |   const vendorNeedle = vendorSearch.trim().toLowerCase();
+ 321 |   const providerGroups = useMemo(() => {
+ 322 |     const matched = vendorNeedle
+ 323 |       ? providers.filter((p) => `${p.name} ${p.vendor}`.toLowerCase().includes(vendorNeedle))
+ 324 |       : providers;
+ 325 |     const order: (CloudPresetSection | "custom")[] = [...CLOUD_PRESET_SECTIONS, "custom"];
+ 326 |     return order
+ 327 |       .map((section) => ({
+ 328 |         section,
+ 329 |         items: matched.filter((p) => (getPreset(p.id)?.section ?? "custom") === section),
+ 330 |       }))
+ 331 |       .filter((g) => g.items.length > 0);
+ 332 |   }, [providers, vendorNeedle]);
+     :       ^^^^|^^^^
+     :           `-- it will always cause this hook to re-evaluate
+ 333 | 
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `models`, which changes every render
+     ,-[apps/studio/src/mainview/app/main-layout/cloud-provider-panel.tsx:437:6]
+ 430 |   const [modelTab, setModelTab] = useState<ModelCategory | "all">("all");
+ 431 |   const models = selected?.models ?? [];
+     :         ^^^|^^
+     :            `-- `models` is declared here
+ 432 |   // 每个模型的用途：用户显式指定的优先，否则按 id 自动识别（云端返回的清单里
+ 433 |   // 对话 / 嵌入 / 重排 / 语音 / 生图混在一起，按用途打标 + 筛选，用户才能一眼
+ 434 |   // 看出哪个模型该用在哪个场景）。这个用途同时决定功能页里能不能选到它。
+ 435 |   const modelsWithCategory = useMemo(
+ 436 |     () => models.map((m) => ({ entry: m, category: modelTypeOf(m) })),
+ 437 |     [models],
+     :      ^^^|^^
+     :         `-- it will always cause this hook to re-evaluate
+ 438 |   );
+     `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! typescript-eslint(no-this-alias): Unexpected aliasing of 'this' to local variable.
+     ,-[apps/studio/src/bun/runtimes/sglang.ts:213:13]
+ 212 | 
+ 213 |       const self = this;
+     :             ^^^^
+ 214 |       this.serverProcess.exited
+     `----
+  help: Assigning a variable to this instead of properly using arrow lambdas may be a symptom of pre-ES2015 practices or not managing scope well.
+
+  ! typescript-eslint(no-this-alias): Unexpected aliasing of 'this' to local variable.
+     ,-[apps/studio/src/bun/runtimes/vllm.ts:235:13]
+ 234 | 
+ 235 |       const self = this;
+     :             ^^^^
+ 236 |       this.serverProcess.exited
+     `----
+  help: Assigning a variable to this instead of properly using arrow lambdas may be a symptom of pre-ES2015 practices or not managing scope well.
+
+  ! typescript-eslint(no-this-alias): Unexpected aliasing of 'this' to local variable.
+     ,-[apps/studio/src/bun/runtimes/mlx.ts:313:13]
+ 312 | 
+ 313 |       const self = this;
+     :             ^^^^
+ 314 |       this.serverProcess.exited
+     `----
+  help: Assigning a variable to this instead of properly using arrow lambdas may be a symptom of pre-ES2015 practices or not managing scope well.
+
+  ! typescript-eslint(no-this-alias): Unexpected aliasing of 'this' to local variable.
+     ,-[apps/studio/src/bun/runtimes/llama.ts:444:13]
+ 443 | 
+ 444 |       const self = this;
+     :             ^^^^
+ 445 |       this.serverProcess.exited
+     `----
+  help: Assigning a variable to this instead of properly using arrow lambdas may be a symptom of pre-ES2015 practices or not managing scope well.
+
+  ! eslint(no-control-regex): Unexpected control characters
+    ,-[apps/studio/src/bun/skills/metadata.ts:85:25]
+ 84 |   // 去掉 YAML 引号与控制字符
+ 85 |   name = name.replace(/[\u0000-\u001f<>:"/\\|?*]/g, "-");
+    :                         ^^^|^^ ^^^|^^
+    :                            |      `-- 'U+001F' is a control character.
+    :                            `-- 'U+0000' is a control character.
+ 86 |   name = name.replace(/\s+/g, "-").replace(/^[.-]+/, "_").replace(/[.-]+$/, "");
+    `----
+  help: Avoid matching control characters in regular expressions. If intentional, consider using a Unicode escape instead.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has a missing dependency: 'kb'
+     ,-[apps/studio/src/mainview/app/kb/settings-tab.tsx:427:6]
+ 420 |   useEffect(() => {
+ 421 |     setForm(formFromKb(kb));
+     :                        ^|
+     :                         `-- useEffect uses `kb` here
+ 422 |     setResetNotice(false);
+ 423 |     setTestResult(null);
+ 424 |     setRerankTestResult(null);
+ 425 |     setEmbedAdvanced(null);
+ 426 |     setRerankAdvanced(null);
+ 427 |   }, [kb.id, kb.updatedAt, kb.embeddingDim]);
+     :      ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 428 | 
+     `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint(preserve-caught-error): There is no cause error attached to this new thrown error.
+     ,-[apps/studio/src/bun/kb-ingest.ts:601:9]
+ 600 |         const msg = e instanceof Error ? e.message : String(e);
+ 601 |         throw new Error(`嵌入服务拒绝了多模态输入，请检查该库的模态勾选与嵌入模型：${msg}`);
+     :         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 602 |       }
+     `----
+  help: Preserve the original error by using the `cause` property when re-throwing errors.
+
+  ! eslint(no-unused-vars): Identifier 'Updater' is imported but never used.
+   ,-[apps/studio/src/bun/rpc/index.ts:1:49]
+ 1 | import { BrowserView, BrowserWindow, RPCSchema, Updater, Utils } from "electrobun/bun";
+   :                                                 ^^^|^^^
+   :                                                    `-- 'Updater' is imported here
+ 2 | import { asc, eq, desc, like, sql, inArray } from "drizzle-orm";
+   `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-vars): Identifier 'LOG_THROTTLE_MS' is imported but never used.
+    ,-[apps/studio/src/bun/rpc/index.ts:42:10]
+ 41 | } from "../app-log";
+ 42 | import { LOG_THROTTLE_MS, PROGRESS_THROTTLE_MS, throttleBatch, throttleLatest } from "../throttle";
+    :          ^^^^^^^|^^^^^^^
+    :                 `-- 'LOG_THROTTLE_MS' is imported here
+ 43 | import * as ServerManager from "../server-manager";
+    `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-vars): Identifier 'PROGRESS_THROTTLE_MS' is imported but never used.
+    ,-[apps/studio/src/bun/rpc/index.ts:42:27]
+ 41 | } from "../app-log";
+ 42 | import { LOG_THROTTLE_MS, PROGRESS_THROTTLE_MS, throttleBatch, throttleLatest } from "../throttle";
+    :                           ^^^^^^^^^^|^^^^^^^^^
+    :                                     `-- 'PROGRESS_THROTTLE_MS' is imported here
+ 43 | import * as ServerManager from "../server-manager";
+    `----
+  help: Consider removing this import.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `tools`, which changes every render
+    ,-[apps/studio/src/mainview/app/skills/my-skills-tab.tsx:61:78]
+ 59 |   const skills = skillsQuery.data?.skills ?? [];
+ 60 |   const tools = toolsQuery.data?.tools ?? [];
+    :         ^^|^^
+    :           `-- `tools` is declared here
+ 61 |   const installedToolKeys = useMemo(() => new Set(tools.map((x) => x.key)), [tools]);
+    :                                                                              ^^|^^
+    :                                                                                `-- it will always cause this hook to re-evaluate
+ 62 | 
+    `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint(no-control-regex): Unexpected control character
+    ,-[apps/studio/src/mainview/lib/server-error.ts:50:18]
+ 49 | /** 日志里的 ANSI 着色（llama.cpp 会给 `E` 行上红色）。 */
+ 50 | const ANSI_RE = /\u001b\[[0-9;]*m/g;
+    :                  ^^^|^^
+    :                     `-- 'U+001B' is a control character.
+ 51 | 
+    `----
+  help: Avoid matching control characters in regular expressions. If intentional, consider using a Unicode escape instead.
+
+  ! eslint(no-unused-vars): Identifier 'afterEach' is imported but never used.
+   ,-[apps/studio/src/mainview/app/kb/docs-tab.test.tsx:1:20]
+ 1 | import { afterAll, afterEach, beforeEach, expect, mock, test } from "bun:test";
+   :                    ^^^^|^^^^
+   :                        `-- 'afterEach' is imported here
+ 2 | import { Window } from "happy-dom";
+   `----
+  help: Consider removing this import.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has a missing dependency: 'createMutation'
+     ,-[apps/studio/src/mainview/app/chat/index.tsx:359:6]
+ 356 |         } else if (!createMutation.isPending) {
+ 357 |           createMutation.mutate();
+     :           ^^^^^^^|^^^^^^
+     :                  `-- useEffect uses `createMutation` here
+ 358 |         }
+ 359 | ,->   }, [
+ 360 | |       activeConversationId,
+ 361 | |       activeApp,
+ 362 | |       conversationsQuery,
+ 363 | |       conversationsQuery.isLoading,
+ 364 | |       createMutation.isPending,
+ 365 | `->   ]);
+ 366 |     
+     `----
+  help: Either include it or remove the dependency array.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useMemo depends on `targets`, which changes every render
+    ,-[apps/studio/src/mainview/app/memory/cards.tsx:34:17]
+ 22 |   });
+ 23 |   const targets = data?.targets ?? [];
+    :         ^^^|^^^
+    :            `-- `targets` is declared here
+ 24 | 
+ 25 |   // 已同步的默认勾选；未同步但已安装的工具也预勾选（一次点击即接入）。
+ 26 |   const [selected, setSelected] = useState<Set<string> | null>(null);
+ 27 |   const effectiveSelected = useMemo(() => {
+ 28 |     if (selected) return selected;
+ 29 |     const preset = new Set<string>();
+ 30 |     for (const target of targets) {
+ 31 |       if (target.hasBlock || target.installed) preset.add(target.tool);
+ 32 |     }
+ 33 |     return preset;
+ 34 |   }, [selected, targets]);
+    :                 ^^^|^^^
+    :                    `-- it will always cause this hook to re-evaluate
+ 35 |   const toggle = (tool: string) => {
+    `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React hook useEffect depends on `localModels`, which changes every render
+    ,-[apps/studio/src/mainview/app/voice/tts-tab.tsx:88:17]
+ 53 |   });
+ 54 |   const localModels = localModelsData?.models ?? [];
+    :         ^^^^^|^^^^^
+    :              `-- `localModels` is declared here
+ 55 | 
+ 56 |   // 有正在使用的模型时自动选中；否则选中已启动的模型。
+ 57 |   useEffect(() => {
+ 58 |     if (localStatus?.activeModelId) {
+ 59 |       setLocalModelId((cur) => cur || localStatus.activeModelId!);
+ 60 |     }
+ 61 |   }, [localStatus?.activeModelId]);
+ 62 | 
+ 63 |   useEffect(() => {
+ 64 |     if (!localModelId) {
+ 65 |       const active = localModels.find((m) => m.active);
+ 66 |       if (active) setLocalModelId(active.id);
+ 67 |     }
+ 68 |     // eslint-disable-next-line react-hooks/exhaustive-deps
+ 69 |   }, [localModels?.length]);
+ 70 | 
+ 71 |   // 根据已保存的设置恢复上次选择（合成模型 + 音色），仅执行一次。
+ 72 |   const sourceHydrated = useRef(false);
+ 73 |   useEffect(() => {
+ 74 |     if (!settings.loaded || sourceHydrated.current || !localModelsData) return;
+ 75 |     sourceHydrated.current = true;
+ 76 |     setEdgeVoice(settings.edgeVoice);
+ 77 |     setVoice(settings.ttsVoice);
+ 78 |     const m = settings.ttsModel.trim();
+ 79 |     if (m && m !== "edge-tts" && localModels.some((x) => x.id === m)) {
+ 80 |       setSource("local");
+ 81 |       setLocalModelId(m);
+ 82 |     } else if (m && m !== "edge-tts") {
+ 83 |       setSource("compat");
+ 84 |       setModel(m);
+ 85 |     } else {
+ 86 |       setSource("edge");
+ 87 |     }
+ 88 |   }, [settings, localModels, localModelsData]);
+    :                 ^^^^^|^^^^^
+    :                      `-- it will always cause this hook to re-evaluate
+ 89 | 
+    `----
+  help: Try memoizing this variable with `useRef` or `useCallback`.
+
+  ! eslint-plugin-react-hooks(exhaustive-deps): React Hook useEffect has a complex expression in the dependency array.
+     ,-[apps/studio/src/mainview/app/voice-call-screen.tsx:755:30]
+ 754 |     if (el) el.scrollTop = el.scrollHeight;
+ 755 |   }, [activeMessages.length, activeMessages[activeMessages.length - 1]?.content]);
+     :                              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 756 | 
+     `----
+  help: Extract the expression to a separate variable so it can be statically checked.
+
+  ! eslint(no-unused-vars): Identifier 'mock' is imported but never used.
+   ,-[apps/studio/src/bun/user-prompt.test.ts:1:49]
+ 1 | import { afterAll, beforeAll, describe, expect, mock, test } from "bun:test";
+   :                                                 ^^|^
+   :                                                   `-- 'mock' is imported here
+ 2 | import { Database } from "bun:sqlite";
+   `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-vars): Identifier 'eq' is imported but never used.
+    ,-[apps/studio/src/bun/rpc/kb-media.tests.ts:12:10]
+ 11 | import { join } from "path";
+ 12 | import { eq } from "drizzle-orm";
+    :          ^|
+    :           `-- 'eq' is imported here
+ 13 | import sharp from "sharp";
+    `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-vars): Identifier 'resetLandlockCanaryCache' is imported but never used.
+    ,-[apps/studio/src/bun/landlock-helper.test.ts:16:3]
+ 15 |   resetLandlockHelperCache,
+ 16 |   resetLandlockCanaryCache,
+    :   ^^^^^^^^^^^^|^^^^^^^^^^^
+    :               `-- 'resetLandlockCanaryCache' is imported here
+ 17 |   type HelperRunner,
+    `----
+  help: Consider removing this import.
+
+  ! eslint(no-control-regex): Unexpected control characters
+    ,-[apps/studio/src/bun/startup-guard.ts:62:44]
+ 61 |   // 控制字符会把参数截断或注入，一并清掉；长度上限只是防止弹框被撑爆。
+ 62 |   const clean = (s: string) => s.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, "").slice(0, 1200);
+    :                                            ^^^|^^ ^^^|^^^^^|^^^^^|^^^^^|^^ ^^^|^^
+    :                                               |      |     |     |     |      `-- 'U+001F' is a control character.
+    :                                               |      |     |     |     `-- 'U+000E' is a control character.
+    :                                               |      |     |     `-- 'U+000C' is a control character.
+    :                                               |      |     `-- 'U+000B' is a control character.
+    :                                               |      `-- 'U+0008' is a control character.
+    :                                               `-- 'U+0000' is a control character.
+ 63 |   const t = clean(title);
+    `----
+  help: Avoid matching control characters in regular expressions. If intentional, consider using a Unicode escape instead.
+
+  ! eslint(no-unused-vars): Identifier 'mock' is imported but never used.
+   ,-[apps/studio/src/bun/model-servers.test.ts:1:51]
+ 1 | import { afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
+   :                                                   ^^|^
+   :                                                     `-- 'mock' is imported here
+ 2 | import { mkdtempSync, rmSync, writeFileSync } from "fs";
+   `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-vars): Identifier 'mock' is imported but never used.
+   ,-[apps/studio/src/bun/memory.test.ts:1:50]
+ 1 | import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+   :                                                  ^^|^
+   :                                                    `-- 'mock' is imported here
+ 2 | import { Database } from "bun:sqlite";
+   `----
+  help: Consider removing this import.
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:264:7]
+ 263 |           const slug = backend.modelStore.servedNameForModelPath(path);
+ 264 | ,->       json
+ 265 | |           ? console.log(JSON.stringify({ ok: true, path, model: slug }, null, 2))
+ 266 | `->         : console.log(`已激活: ${slug}\n路径: ${path}`);
+ 267 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:289:7]
+ 288 |           };
+ 289 | ,->       json
+ 290 | |           ? console.log(JSON.stringify(info, null, 2))
+ 291 | |           : console.log(
+ 292 | |               [
+ 293 | |                 `文件:   ${info.file}`,
+ 294 | |                 `仓库:   ${info.repo}`,
+ 295 | |                 `路径:   ${info.path}`,
+ 296 | |                 `大小:   ${fmtSize(info.size)}`,
+ 297 | |                 `类别:   ${info.category}`,
+ 298 | |                 `状态:   ${info.active ? "激活" : "未激活"}${info.chatModel ? "（对话模型）" : ""}`,
+ 299 | |                 ``,
+ 300 | |                 `启动命令:`,
+ 301 | |                 `  ${info.command}`,
+ 302 | |               ].join("\n"),
+ 303 | `->           );
+ 304 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:315:7]
+ 314 |           backend.modelStore.deleteLocalModel(path);
+ 315 | ,->       json
+ 316 | |           ? console.log(JSON.stringify({ ok: true, deleted: path }, null, 2))
+ 317 | `->         : console.log(`已删除: ${path}`);
+ 318 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:323:7]
+ 322 |           const dirs = backend.modelStore.getModelsDirs();
+ 323 | ,->       json
+ 324 | |           ? console.log(JSON.stringify({ dirs }, null, 2))
+ 325 | `->         : dirs.forEach((d) => console.log(d));
+ 326 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:565:7]
+ 564 |           const r = await backend.serverManager.startServer();
+ 565 | ,->       json
+ 566 | |           ? console.log(JSON.stringify({ ok: r.ok, error: r.error ?? undefined }, null, 2))
+ 567 | |           : r.ok
+ 568 | |             ? console.log(
+ 569 | |                 `推理服务器已启动 (${backend.runtimes.getActiveEngine()}, pid ${backend.serverManager.getPid()})`,
+ 570 | |               )
+ 571 | `->           : fail(r.error ?? "启动失败");
+ 572 |           if (!r.ok) return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:577:7]
+ 576 |           await backend.serverManager.stopServer();
+ 577 | ,->       json
+ 578 | |           ? console.log(JSON.stringify({ ok: true, status: "stopped" }))
+ 579 | `->         : console.log("推理服务器已停止");
+ 580 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:584:7]
+ 583 |           const r = await backend.serverManager.restartServer();
+ 584 | ,->       json
+ 585 | |           ? console.log(JSON.stringify({ ok: r.ok, error: r.error ?? undefined }, null, 2))
+ 586 | |           : r.ok
+ 587 | |             ? console.log("推理服务器已重启")
+ 588 | `->           : fail(r.error ?? "重启失败");
+ 589 |           if (!r.ok) return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:594:7]
+ 593 |           backend.serverManager.forceKill();
+ 594 | ,->       json
+ 595 | |           ? console.log(JSON.stringify({ ok: true, status: "killed" }))
+ 596 | `->         : console.log("已强制结束推理服务器进程");
+ 597 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:669:7]
+ 668 |           const r = await backend.gateway.startGateway();
+ 669 | ,->       json
+ 670 | |           ? console.log(JSON.stringify(r, null, 2))
+ 671 | |           : r.ok
+ 672 | |             ? console.log(`网关已启动: http://127.0.0.1:${r.port}`)
+ 673 | `->           : fail(r.error ?? "网关启动失败");
+ 674 |           if (!r.ok) return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:679:7]
+ 678 |       await backend.gateway.stopGateway();
+ 679 |       json ? console.log(JSON.stringify({ ok: true, status: "stopped" })) : console.log("网关已停止");
+     :       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 680 |       return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:684:7]
+ 683 |           const r = await backend.gateway.startGateway();
+ 684 | ,->       json
+ 685 | |           ? console.log(JSON.stringify(r, null, 2))
+ 686 | |           : r.ok
+ 687 | |             ? console.log(`网关已重启: http://127.0.0.1:${r.port}`)
+ 688 | `->           : fail(r.error ?? "网关重启失败");
+ 689 |           if (!r.ok) return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:854:7]
+ 853 |         case "path": {
+ 854 | ,->       json
+ 855 | |           ? console.log(JSON.stringify({ dataDir: ctx.dataDir, dbPath: join(ctx.dataDir, DB_FILE) }, null, 2))
+ 856 | `->         : console.log(`数据目录: ${ctx.dataDir}\n数据库:   ${join(ctx.dataDir, DB_FILE)}`);
+ 857 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:882:7]
+ 881 |           }
+ 882 | ,->       json
+ 883 | |           ? console.log(JSON.stringify({ key, value: all[key] }))
+ 884 | `->         : console.log(all[key]);
+ 885 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! eslint(no-unused-expressions): Expected expression to be used
+     ,-[apps/studio/src/cli/omni.ts:899:7]
+ 898 |           backend.settings.updateSettings({ [key]: value });
+ 899 | ,->       json
+ 900 | |           ? console.log(JSON.stringify({ key, value }))
+ 901 | `->         : console.log(`已设置: ${key}=${value}`);
+ 902 |           return;
+     `----
+  help: Consider using this expression or removing it
+
+  ! Unused eslint-disable directive (no problems were reported).
+     ,-[apps/studio/src/mainview/hooks/use-voice-call.ts:549:7]
+ 548 |     };
+ 549 |     // eslint-disable-next-line react-hooks/exhaustive-deps
+     :       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ 550 |   }, []);
+     `----
+
+Found 57 warnings and 0 errors.
+Finished in 135ms on 844 files using 32 threads.

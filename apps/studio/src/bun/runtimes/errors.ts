@@ -61,8 +61,11 @@ export function extractDeadWorkerError(logs: string): string | null {
  * 架构不支持、文件没下完、显存不够长得一模一样。所以先从日志里找根因行，
  * 找不到再退回「最后一条像错误的行」。
  */
+// `failed to read magic`：llama.cpp 读到的不是 GGUF（给了个目录、文件没下完、或
+// 根本不是模型文件）。实测 Qwopus3.5-4B-Coder-MTP-GGUF 被当成目录传进去时就是这一行，
+// 而旧规则只认 bad/invalid magic，于是界面只剩收尾那句"模型加载错误"。
 const ROOT_CAUSE_LINE_PATTERN =
-  /unknown model architecture|not supported|unsupported|no module named|shared object file|no such file|out of memory|failed to allocate|no space left|address already in use|permission denied|bad magic|invalid magic/i;
+  /unknown model architecture|not supported|unsupported|no module named|shared object file|no such file|out of memory|failed to allocate|no space left|address already in use|permission denied|bad magic|invalid magic|failed to read magic/i;
 
 /** 从后往前找第一条命中 pattern 的日志行（跳过我们自己的注解与警告行）。 */
 function pickErrorLine(lines: string[], pattern: RegExp): string | undefined {

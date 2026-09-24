@@ -1,0 +1,30 @@
+{
+  "id": "18b-window-scaled-limit",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-spill.ts",
+    "apps/studio/src/bun/agent-spill.test.ts",
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-spill.ts",
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-spill.test.ts"
+  ],
+  "max_source_lines": 35,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "窗口占比改成 1（小窗口又会被单条工具结果吃满）",
+      "file": "apps/studio/src/bun/agent-spill.ts",
+      "find": "const TOOL_OUTPUT_WINDOW_SHARE = 0.25;",
+      "replace": "const TOOL_OUTPUT_WINDOW_SHARE = 1;"
+    }
+  ]
+}

@@ -47,7 +47,7 @@ function baseName(p: string): string {
 }
 
 /** apply_patch 的段落头 → 改动到的文件（与 bun/apply-patch.ts 的格式一致）。 */
-function patchFilePaths(patch: string): string[] {
+export function patchFilePaths(patch: string): string[] {
   const paths: string[] = [];
   for (const match of patch.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
     const value = match[1]?.trim();
@@ -393,7 +393,7 @@ function ToolRow({ start, end, live }: { start: AgentEventRow; end?: AgentEventR
   const toolName = start.toolName ?? "";
   const meta = useMemo(() => toolMeta(toolName, start.args), [toolName, start.args]);
   const summary = useMemo(
-    () => (toolName === "edit_file" || toolName === "write_file" ? summarizeEdit(start.args) : null),
+    () => (toolName === "edit_file" || toolName === "write_file" || toolName === "apply_patch" ? summarizeEdit(start.args) : null),
     [toolName, start.args],
   );
   const Icon = meta.icon;

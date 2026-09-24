@@ -216,6 +216,89 @@ describe("单条 hook 的契约", () => {
     // 200ms 超时 + 2s 宽限 + 余量：关键是**远小于**脚本自己要睡的 30s。
     expect(elapsed).toBeLessThan(10_000);
   }, 15_000);
+
+  test("负载超过 64KB 时钩子仍然跑得起来，stdin 拿到的是完整负载", async () => {
+    // Linux 单个环境变量串在 128KB 处抛 E2BIG；负载里含用户提问正文，
+    // 粘一大段日志就能超线。之前超线 = spawn 抛错 = 所有钩子变成“没拦”，
+    // 拦截型钩子被静默绕过。现在 env 这一路超限就不设，stdin 照传完整内容。
+    const bigPrompt = "x".repeat(200 * 1024);
+    const payload = {
+      event: "user_prompt_submit",
+      conversationId: 9,
+      workspace: dir,
+      mode: "agent",
+      prompt: bigPrompt,
+    };
+    const expectedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    // wc -c 数的是字节（不是字符）：`printf 'hello世界' | wc -c` = 11。
+    const result = await runHook(hook(`wc -c | tr -d ' '`), payload);
+    expect(result.error).toBeUndefined();
+    // stdout 是纯数字文本 → 整段当上下文；长度必须和序列化后的字节数对上（完整负载）。
+    expect(result.context).toBe(String(expectedBytes));
+  });
+
+  test("负载超过 64KB 时不设 OMNI_HOOK_PAYLOAD，但 OMNI_HOOK_PAYLOAD_BYTES 准确", async () => {
+    const bigPrompt = "y".repeat(200 * 1024);
+    const payload = {
+      event: "user_prompt_submit",
+      conversationId: 10,
+      workspace: dir,
+      mode: "agent",
+      prompt: bigPrompt,
+    };
+    const expectedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    // 脚本自己判：payload 变量是否存在（`${VAR+x}` 能分清「未设置」和「空串」）、
+    // 字节数字符串对不对、事件名是否在。
+    const script =
+      "if [ -n \"${OMNI_HOOK_PAYLOAD+x}\" ]; then echo 0; else echo 1; fi; " +
+      "printf '%s' \"$OMNI_HOOK_PAYLOAD_BYTES\"; echo; " +
+      "printf '%s' \"$OMNI_HOOK_EVENT\"";
+    const result = await runHook(hook(script), payload);
+    expect(result.error).toBeUndefined();
+    expect(result.context).toBe(`1\n${expectedBytes}\nuser_prompt_submit`);
+  });
+
+  test("负载很小时 OMNI_HOOK_PAYLOAD 照旧存在且与 stdin 一致", async () => {
+    const payload = {
+      event: "user_prompt_submit",
+      conversationId: 11,
+      workspace: dir,
+      mode: "agent",
+      prompt: "小负载",
+    };
+    const serialized = JSON.stringify(payload);
+    const expectedBytes = Buffer.byteLength(serialized, "utf8");
+    // 先把 stdin 落到工作区里的文件再比，避免命令替换里塞大 JSON。
+    const inPath = path.join(dir, "in.json");
+    const script =
+      `cat > "${inPath}"; if [ "$OMNI_HOOK_PAYLOAD" = "$(cat "${inPath}")" ]; then echo True; else echo False; fi; ` +
+      "printf '%s' \"$OMNI_HOOK_PAYLOAD_BYTES\"";
+    const result = await runHook(hook(script), payload);
+    expect(result.error).toBeUndefined();
+    expect(result.context).toBe(`True\n${expectedBytes}`);
+  });
+
+  test("字节数不是字符数：多字节（中文）负载在字节上限之上时同样不设 OMNI_HOOK_PAYLOAD", async () => {
+    // 80KB 的中文 = 240KB 字节，字符数与字节数同时超线，分不出两种判断法。
+    // 所以取 50KB 字符 / 150KB 字节：字符数没超 64K，字节数超了。
+    // 按字符数判断的写法会漏判，把 150KB 的串塞进 env，spawn 直接 E2BIG。
+    const payload = {
+      event: "user_prompt_submit",
+      conversationId: 12,
+      workspace: dir,
+      mode: "agent",
+      prompt: "中".repeat(50 * 1024),
+    };
+    const expectedBytes = Buffer.byteLength(JSON.stringify(payload), "utf8");
+    expect(expectedBytes).toBeGreaterThan(64 * 1024); // 字节确实超限
+    expect(JSON.stringify(payload).length).toBeLessThanOrEqual(64 * 1024); // 但字符数没超（正是变异点）
+    const result = await runHook(
+      hook("if [ -n \"${OMNI_HOOK_PAYLOAD+x}\" ]; then echo 0; else echo 1; fi; " + "printf '%s' \"$OMNI_HOOK_PAYLOAD_BYTES\""),
+      payload,
+    );
+    expect(result.error).toBeUndefined();
+    expect(result.context).toBe(`1\n${expectedBytes}`);
+  });
 });
 
 describe("一次事件跑多条", () => {

@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { readFileSync } from "fs";
 import path from "path";
 import { getSetting, getActiveServerPort } from "./db/settings";
+import { logEvent } from "./app-log";
 import { gatewayAuthTokens, hasGatewayAuthKey } from "./gateway-keys";
 import * as ServerManager from "./server-manager";
 import * as TTSLocal from "./tts-local";
@@ -21,6 +22,14 @@ import { isLocalOrigin, isLoopbackHost } from "../shared/server-info";
 import { normalizeApiBase } from "../shared/cloud-providers";
 import { audioVendorFor, resolveTtsVoice } from "../shared/tts-voices";
 import { handleWebRequest, isWebSocketPath, mediaTicketValid, serveWebAppPage, serveWebAsset, webSocketAuthorized, webSocketOpened } from "./gateway-web";
+import * as SystemOne from "./systemone";
+import {
+  newSystemOneRequestId,
+  systemOneAuthErrorBody,
+  systemOneModelCards,
+  systemOneValidationBody,
+  validateSystemOneRequest,
+} from "../shared/systemone";
 
 /**
  * 本地 API 网关。
@@ -180,6 +189,7 @@ function browserOriginAllowed(req: Request): boolean {
   // 给页面自己的 JS/CSS 也带上 `Origin: https://<隧道域名>`。不认这条，公网打开 /chat
   // 就是整页资源 403、界面白屏（curl 不带 Origin，所以只测接口是发现不了的）。
   if (isOwnExposedOrigin(origin)) return true;
+  if (isSameOriginOnBoundHost(req, origin)) return true;
   const tokens = authTokens();
   if (tokens.length === 0) return !isPubliclyExposed();
   return authOk(req, tokens);
@@ -190,6 +200,29 @@ function isOwnExposedOrigin(origin: string): boolean {
   if (!publicExposureHost) return false;
   try {
     return normalizeHostName(new URL(origin).host) === publicExposureHost;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 请求的 `Origin` 与它自己的 `Host` 同源，且网关是被显式绑到非回环地址的
+ * （用户有意对外服务，与 `hostHeaderAllowed` 最后一行同一个判据）。
+ *
+ * 存在的理由与 `isOwnExposedOrigin` 完全一样：vite 产物的 `<script crossorigin>`
+ * 会让浏览器给**页面自己的** JS/CSS 带上 `Origin`，而静态资源请求不带
+ * `Authorization` —— 不放行这条，局域网打开 /chat 就是整页资源 403、白屏
+ * （curl 不带 Origin，所以只测接口发现不了）。
+ *
+ * 安全性：只放行「Origin 的主机名 == 这次请求打到的 Host」，即真正的同源请求。
+ * 第三方页面发起的跨站请求带的是它自己的域名，与 Host 不同，照样被拒。
+ */
+function isSameOriginOnBoundHost(req: Request, origin: string): boolean {
+  if (isLoopbackHost(boundHost)) return false;
+  const host = req.headers.get("host");
+  if (!host) return false;
+  try {
+    return normalizeHostName(new URL(origin).host) === normalizeHostName(host);
   } catch {
     return false;
   }
@@ -2052,7 +2085,83 @@ async function handleListModels(): Promise<Response> {
     description: "文生图自动路由：MLX 本地引擎 → OpenAI 兼容 API → ComfyUI（走已配置的 IMG_BACKEND / IMG_MODEL）",
   });
 
-  return json({ object: "list", data });
+  /**
+   * TypeSafe / JEV：官方 `GET /v1/models` 返回 `{ models: [{name, description, release_date}] }`，
+   * 而 OpenAI 客户端读的是 `{ object, data }`。**两套字段一起给**，一个响应同时满足两边：
+   * - 官方 JS SDK 的 `client.models.list()` 只认 `wire.models`（数组），多出来的 `data` 不看；
+   * - OpenAI 客户端只读 `data`，多出来的 `models` 不看。
+   * 分两个端点做不到"换 Base URL 就能用"，所以这里刻意做成超集。
+   */
+  return json({ object: "list", data, models: systemOneModelCards() });
+}
+
+// ---------------------------------------------------------------------------
+// SystemOne / JEV（POST /v1/systemone）
+//
+// 与 TypeSafe 官方逐字段对齐：请求 `{state, model, questions}`、响应
+// `{model, answers, usage}`、错误体 `{detail:{error_type,message}}` / FastAPI 的
+// `{detail:[{loc,msg,type,input,ctx}]}`、成功与失败都带 `x-typesafe-request-id`。
+// 官方 SDK（Python `typesafe-sdk` / JS `@typesafe-ai/sdk`）只改 TYPESAFE_BASE_URL
+// 与 TYPESAFE_API_KEY 就能直接打到这里。
+// ---------------------------------------------------------------------------
+
+/** SystemOne 响应统一带请求 id（官方用 `req_` + 32 hex）。 */
+function systemOneJson(data: unknown, status: number, requestId: string): Response {
+  return json(data, status, { "x-typesafe-request-id": requestId });
+}
+
+/**
+ * 鉴权失败：**缺 Key → 403、Key 无效 → 401**，两条文案都是官方的原话。
+ *
+ * 这不是随手选的状态码 —— 官方（FastAPI 的 HTTPBearer + 自定义异常处理器）就是
+ * 这么分的，SDK 也据此抛不同异常（`AuthenticationError` vs `PermissionDeniedError`）。
+ * 我们照抄，客户端的分支判断才不会在换 Base URL 之后走错。
+ */
+function systemOneUnauthorized(req: Request): Response {
+  const bearer = (req.headers.get("authorization") ?? "").trim();
+  const apiKey = (req.headers.get("x-api-key") ?? "").trim();
+  const supplied = /^bearer\s+\S+/i.test(bearer) || apiKey.length > 0;
+  const kind = supplied ? "invalid" : "missing";
+  return json(systemOneAuthErrorBody(kind), kind === "missing" ? 403 : 401, {
+    "WWW-Authenticate": "Bearer",
+    "x-typesafe-request-id": newSystemOneRequestId(),
+  });
+}
+
+/** 422 的 body：FastAPI 形状。JSON 本身坏掉时也归到这里（官方 FastAPI 同样如此）。 */
+function systemOneInvalidBody(message: string): Response {
+  return systemOneJson(
+    systemOneValidationBody([{ loc: ["body"], msg: message, type: "json_invalid", input: null }]),
+    422,
+    newSystemOneRequestId(),
+  );
+}
+
+async function handleSystemOne(req: Request): Promise<Response> {
+  if (!requestAuthorized(req)) return systemOneUnauthorized(req);
+
+  let raw: unknown;
+  try {
+    raw = await req.json();
+  } catch {
+    return systemOneInvalidBody("JSON decode error");
+  }
+  const validated = validateSystemOneRequest(raw);
+  if (!validated.ok) return systemOneJson(systemOneValidationBody(validated.errors), 422, newSystemOneRequestId());
+
+  const result = await SystemOne.runSystemOne(validated.value);
+  // 后端失败时状态码与 body 都按上游/官方形状透传（401/422/429 原样给客户端）。
+  if (!result.ok) {
+    logEvent({
+      level: "warn",
+      source: "systemone",
+      event: "systemone.gateway.failed",
+      message: result.message,
+      detail: { status: result.status, backend: result.backend, model: validated.value.model },
+    });
+    return systemOneJson(result.body, result.status, newSystemOneRequestId());
+  }
+  return systemOneJson(result.response, 200, newSystemOneRequestId());
 }
 
 // ---------------------------------------------------------------------------
@@ -2085,8 +2194,41 @@ function openApiSpec(): Record<string, unknown> {
       "/v1/models": {
         get: {
           summary: "列出可用模型",
-          description: "聚合返回本地推理服务器、云端 API、本地/三方 TTS、ASR 的全部可用模型及网关能力别名（omni-tts / omni-asr / omni-image）。",
-          responses: { "200": { description: "模型列表" } },
+          description:
+            "聚合返回本地推理服务器、云端 API、本地/三方 TTS、ASR 的全部可用模型及网关能力别名（omni-tts / omni-asr / omni-image）。" +
+            "同时带官方 TypeSafe 形状的 `models` 字段（JEV / Laya 的类型化判定模型），" +
+            "所以官方 SDK 的 models.list() 与 OpenAI 客户端读同一个端点各取所需。",
+          responses: { "200": { description: "模型列表（OpenAI 的 data + TypeSafe 的 models）" } },
+        },
+      },
+      "/v1/systemone": {
+        post: {
+          summary: "SystemOne / JEV 类型化判定",
+          description:
+            "按 TypeSafe 官方协议对 state 提出若干**类型化问题**并拿回结构化答案（不是生成文本）：" +
+            "noul（是/否概率）、choice（在给定选项里选一个 + 概率分布）、score（在有序档位上打分 + 概率分布）。" +
+            "一个问题一次请求，`questions` 里的每个键会原样出现在 `answers` 里。\n\n" +
+            "后端由设置决定：本地（托管 laya-mlx 运行时，或自建的 TypeSafe 兼容服务）优先，云端（TypeSafe 官方）兜底。" +
+            "价格恒为 0 —— 本地免费，云端用你自己的 Key。\n\n" +
+            "官方 SDK 换 `TYPESAFE_BASE_URL` + `TYPESAFE_API_KEY` 即可直连：鉴权用网关 API Key，" +
+            "鉴权失败按官方返回 403（缺 Key）/ 401（Key 无效），校验失败 422（FastAPI 形状），响应带 `x-typesafe-request-id`。",
+          security: [{ bearerAuth: [] }],
+          requestBody: {
+            required: true,
+            content: {
+              "application/json": {
+                schema: { $ref: "#/components/schemas/SystemOneRequest" },
+              },
+            },
+          },
+          responses: {
+            "200": { description: "类型化答案（model + answers + usage）" },
+            "401": { description: "Key 无效（官方形状 `{detail:{error_type,message}}`）" },
+            "403": { description: "缺少 Key（官方形状 `{detail:{error_type,message}}`）" },
+            "422": { description: "请求体校验失败（FastAPI 形状 `{detail:[{loc,msg,type}]}`）" },
+            "502": { description: "后端不可用（本地运行时未安装 / 云端连不上）" },
+            "503": { description: "没有可用的 JEV 后端（既没装本地运行时，也没配云端 Key）" },
+          },
         },
       },
       "/v1/memories": {
@@ -2404,6 +2546,45 @@ function openApiSpec(): Record<string, unknown> {
             steps: { type: "integer", description: "采样步数（可选，MLX 后端）" },
           },
         },
+        SystemOneRequest: {
+          type: "object",
+          required: ["state", "model", "questions"],
+          description: "SystemOne 请求体，与 TypeSafe 官方 /v1/systemone 一致。",
+          properties: {
+            state: {
+              description: "所有问题共同参照的内容：文本、JSON 对象或数组。",
+              anyOf: [{ type: "string" }, { type: "object" }, { type: "array", items: {} }],
+            },
+            model: {
+              type: "string",
+              default: "jev-latest",
+              description: "模型名或别名（见 GET /v1/models 的 models 字段）：jev-latest / jev-preview / jev-1.13.0，或本地的 laya-latest / laya-multilingual / laya-typed-decisions。",
+            },
+            questions: {
+              type: "object",
+              minProperties: 1,
+              description: "问题集合：键是你自己起的名字，会原样出现在响应的 answers 里。",
+              additionalProperties: { $ref: "#/components/schemas/SystemOneQuestion" },
+            },
+          },
+        },
+        SystemOneQuestion: {
+          type: "object",
+          required: ["type"],
+          description: "一个类型化问题，按 type 区分：noul（是/否）/ choice（选项）/ score（有序档位）。",
+          properties: {
+            type: { type: "string", enum: ["noul", "choice", "score"] },
+            instructions: {
+              description: "要回答的问题本身；可以是字符串、对象或数组（对象/数组用来把要参照的数据与问题分开）。",
+              anyOf: [{ type: "string" }, { type: "object" }, { type: "array", items: {} }, { type: "null" }],
+            },
+            criteria: {
+              description:
+                "判定依据。choice：{选项名: 说明}；score：有序档位数组（下标即档位号，从 0 起）；noul：可选 {true, false} 描述。",
+              anyOf: [{ type: "object" }, { type: "array", items: {} }, { type: "null" }],
+            },
+          },
+        },
       },
     },
   };
@@ -2547,8 +2728,16 @@ async function route(req: Request): Promise<Response> {
   // 是纯静态页面与 schema，保持开放 —— 否则公网用户连文档都打不开，也就无从填 Key。
   const mcpPlaygroundGet = req.method === "GET" && path === "/mcp";
   const metaNeedsKey = isPubliclyExposed() && (path === "/" || path === "/health");
+  /**
+   * `/v1/systemone` 单独放行到 handler 里鉴权：它对"缺 Key"（403）与"Key 无效"（401）
+   * 返回**两套不同的官方文案与状态码**，而通用那道只回一个 401。把判定留给 handler
+   * 才能做到和官方逐字节一致（见 systemOneUnauthorized）。
+   */
+  const systemOneNeedsOwnAuth = path === "/v1/systemone";
   if (
-    (path.startsWith("/v1/") || (path === "/mcp" && !mcpPlaygroundGet) || metaNeedsKey) &&
+    ((path.startsWith("/v1/") && !systemOneNeedsOwnAuth) ||
+      (path === "/mcp" && !mcpPlaygroundGet) ||
+      metaNeedsKey) &&
     !requestAuthorized(req)
   ) {
     return unauthorized();
@@ -2590,6 +2779,7 @@ async function route(req: Request): Promise<Response> {
         },
         endpoints: [
           "GET  /v1/models",
+          "POST /v1/systemone (SystemOne / JEV：choice / score / noul 类型化判定，官方 TypeSafe 协议)",
           "POST /v1/chat/completions",
           "POST /v1/embeddings",
           "POST /v1/responses",
@@ -2627,6 +2817,9 @@ async function route(req: Request): Promise<Response> {
     case "/v1/models":
       if (req.method !== "GET") return apiError(405, "Method Not Allowed");
       return handleListModels();
+    case "/v1/systemone":
+      if (req.method !== "POST") return apiError(405, "Method Not Allowed");
+      return handleSystemOne(req);
     case "/v1/chat/completions":
       if (req.method !== "POST") return apiError(405, "Method Not Allowed");
       return handleChatCompletions(req);

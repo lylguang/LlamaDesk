@@ -1,0 +1,33 @@
+{
+  "id": "04a-reentrancy-gate",
+  "allowed_files": [
+    "apps/studio/src/bun/agent.ts",
+    "apps/studio/src/bun/agent-reentry.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-reentry.test.ts",
+    "apps/studio/src/bun/agent-turn.test.ts",
+    "apps/studio/src/bun/agent-queue.test.ts",
+    "apps/studio/src/bun/agent-goals.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "export const starting",
+    "export function starting"
+  ],
+  "mutations": [
+    {
+      "name": "isAgentRunning 不再把启动中算进去（重入窗口又开了）",
+      "file": "apps/studio/src/bun/agent.ts",
+      "find": "return running.has(conversationId) || starting.has(conversationId);",
+      "replace": "return running.has(conversationId);"
+    }
+  ]
+}

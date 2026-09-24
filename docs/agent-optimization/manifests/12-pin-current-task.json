@@ -1,0 +1,29 @@
+{
+  "id": "12-pin-current-task",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-compaction.ts",
+    "apps/studio/src/bun/agent-compaction.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-compaction.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-compaction.test.ts",
+    "apps/studio/src/bun/agent-compaction-pipeline.test.ts"
+  ],
+  "max_source_lines": 30,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\("
+  ],
+  "mutations": [
+    {
+      "name": "找任务陈述时从前往后找（会钉成第一条 user，等于没改）",
+      "file": "apps/studio/src/bun/agent-compaction.ts",
+      "find": "for (let i = messages.length - 1; i >= 1; i -= 1)",
+      "replace": "for (let i = 1; i < messages.length; i += 1)"
+    }
+  ]
+}

@@ -43,6 +43,11 @@ const RUNTIME_API = new Set([
   "omni.bg.status",
   "omni.bg.download",
   "omni.bg.run",
+  // 高清修复（Real-ESRGAN 本地超分）：upscale.status / download / run
+  "omni.upscale",
+  "omni.upscale.status",
+  "omni.upscale.download",
+  "omni.upscale.run",
   // 命名空间本身（页面注释里会写 `omni.notes.*`，逐级回溯要能命中）
   "omni.notes",
   "omni.notes.list",

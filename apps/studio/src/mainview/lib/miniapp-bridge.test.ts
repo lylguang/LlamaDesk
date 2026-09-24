@@ -17,6 +17,7 @@ const CAPS: MiniAppCapabilitySnapshot = {
   chat: { ready: false, label: "" },
   asr: { ready: false, label: "" },
   bgRemove: { ready: true, label: "本地 · silueta" },
+  upscale: { ready: true, label: "本地 · realesrgan-x4plus" },
   local: { ready: true, label: "On-device only" },
 };
 

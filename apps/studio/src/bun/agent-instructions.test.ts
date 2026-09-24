@@ -102,12 +102,16 @@ describe("体积上限与拼装", () => {
     const capped = truncateInstructions(files, 15);
     expect(capped.truncated).toBe(true);
     expect(capped.files).toHaveLength(2);
-    expect(capped.files[0]!.contents).toBe("x".repeat(10));
-    expect(capped.files[1]!.contents).toBe("y".repeat(5));
+    // 两个文件各 10 字节、预算 15：最具体的 /b 先吃满 10 字节，剩 5 字节给 /a；
+    // 输出仍按原顺序 /a 在前。
+    expect(capped.files[0]!.contents).toBe("x".repeat(5));
+    expect(capped.files[1]!.contents).toBe("y".repeat(10));
 
-    const onlyFirst = truncateInstructions(files, 10);
-    expect(onlyFirst.files).toHaveLength(1);
-    expect(onlyFirst.truncated).toBe(true);
+    const onlyLast = truncateInstructions(files, 10);
+    expect(onlyLast.files).toHaveLength(1);
+    expect(onlyLast.truncated).toBe(true);
+    // 预算只够一个文件时，活下来的是最具体的那个。
+    expect(onlyLast.files[0]!.path).toBe("/b");
   });
 
   test("拼出的段落写明文件来源；截断时说明后面还有内容", () => {
@@ -137,6 +141,59 @@ describe("体积上限与拼装", () => {
     const capped = truncateInstructions(files, 4);
     expect(capped.files[0]!.contents).toBe("中");
     expect(capped.files[0]!.contents).not.toContain("\uFFFD");
+  });
+
+  test("预算从最具体的层开始分配：泛层超大时，最具体那层仍完整保留", () => {
+    const files = [
+      { path: "/user", contents: "u".repeat(100), source: "user" as const },
+      { path: "/repo", contents: "r".repeat(50000), source: "project" as const },
+      { path: "/ws", contents: "w".repeat(200), source: "project" as const },
+    ];
+    const { files: kept, truncated } = truncateInstructions(files, 1000);
+    expect(truncated).toBe(true);
+    const ws = kept.find((file) => file.path === "/ws");
+    expect(ws).toBeDefined();
+    // 最具体那层一字不少：50000 字节的根层不能把它挤出去。
+    expect(ws!.contents).toBe("w".repeat(200));
+    // 泛层（user）也被挤掉或截断：800 字节预算里只够根层放 600 字。
+    const user = kept.find((file) => file.path === "/user");
+    expect(user).toBeUndefined();
+  });
+
+  test("分配倒着走，输出仍按原顺序（泛在前、具体在后）", () => {
+    const files = [
+      { path: "/user", contents: "u".repeat(100), source: "user" as const },
+      { path: "/repo", contents: "r".repeat(50000), source: "project" as const },
+      { path: "/ws", contents: "w".repeat(200), source: "project" as const },
+    ];
+    const { files: kept } = truncateInstructions(files, 1000);
+    // 保留下来的文件之间的相对顺序必须是传入顺序（泛在前、具体在后），不能倒过来；
+    // 截断点之后的更泛层被丢掉是允许的，倒序才是缺陷。
+    const idx = (p: string) => kept.findIndex((file) => file.path === p);
+    expect(idx("/ws")).toBe(kept.length - 1);
+    expect(idx("/repo")).toBe(idx("/ws") - 1);
+    expect(kept.map((file) => file.path)).toEqual(["/repo", "/ws"]);
+  });
+
+  test("预算够时三份都在，顺序、内容与原来一致", () => {
+    const files = [
+      { path: "/user", contents: "u".repeat(100), source: "user" as const },
+      { path: "/repo", contents: "r".repeat(300), source: "project" as const },
+      { path: "/ws", contents: "w".repeat(200), source: "project" as const },
+    ];
+    const { files: kept, truncated } = truncateInstructions(files, 1000);
+    expect(truncated).toBe(false);
+    expect(kept.map((file) => file.path)).toEqual(["/user", "/repo", "/ws"]);
+    expect(kept.map((file) => file.contents)).toEqual(["u".repeat(100), "r".repeat(300), "w".repeat(200)]);
+  });
+
+  test("预算卡在半个多字节字符处：最具体那层截断也不留替换字符", () => {
+    // 10 个「中」= 30 字节；预算 15 字节 = 砍在第 5 个字（第 16 字节）中间。
+    const files = [{ path: "/ws", contents: "中".repeat(10), source: "project" as const }];
+    const { files: kept, truncated } = truncateInstructions(files, 15);
+    expect(truncated).toBe(true);
+    expect(kept[0]!.contents).toBe("中".repeat(5));
+    expect(kept[0]!.contents).not.toContain("\uFFFD");
   });
 });
 

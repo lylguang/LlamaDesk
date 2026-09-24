@@ -206,7 +206,6 @@ export function goalPromptSection(conversationId: number): string | null {
     "",
     `**目标**：${goal.objective}`,
     goal.acceptance ? `**验收标准**：${goal.acceptance}` : "**验收标准**：（尚未明确 —— 先用 ask_user 与用户对齐，再写进 goal 工具）",
-    `**进度**：${describeGoal(goal)}`,
     "",
     "这个目标由你自主推进，回合结束后会自动继续，直到达成或撞上预算。",
     "",
@@ -226,6 +225,7 @@ export function goalContinuationText(goal: AgentGoal): string {
     `（系统自动继续 —— 目标「${goal.objective}」尚未完成。）`,
     "",
     "接着推进：下一步做最该做的那件事，不要复述已经做过的部分。",
+    `进度：${describeGoal(goal)}`,
     goal.acceptance ? `验收标准：${goal.acceptance}` : "如果验收标准还不清楚，先用 ask_user 问清楚再继续。",
     "认为已经达成 → 调用 goal 工具 complete 并给出证据；做不到 → 调用 abandon 说明卡在哪。",
   ].join("\n");

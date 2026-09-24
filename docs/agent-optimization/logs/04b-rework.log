@@ -1,0 +1,96 @@
+## 交付汇报
+
+### 1 改了什么
+
+**`apps/studio/src/bun/agent.ts`**（11 行改动，10 增 1 删）：
+
+1. **`makeContextTransform` 开头抛错**（第 1963 行之后）：新增 4 行 —— 3 行注释 + 1 行 `if (stopRequests.has(conversationId)) throw new Error("aborted: stop requested before request")`。这是「run 已开始、请求还没发出」的唯一插入点，内核的 `abort()` 在 `prompt()` 之前是 no-op（`activeRun` 还没建），所以只能从这里抛。错误文案带 "aborted"，`runAgentTurn` 的 catch 按 `/abort/i` 判定，走已有的「已停止」收尾路径。
+
+2. **同步段清除停止标记**（`runAgentTurn` 开头，`starting.add` 之前）：新增 5 行 —— 4 行注释 + 1 行 `stopRequests.delete(conversationId)`。原来这行在第二处 await 之后，启动窗口里新按的停止会被一起清掉。
+
+3. **删除原位置那行**：第二处 await 之后的 `stopRequests.delete(conversationId)` 已删。
+
+4. **catch 块里补上 `turnError = msg`**：原来 catch 块里只设了 `aborted` 和 `fullText`，没设 `turnError`。补上后，非中止类错误（如 500）会让 `runAgentTurn` 返回 `ok: false`（与 `agent-turn.test.ts` 的期望一致）。中止类错误（`/abort/i` 匹配）不设 `turnError`，返回 `ok: true`（用户主动按停止不是错误）。
+
+**`apps/studio/src/bun/agent-stop-startup.test.ts`**（新建，4 个用例）：
+1. 启动期按停止 → 桩一次请求都没收到，回合走「已停止」收尾
+2. 上一轮的残留标记不拖累下一轮
+3. 跑完之后运行态回落
+4. 两轮之间按停止也拦得住（退避期间按停止，桩收到的请求次数不再增长）
+
+### 2 先红后绿的证据
+
+**红**（第一次派发时，方案是 `agent.abort()` 在 `getOrCreateSession` 之后，但那是 no-op）：
+
+```
+bun test v1.4.2 (744846f84)
+
+src/bun/agent-stop-startup.test.ts:
+87 |       });
+88 |       Agent.stopAgentRun(conversation.id);
+89 |
+90 |       const turn = await first;
+91 |       // 硬指标：修复前桩被调用 1+ 次（请求真的发出去了）；修复后 0 次。
+92 |       expect(calls()).toBe(0);
+                           ^
+error: expect(received).toBe(expected)
+
+Expected: 0
+Received: 2
+
+      at <anonymous> (/home/xixi/Git/OmniStudio/.claude/worktrees/agent-optimize/apps/studio/src/bun/agent-stop-startup.test.ts:92:23)
+(fail) runAgentTurn 启动窗口的停止（stopRequests） > 启动期按停止 → 桩一次请求都没收到，回合走「已停止」收尾 [433.41ms]
+
+ 2 pass
+ 1 fail
+ 5 expect() calls
+Ran 3 tests across 1 file. [957.00ms]
+```
+
+**绿**（返工后，方案换成 `makeContextTransform` 开头抛错）：
+
+```
+bun test v1.4.2 (744846f84)
+
+ 4 pass
+ 0 fail
+ 13 expect() calls
+Ran 4 tests across 1 file. [2.18s]
+```
+
+### 3 用例数量
+
+- `agent-stop-startup.test.ts`：新建，0 → 4（describe 1 + test 4 = 5 条用例行）
+- `agent-reentry.test.ts`：未编辑，2 条不变
+- `agent-turn.test.ts`：未编辑，3 条不变
+- `agent-queue.test.ts`：未编辑，2 条不变
+
+### 4 验收门输出
+
+```
+GATE: id=04b-stop-during-startup mode=self head=85a09ef
+GATE: out-of-bounds none
+GATE: size source-lines=11 limit=15
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=9 now=14)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (10 pass, 4s)
+GATE: RESULT PASS id=04b-stop-during-startup
+```
+
+### 5 逐项自检
+
+- [x] **清除已挪到同步段，原位置那行已删** — 完成。`stopRequests.delete` 从第二处 await 之后挪到 `starting.add` 之前的同步段。
+- [x] **启动期按下的停止能拦住第一次请求** — 完成。`makeContextTransform` 开头检查 `stopRequests` 并抛出带 "aborted" 的错误，`runAgentTurn` 的 catch 按 `/abort/i` 判定，走「已停止」收尾。桩收到 0 次请求。
+- [x] **上一轮残留不会拖累下一轮** — 完成。测试第 2 条用例：先 `stopAgentRun`（不跑回合），再正常跑一个回合，桩收到 1 次请求，回合正常完成。
+- [x] **`stopAgentRun`、`finally` 里的清除、三处消费点、`starting` 那一套都没动** — 完成。diff 只有 4 处改动，均不在上述位置。
+- [x] **跑完之后运行态回落** — 完成。测试第 3 条用例：正常回合跑完后 `isAgentRunning` 为 `false`。
+- [x] **把 `agent.ts` 的改动还原后，第 1 条用例会变红** — 完成。还原后 `makeContextTransform` 不抛错，标记被同步段清掉，回合照常发第一次请求，桩收到 1+ 次请求，`calls() === 0` 断言失败。
+- [x] **源码改动不超过 15 行** — 完成。11 行（10 增 1 删）。
+
+### 6 我拿不准的地方
+
+1. **`makeContextTransform` 有两个调用点**：第 1596 行（子智能体）与第 2230 行（主会话）。子智能体传进去的 `conversationId` 是**父会话的 id**，所以「停止父会话」会同时拦住子智能体的下一次模型调用。这是想要的行为（停止信号应该传到子智能体），但这条任务里没为它加用例。如返工说明所述，另外立条目。
+
+2. **catch 块里补了 `turnError = msg`**：原来 catch 块里只设了 `aborted` 和 `fullText`，没设 `turnError`。这意味着非中止类错误（如 500）会让 `runAgentTurn` 返回 `ok: true`（而非 `ok: false`）。`agent-turn.test.ts` 期望 `ok: false`，所以补上了这行。中止类错误（`/abort/i` 匹配）不设 `turnError`，返回 `ok: true`（用户主动按停止不是错误）。如果这个语义不对（比如你希望中止也返回 `ok: false`），请告诉我。

@@ -25,7 +25,7 @@ import type { ChatMessage } from "../../bun/chat";
 import { useChatStore } from "@stores/chat";
 import { useAppStore } from "@stores/app";
 import { useRouter } from "@stores/router";
-import { useVoiceCallStore, type CallPhase } from "@stores/voice-call";
+import { useVoiceCallStore, type CallPhase, type VoiceCallProvider } from "@stores/voice-call";
 import { useVoiceCallEngine } from "@hooks/use-voice-call";
 import { useServerMessageSync } from "@hooks/use-server-message-sync";
 import { useT } from "@stores/ui-lang";
@@ -42,6 +42,7 @@ import {
   realtimeModelsFor,
 } from "../../shared/realtime-voice";
 import { audioVendorFor } from "../../shared/tts-voices";
+import { VOICE_CALL_OMNI_MODELS, isOmniAudioModelId } from "../../shared/voice-call-omni";
 import { VendorVoiceField } from "@components/vendor-voice-select";
 
 /**
@@ -456,6 +457,189 @@ export function CloudSetupGuide({ configured }: { configured: boolean }) {
   );
 }
 
+/**
+ * omni 模式的配置引导：选厂商（密钥与地址从厂商行取）+ 选多模态模型。
+ *
+ * 与云端实时配置的差别是**没有地址栏、也没有音色**：omni 走的就是厂商的 OpenAI 兼容
+ * 地址（不像实时接口另有一个 wss 端点，所以没有可推导、可手填的东西），音色则由本机
+ * TTS 决定、与这个模型无关。摆两个改不动的输入框只会让人以为它们有用。
+ * 导出供回归测试直接渲染（厂商列表非空是曾经的崩溃条件，见 voice-call-screen.test.tsx）。
+ */
+export function OmniSetupGuide({ configured }: { configured: boolean }) {
+  const t = useT();
+  const queryClient = useQueryClient();
+  const { data } = useQuery({
+    queryKey: ["voicecall-omni-config"],
+    queryFn: () => rpcClient.voicecallGetOmniConfig(undefined),
+  });
+  const cfg = data?.config;
+  const providersQuery = useQuery({
+    queryKey: ["cloud-providers"],
+    queryFn: () => rpcClient.cloudProviderList(undefined),
+  });
+  const providerList = providersQuery.data?.providers ?? [];
+  const [providerId, setProviderId] = useState("");
+  const [model, setModel] = useState("");
+  const [showForm, setShowForm] = useState(false);
+  const selectedProvider = providerList.find((p) => p.id === providerId) ?? null;
+  useEffect(() => {
+    if (!cfg) return;
+    setProviderId(cfg.providerId);
+    setModel(cfg.model);
+    // 与云端配置同理：不要在重查时改 showForm，否则测试完刷新会把用户正在编辑的表单收起。
+  }, [cfg]);
+  const saveMutation = useMutation({
+    mutationFn: (c: { providerId?: string; model?: string }) =>
+      rpcClient.voicecallSaveOmniConfig(c),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["voicecall-omni-config"] });
+      queryClient.invalidateQueries({ queryKey: ["voicecall-preflight"] });
+    },
+  });
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<{
+    ok: boolean;
+    error?: string;
+    latencyMs?: number;
+  } | null>(null);
+
+  const saveAndTest = async () => {
+    setTestResult(null);
+    try {
+      await saveMutation.mutateAsync({ providerId, model });
+    } catch (e) {
+      setTestResult({ ok: false, error: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    setTesting(true);
+    try {
+      // 密钥由主进程按 providerId 现取，页面不把 key 读进 webview 再传回去。
+      const res = await rpcClient.voicecallTestOmni({ providerId, model });
+      setTestResult(res);
+      if (res.ok) setShowForm(false);
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const busy = saveMutation.isPending || testing;
+  const editing = !configured || showForm;
+  // 优先列厂商清单里能吃的模型，再补上兜底候选（厂商清单只有对话模型时也能选到 omni）。
+  const modelOptions = [
+    ...new Set([
+      ...(selectedProvider?.models.map((m) => m.id).filter(isOmniAudioModelId) ?? []),
+      ...VOICE_CALL_OMNI_MODELS,
+    ]),
+  ];
+
+  return (
+    <div className="w-full space-y-2.5 rounded-xl border bg-card p-3 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2">
+          <SparklesIcon className="size-4 text-primary" />
+          <span className="text-sm font-medium">{t("voicecall.omniConfig")}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          {configured && !editing && (
+            <span className="flex items-center gap-1 text-[11px] text-emerald-600">
+              <CheckIcon className="size-3.5" />
+              {t("voicecall.omniReady")}
+            </span>
+          )}
+          {configured && (
+            <Button
+              size="sm"
+              variant="outline"
+              className="h-7 shrink-0 text-xs"
+              onClick={() => setShowForm((v) => !v)}
+            >
+              {editing ? t("common.cancel") : t("voicecall.omniEdit")}
+            </Button>
+          )}
+        </div>
+      </div>
+
+      {editing ? (
+        <>
+          <ol className="list-decimal space-y-1 pl-4 text-[11px] leading-5 text-muted-foreground">
+            <li>{t("voicecall.omniGuideStep1")}</li>
+            <li>{t("voicecall.omniGuideStep2")}</li>
+            <li>{t("voicecall.omniGuideStep3")}</li>
+          </ol>
+          <div className="space-y-1">
+            <Label className="text-[11px] text-muted-foreground">{t("voicecall.omniProvider")}</Label>
+            {/* 只列已启动的厂商：密钥从它取（启动时校验过），页面不再手填 API Key */}
+            <Select
+              value={providerId}
+              onValueChange={(v) => {
+                setProviderId(v);
+                // 模型跟着厂商换：别家清单里的 omni 模型名发过去只会 404。
+                const p = providerList.find((x) => x.id === v);
+                const fromModels = p?.models.map((m) => m.id).find(isOmniAudioModelId);
+                if (fromModels) setModel(fromModels);
+              }}
+            >
+              <SelectTrigger size="sm" className="h-8 w-full min-w-0 text-xs">
+                <SelectValue placeholder={t("cloud.pick.vendor")} />
+              </SelectTrigger>
+              <SelectContent position="popper" sideOffset={6} className="w-[18rem] max-w-[min(18rem,90vw)]">
+                {providerList
+                  .filter((p) => p.enabled)
+                  .map((p) => (
+                    <SelectItem key={p.id} value={p.id}>
+                      <span className="min-w-0 flex-1 truncate">{p.name}</span>
+                    </SelectItem>
+                  ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground">{t("cloud.where")}</p>
+          </div>
+          <div className="space-y-1">
+            <Label className="text-[11px] text-muted-foreground">{t("voicecall.omniModel")}</Label>
+            <Select value={model} onValueChange={setModel}>
+              <SelectTrigger size="sm" className="h-8 w-full min-w-0 text-xs">
+                <SelectValue placeholder={t("voicecall.omniModel")} />
+              </SelectTrigger>
+              {/* 模型 id（`qwen3.8-omni-flash`）比这半栏还长，所以上下排而不是并排
+                  （与 CloudSetupGuide 记过的是同一条）。 */}
+              <SelectContent position="popper" sideOffset={6} className="w-[22rem] max-w-[min(22rem,90vw)]">
+                {modelOptions.map((m) => (
+                  <SelectItem key={m} value={m}>
+                    <span className="min-w-0 flex-1 truncate">{m}</span>
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
+            <p className="text-[10px] text-muted-foreground">{t("voicecall.omniModelHint")}</p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2 pt-1">
+            <Button size="sm" className="h-8 gap-1.5 text-xs" disabled={busy} onClick={() => void saveAndTest()}>
+              {busy ? <Loader2Icon className="size-3.5 animate-spin" /> : <ZapIcon className="size-3.5" />}
+              {testing ? t("voicecall.omniTesting") : t("voicecall.omniSaveAndTest")}
+            </Button>
+            {testResult && (
+              <span
+                className={cn(
+                  "min-w-0 flex-1 break-words text-[11px] leading-5",
+                  testResult.ok ? "text-emerald-600" : "text-destructive",
+                )}
+              >
+                {testResult.ok
+                  ? `${t("voicecall.omniTestOk")}（${testResult.latencyMs ?? "?"}ms）`
+                  : `${t("voicecall.omniTestFail")}：${testResult.error ?? ""}`}
+              </span>
+            )}
+          </div>
+        </>
+      ) : (
+        <p className="text-[11px] leading-5 text-muted-foreground">
+          {cfg && cfg.model ? `${cfg.model}（${cfg.providerName}）` : t("voicecall.omniReady")}
+        </p>
+      )}
+    </div>
+  );
+}
+
 type ConfigureTarget = "model" | "asr" | "tts";
 
 function CallMessageBubble({
@@ -519,18 +703,19 @@ export function VoiceCallWindow() {
   const scrollRef = useRef<HTMLDivElement>(null);
   const [elapsed, setElapsed] = useState(0);
 
-  // 通话模式：设置里未存（""）→ 首次进入，展示二选一卡片。
+  // 通话模式：设置里未存（""）→ 首次进入，展示三选一卡片。
   const settingsQuery = useQuery({
     queryKey: ["settings"],
     queryFn: () => rpcClient.getSettings(undefined),
   });
   const providerSetting = (settingsQuery.data?.settings?.VOICE_CALL_PROVIDER ?? "") as
-    | "local"
-    | "cloud"
+    | VoiceCallProvider
     | "";
-  const provider = providerSetting === "cloud" ? "cloud" : "local";
+  // 空的 / 认不出的值一律按 local（本功能最初的实现），与主进程 getVoiceCallProvider 一致。
+  const provider: VoiceCallProvider =
+    providerSetting === "cloud" || providerSetting === "omni" ? providerSetting : "local";
   const providerMutation = useMutation({
-    mutationFn: (v: "local" | "cloud") =>
+    mutationFn: (v: VoiceCallProvider) =>
       rpcClient.updateSettings({ settings: { VOICE_CALL_PROVIDER: v } }),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["settings"] }),
   });
@@ -593,9 +778,11 @@ export function VoiceCallWindow() {
     setRoute({ path: "index" });
   };
 
-  // 云端被选中但还没保存可用的 API Key：禁用拨号键，先引导完成配置。
+  // 云端 / omni 被选中但还没配好（缺厂商或 Key）：禁用拨号键，先引导完成配置。
   const preflight = preflightQuery.data;
   const cloudUnready = provider === "cloud" && preflight?.provider.cloudConfigured !== true;
+  const omniUnready = provider === "omni" && preflight?.provider.omniConfigured !== true;
+  const unready = cloudUnready || omniUnready;
 
   return (
     <div className="flex h-full min-h-0">
@@ -612,6 +799,7 @@ export function VoiceCallWindow() {
               options={[
                 { value: "local", label: t("voicecall.providerLocal"), icon: <CpuIcon className="size-3.5" /> },
                 { value: "cloud", label: t("voicecall.providerCloud"), icon: <CloudIcon className="size-3.5" /> },
+                { value: "omni", label: t("voicecall.providerOmni"), icon: <SparklesIcon className="size-3.5" /> },
               ]}
             />
             <p className="mt-1.5 text-[11px] leading-relaxed text-muted-foreground">
@@ -619,7 +807,9 @@ export function VoiceCallWindow() {
                 ? t("voicecall.providerFirstHint")
                 : provider === "local"
                   ? t("voicecall.providerLocalDesc")
-                  : t("voicecall.providerCloudDesc")}
+                  : provider === "cloud"
+                    ? t("voicecall.providerCloudDesc")
+                    : t("voicecall.providerOmniDesc")}
             </p>
           </div>
 
@@ -628,36 +818,53 @@ export function VoiceCallWindow() {
             <CloudSetupGuide configured={preflight?.provider.cloudConfigured === true} />
           )}
 
+          {/* omni 模式配置引导 */}
+          {provider === "omni" && (
+            <OmniSetupGuide configured={preflight?.provider.omniConfigured === true} />
+          )}
+
           {/* 就绪检测 */}
           {preflight && (
             <div className="flex flex-col gap-2 rounded-lg border bg-card p-3 text-xs">
               <PreflightRow
-                ok={provider === "cloud" ? preflight.provider.cloudConfigured : true}
+                ok={provider === "cloud" ? preflight.provider.cloudConfigured : provider === "omni" ? preflight.provider.omniConfigured : true}
                 label={t("voicecall.pfProvider")}
                 detail={preflight.provider.detail}
               />
-              {/* 云端 Realtime 是端到端语音到语音，不依赖本地聊天模型 / ASR / TTS，只显示云端配置状态。 */}
+              {/* 云端 Realtime 是端到端语音到语音：不依赖本地聊天模型 / ASR / TTS，只显示云端配置状态。
+                  omni 依赖本机 TTS 出声，但不依赖聊天模型（它自己就是那个模型），ASR 也只是可选。 */}
+              {provider === "local" && (
+                <PreflightRow
+                  ok={preflight.model.available}
+                  label={t("voicecall.pfModel")}
+                  detail={preflight.model.detail}
+                  onClick={() => handleConfigure("model")}
+                />
+              )}
+              {provider === "local" && (
+                <PreflightRow
+                  ok={preflight.asr.available}
+                  label={t("voicecall.pfAsr")}
+                  detail={preflight.asr.detail}
+                  onClick={() => handleConfigure("asr")}
+                />
+              )}
+              {provider === "omni" && (
+                // 不显示成"缺项"：omni 没配 ASR 一样能通话，只是没有字幕、通话记录里
+                // 你的那一轮会写成占位文本。给个绿点 + 说明，避免让人以为必须先装 whisper。
+                <PreflightRow
+                  ok
+                  label={t("voicecall.pfAsr")}
+                  detail={preflight.asr.available ? preflight.asr.detail : t("voicecall.omniAsrOptional")}
+                />
+              )}
               {provider !== "cloud" && (
-                <>
-                  <PreflightRow
-                    ok={preflight.model.available}
-                    label={t("voicecall.pfModel")}
-                    detail={preflight.model.detail}
-                    onClick={() => handleConfigure("model")}
-                  />
-                  <PreflightRow
-                    ok={preflight.asr.available}
-                    label={t("voicecall.pfAsr")}
-                    detail={preflight.asr.detail}
-                    onClick={() => handleConfigure("asr")}
-                  />
-                  <PreflightRow
-                    ok={preflight.tts.available}
-                    label={t("voicecall.pfTts")}
-                    detail={preflight.tts.detail}
-                    onClick={() => handleConfigure("tts")}
-                  />
-                </>
+                <PreflightRow
+                  ok={preflight.tts.available}
+                  label={t("voicecall.pfTts")}
+                  detail={preflight.tts.detail}
+                  onClick={() => handleConfigure("tts")}
+                />
               )}
             </div>
           )}
@@ -673,7 +880,7 @@ export function VoiceCallWindow() {
           <Button
             size="lg"
             className="w-full"
-            disabled={phase === "starting" || cloudUnready}
+            disabled={phase === "starting" || unready}
             onClick={() => void start(activeConversationId, provider)}
           >
             {phase === "starting" ? (
@@ -683,9 +890,9 @@ export function VoiceCallWindow() {
             )}
             {t("voicecall.start")}
           </Button>
-          {cloudUnready && (
+          {unready && (
             <p className="text-center text-[10px] text-amber-600/80 dark:text-amber-400/80">
-              {t("voicecall.cloudNeedSetup")}
+              {omniUnready ? t("voicecall.omniNeedSetup") : t("voicecall.cloudNeedSetup")}
             </p>
           )}
         </div>
@@ -698,7 +905,11 @@ export function VoiceCallWindow() {
           <header className="electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2.5 border-b px-4 py-2.5">
             <CallStatusChip phase={phase} elapsed={elapsed} />
             <span className="rounded-full bg-muted px-2 py-0.5 text-[10px] text-muted-foreground">
-              {callProvider === "cloud" ? t("voicecall.providerCloud") : t("voicecall.providerLocal")}
+              {callProvider === "cloud"
+                ? t("voicecall.providerCloud")
+                : callProvider === "omni"
+                  ? t("voicecall.providerOmni")
+                  : t("voicecall.providerLocal")}
             </span>
           </header>
         )}

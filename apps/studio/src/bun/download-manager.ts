@@ -1,11 +1,19 @@
-import { existsSync, readdirSync, statSync } from "fs";
+import { existsSync, readdirSync, statSync, type Dirent } from "fs";
 import path from "path";
-import { downloadFile, downloadHuggingFaceFile, modelDestPath, removePartialFiles } from "./modelscope";
+import { downloadFile, downloadHuggingFaceFile, getModelsBaseDir, modelDestPath, removePartialFiles } from "./modelscope";
 import { concurrentFileLimit, partsBudgetFor, type DownloadProgress } from "./downloader";
 import { setModelMeta } from "./model-store";
 import { getSetting, updateSettings } from "./db/settings";
-import type { ModelCategory, ModelSource } from "../shared/modelscope";
+import { safeRepoId, type ModelCategory, type ModelSource } from "../shared/modelscope";
 import { logEvent } from "./app-log";
+import {
+  checkAgainstDisk,
+  clearDownloadCancelled,
+  markDownloadCancelled,
+  readDownloadManifest,
+  removeDownloadManifest,
+  writeDownloadManifest,
+} from "./download-manifest";
 
 export type DownloadStatus = "queued" | "downloading" | "paused" | "completed" | "failed" | "canceled";
 
@@ -27,6 +35,13 @@ export type DownloadTask = {
   createdAt: number;
   /** 市场列表给的字节数；排队用它排序（小文件先下），也为 null 时按未知处理。 */
   size?: number | null;
+  /**
+   * 该仓库的市场文件清单（`models.listModelFiles` 返回的原始列表，含 size）。
+   * 「下载整个模型」入队时带过来；下载真正开跑前把它写成完整性 manifest
+   * （`downloads/manifests/`），下载完后拿它和磁盘比对，缺文件才有据可查。
+   * 没带（单文件下载 / CLI / 控制套接字）就只记这一个文件，能拿多少写多少。
+   */
+  manifestFiles?: unknown;
   /** 入队序号：显式点击的任务是负值（插队），批量任务按体积升序排。 */
   order: number;
   /** 已经自动重试过多少轮（失败信息里展示）。 */
@@ -203,7 +218,7 @@ export class DownloadManager {
     fileName: string,
     category?: ModelCategory,
     source: DownloadSource = "modelscope",
-    opts: { size?: number | null; explicit?: boolean } = {},
+    opts: { size?: number | null; explicit?: boolean; manifestFiles?: unknown } = {},
   ): DownloadTask {
     const existing = [...this.tasks.values()].find(
       (t) =>
@@ -213,12 +228,19 @@ export class DownloadManager {
         t.status !== "canceled",
     );
     if (existing) {
+      let changed = false;
       // 已经在下/排队/失败的任务：把新拿到的大小信息补上，队列会重排。
       if (opts.size != null && existing.size !== opts.size) {
         existing.size = opts.size;
         this.sortQueue();
-        this.emit(true);
+        changed = true;
       }
+      // 第一次入队时没带清单（比如 CLI / 控制套接字），后面带过来也能补上。
+      if (existing.manifestFiles == null && opts.manifestFiles != null) {
+        existing.manifestFiles = opts.manifestFiles;
+        changed = true;
+      }
+      if (changed) this.emit(true);
       return existing;
     }
 
@@ -238,6 +260,10 @@ export class DownloadManager {
       size,
       order: opts.explicit ? -1 : this.nextOrder(),
     };
+    // 「下载整个模型」的仓库清单：整仓库共用同一份 manifest，每个任务都带上
+    // （start 是幂等的，重入时上面的守卫会保留第一份）。拿不到就 null，
+    // 运行前按「只有这个文件」记。
+    task.manifestFiles = opts.manifestFiles ?? null;
     // 落盘路径不合法（含 ../ 或绝对路径）时直接标记失败，避免进队列后覆盖数据目录外的文件。
     if (!modelDestPath(repo, fileName)) {
       task.status = "failed";
@@ -288,10 +314,17 @@ export class DownloadManager {
   cancel(id: string): boolean {
     const task = this.tasks.get(id);
     if (!task) return false;
+    if (task.status === "canceled") return true; // 幂等：重复取消不多做事
     if (task.status !== "completed") {
       task.status = "canceled";
       this.aborts.get(id)?.abort();
       this.removePartial(task);
+      // 取消标记是独立的小文件（downloads/cancelled/），失败不影响取消本身。
+      markDownloadCancelled(
+        task.repo,
+        "",
+        `${new Date().toISOString()} ${task.fileName} 用户取消（已下 ${task.received} 字节）`,
+      );
     }
     this.emit(true);
     return true;
@@ -351,6 +384,7 @@ export class DownloadManager {
     task.status = "downloading";
     task.error = undefined;
     this.emit(true);
+    this.writeManifest(task);
 
     const ac = new AbortController();
     this.aborts.set(task.id, ac);
@@ -399,6 +433,7 @@ export class DownloadManager {
       task.retries = 0;
       // 落盘后把分类和来源平台一起写进仓库元数据，本地模型列表才能显示"从哪儿下的"。
       setModelMeta(task.repo, { category: task.category, source: task.source });
+      this.verifyManifest(task);
       this.emit(true);
     } catch (e) {
       task.speed = 0;
@@ -450,6 +485,135 @@ export class DownloadManager {
       this.aborts.delete(task.id);
       this.running -= 1;
       this.pump();
+    }
+  }
+
+  /**
+   * 开跑前把「这次要下哪些文件」写进 manifest（downloads/manifests/），并清掉
+   * 上一次的取消标记（重新下载 = 用户重新授权）。
+   *
+   * manifest 是**辅助信息**：写失败只记日志，绝不能让下载失败。能拿多少写多少
+   * —— 整仓库下载时是市场返回的完整文件清单（path + 声称字节数，拿不到大小的
+   * 记 null）；只下了一个文件时就是单文件清单。
+   */
+  private writeManifest(task: DownloadTask) {
+    try {
+      const files = this.expectedFiles(task);
+      if (files.length === 0) return;
+      writeDownloadManifest({ repoId: task.repo, variant: "", files });
+      // 新一次下载开始就覆盖掉上一次的取消记录。
+      clearDownloadCancelled(task.repo, "");
+    } catch (e) {
+      // manifest 是辅助记录，写失败不影响下载本身（read 侧 fail-open 会退回磁盘扫描）。
+      logEvent({
+        level: "warn",
+        source: "download",
+        event: "download.manifest.write_failed",
+        message: `写下载 manifest 失败，继续下载: ${task.repo} / ${task.fileName}`,
+        detail: { repo: task.repo, fileName: task.fileName, error: e instanceof Error ? e.message : String(e) },
+      });
+    }
+  }
+
+  /** 这次任务对应的「应取文件」清单：整仓库清单优先，否则只有当前文件。 */
+  private expectedFiles(task: DownloadTask) {
+    const out: Array<{ path: string; size: number | null }> = [];
+    const seen = new Set<string>();
+    const push = (filePath: unknown, size: unknown) => {
+      if (typeof filePath !== "string" || filePath.length === 0 || seen.has(filePath)) return;
+      seen.add(filePath);
+      let bytes: number | null = null;
+      if (typeof size === "number" && Number.isFinite(size) && size > 0) bytes = size;
+      out.push({ path: filePath, size: bytes });
+    };
+    if (Array.isArray(task.manifestFiles)) {
+      for (const f of task.manifestFiles) {
+        if (f == null) continue;
+        const r = f as { path?: unknown; name?: unknown; size?: unknown };
+        const p = typeof r.path === "string" && r.path ? r.path : r.name;
+        push(p, r.size);
+      }
+    }
+    if (out.length === 0) push(task.fileName, task.size ?? task.total);
+    return out;
+  }
+
+  /**
+   * 下载完成后拿 manifest 和磁盘实际文件比对，只记日志：
+   *   齐了 → info `download.manifest.verified`，并删掉 manifest（它已经完成使命，
+   *   留着只会让「已下载」判断被一份陈旧清单带偏）；
+   *   缺文件 → warn `download.manifest.incomplete`，**保留 manifest**（下次
+   *   续传 / 扫描还要用它）。
+   *
+   * 注意：这一版 incomplete **只记日志、不把任务判成失败** —— 清单可能不完整
+   * （CLI / 控制套接字入队的任务没有仓库清单）或来源报的大小不准，先让数据
+   * 跑起来，等实际日志证明这套判断可靠了再考虑阻断。
+   */
+  private verifyManifest(task: DownloadTask) {
+    try {
+      const manifest = readDownloadManifest(task.repo, "");
+      if (manifest == null) return; // fail-open：没有 manifest 就走磁盘扫描的老路。
+      // 仓库目录就是模型目录（.../models/<safeRepo>/），直接取。
+      const repoDir = path.join(getModelsBaseDir(), safeRepoId(task.repo));
+      const onDisk = new Map<string, number>();
+      const walk = (dir: string, prefix: string, depth: number) => {
+        if (depth > 4) return;
+        let entries: Dirent[];
+        try {
+          entries = readdirSync(dir, { withFileTypes: true });
+        } catch {
+          return;
+        }
+        for (const entry of entries) {
+          if (entry.name === "." || entry.name === "..") continue;
+          const full = path.join(dir, entry.name);
+          const rel = prefix ? `${prefix}/${entry.name}` : entry.name;
+          if (entry.isDirectory()) {
+            walk(full, rel, depth + 1);
+          } else if (entry.isFile()) {
+            try {
+              onDisk.set(rel, statSync(full).size);
+            } catch {
+              // 单个文件 stat 失败不影响整体比对
+            }
+          }
+        }
+      };
+      if (repoDir) walk(repoDir, "", 0);
+      const check = checkAgainstDisk(manifest, onDisk);
+      if (check.complete) {
+        logEvent({
+          level: "info",
+          source: "download",
+          event: "download.manifest.verified",
+          message: `下载完成且与 manifest 一致: ${task.repo}（${manifest.files.length} 个文件）`,
+          detail: { repo: task.repo, files: manifest.files.length },
+        });
+        removeDownloadManifest(task.repo, "");
+      } else {
+        logEvent({
+          level: "warn",
+          source: "download",
+          event: "download.manifest.incomplete",
+          message: `下载完成但磁盘与 manifest 不符: ${task.repo}（缺 ${check.missing.length}，短 ${check.short.length}）`,
+          detail: {
+            repo: task.repo,
+            missing: check.missing.slice(0, 10),
+            short: check.short.slice(0, 10),
+            // 只记日志不判失败：见上方注释（先让数据跑起来）。
+          },
+        });
+        // 保留 manifest：下次续传 / 扫描还要用它。
+      }
+    } catch (e) {
+      // 比对失败不能影响下载结果。
+      logEvent({
+        level: "warn",
+        source: "download",
+        event: "download.manifest.verified_failed",
+        message: `完成比对失败，跳过: ${task.repo} / ${task.fileName}`,
+        detail: { repo: task.repo, fileName: task.fileName, error: e instanceof Error ? e.message : String(e) },
+      });
     }
   }
 

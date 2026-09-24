@@ -52,12 +52,7 @@ import type {
   KbIngestJobView,
   KbModality,
 } from "../shared/knowledge";
-import {
-  KB_AUDIO_EXT,
-  KB_IMAGE_EXT,
-  KB_TEXT_EXT,
-  KB_VIDEO_EXT,
-} from "../shared/knowledge";
+import { kbFileSupported } from "../shared/knowledge";
 import {
   filterModelIds,
   MODEL_CATEGORY_SETS,
@@ -165,14 +160,7 @@ export type KbUpdatePatch = Partial<{
   embedVideo: boolean;
 }>;
 
-/**
- * 目录导入白名单：文本 + PDF/图片 + 音视频（扩展名单一来源 shared/knowledge.ts，
- * 与文件选择器 accept 一致）。
- */
-const KB_FOLDER_FILE_RE = new RegExp(
-  `\\.(?:${[...KB_TEXT_EXT, ...KB_IMAGE_EXT, ...KB_AUDIO_EXT, ...KB_VIDEO_EXT].join("|")})$`,
-  "i",
-);
+/** 目录导入时跳过的目录（与扩展名白名单 kbFileSupported 一起决定收哪些文件）。 */
 const KB_FOLDER_IGNORED_DIRS = new Set([
   "node_modules",
   ".git",
@@ -504,12 +492,19 @@ function toDocView(
  * 添加本地文件。同一个来源路径已在库中且大小/修改时间都没变时跳过，
  * 内容变了则就地重建索引（而不是堆出第二份同名文档）。
  */
-export function addFileDocs(kbId: number, paths: string[]): KbDocView[] {
+export function addFileDocs(kbId: number, paths: string[]): { docs: KbDocView[]; skipped: number } {
   if (!getKb(kbId)) throw new Error("知识库不存在");
   const created: KbDocView[] = [];
+  let skipped = 0;
   const jobs = docJobs(kbId);
   for (const p of paths) {
-    if (!p || !existsSync(p)) continue;
+    // 白名单在**这里**兜底：文件选择器不再靠原生过滤器挡不支持的类型（Windows 上
+    // Electrobun 把每个扩展名渲染成一条独立过滤器、首条即默认，反而会把别的类型全藏起来，
+    // 见 docs-tab 的 addFile），所以不支持 / 不存在的文件在这里计数后跳过并回报给界面。
+    if (!p || !existsSync(p) || !kbFileSupported(p)) {
+      skipped++;
+      continue;
+    }
     const stat = statSync(p);
     const size = Number(stat.size) || null;
     const mtime = Math.floor(stat.mtimeMs);
@@ -520,6 +515,7 @@ export function addFileDocs(kbId: number, paths: string[]): KbDocView[] {
       .get();
     if (existing && existing.sizeBytes === size && existing.sourceMtime === mtime && existing.status === "ready") {
       recordKbEvent({ kbId, docId: existing.id, action: "doc_skipped", detail: { name: existing.name, reason: "源文件未变化" } });
+      skipped++;
       continue;
     }
     if (existing) {
@@ -550,7 +546,7 @@ export function addFileDocs(kbId: number, paths: string[]): KbDocView[] {
     enqueueDoc(row.id, { kind: "ingest" });
   }
   notifyKb(kbId);
-  return created;
+  return { docs: created, skipped };
 }
 
 /** 目录导入：递归收集白名单文件（跳过 node_modules/.git 等与隐藏目录），批量入库。 */
@@ -578,7 +574,7 @@ export function addFolderDocs(kbId: number, dirPath: string): { docs: KbDocView[
       if (entry.isDirectory()) {
         walk(full, depth + 1);
       } else if (entry.isFile()) {
-        if (KB_FOLDER_FILE_RE.test(entry.name)) files.push(full);
+        if (kbFileSupported(entry.name)) files.push(full);
         else skipped++;
       }
     }
@@ -588,9 +584,8 @@ export function addFolderDocs(kbId: number, dirPath: string): { docs: KbDocView[
   if (files.length === 0) {
     throw new Error("目录里没有可导入的文件（支持文本 / Markdown / PDF / 图片 / 音频 / 视频）");
   }
-  const before = files.length;
-  const docs = addFileDocs(kbId, files);
-  return { docs, skipped: skipped + (before - docs.length) };
+  const { docs, skipped: fileSkipped } = addFileDocs(kbId, files);
+  return { docs, skipped: skipped + fileSkipped };
 }
 
 export function addNoteDoc(kbId: number, title: string, content: string): KbDocView {

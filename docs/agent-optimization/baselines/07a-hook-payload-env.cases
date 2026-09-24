@@ -1,0 +1,15 @@
+apps/studio/src/bun/agent-hooks.test.ts::describe|一次事件跑多条
+apps/studio/src/bun/agent-hooks.test.ts::describe|单条 hook 的契约
+apps/studio/src/bun/agent-hooks.test.ts::describe|配置解析
+apps/studio/src/bun/agent-hooks.test.ts::test|echo 出来的就是纯文本（不追加参数，JSON 不会混进上下文）
+apps/studio/src/bun/agent-hooks.test.ts::test|stdout 不是 JSON → 整段当上下文；是 JSON → 认 context / decision
+apps/studio/src/bun/agent-hooks.test.ts::test|上下文按顺序拼接；遇到 block 立刻停（后面的不再跑）
+apps/studio/src/bun/agent-hooks.test.ts::test|上下文有硬上限（单条 8KB，合计 16KB）
+apps/studio/src/bun/agent-hooks.test.ts::test|事件 JSON 从 stdin 交给脚本；事件名在环境变量里
+apps/studio/src/bun/agent-hooks.test.ts::test|事件名两种写法都认（Codex 的 PascalCase 可以直接粘）
+apps/studio/src/bun/agent-hooks.test.ts::test|只有明确的 block 才拦回合；失败与超时都只是警告
+apps/studio/src/bun/agent-hooks.test.ts::test|坏条目被丢弃并说明原因，其余 hook 照常生效
+apps/studio/src/bun/agent-hooks.test.ts::test|忽略 SIGTERM 的 hook 也一定会结束（升级 SIGKILL，不卡死回合）
+apps/studio/src/bun/agent-hooks.test.ts::test|按事件过滤；未配置时一次都不跑
+apps/studio/src/bun/agent-hooks.test.ts::test|有一条失败时其余照跑，失败原因如实带出来
+apps/studio/src/bun/agent-hooks.test.ts::test|非 JSON / 非数组直接报错（设置页要能告诉用户哪里写错了）

@@ -137,4 +137,25 @@ describe("installedFilesForRepo", () => {
     );
     expect(names.size).toBe(0);
   });
+
+  /**
+   * GGUF 仓库里投影文件（mmproj）是权重之外的第二个下载目标：它由扫描登记在
+   * 同目录模型条目的 supportFiles 上（见 model-scan.tests.ts）。这里没算上它，
+   * 「下载这个模型」按钮就会永远差这一个文件、亮不起「已下载」。
+   */
+  test("同目录的 mmproj 投影文件也算下过（GGUF 的多模态视觉塔）", () => {
+    const names = installedFilesForRepo(
+      [
+        {
+          repo: "unsloth__Qwen3.8-27B-GGUF",
+          fileName: "Qwen3.8-27B-Q4_K_M.gguf",
+          files: ["Qwen3.8-27B-Q4_K_M.gguf"],
+          supportFiles: ["mmproj-Qwen3.8-27B-BF16.gguf"],
+        },
+      ],
+      "unsloth/Qwen3.8-27B-GGUF",
+    );
+    expect(names.has("Qwen3.8-27B-Q4_K_M.gguf")).toBe(true);
+    expect(names.has("mmproj-Qwen3.8-27B-BF16.gguf")).toBe(true);
+  });
 });

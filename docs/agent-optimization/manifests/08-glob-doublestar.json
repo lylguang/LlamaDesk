@@ -1,0 +1,29 @@
+{
+  "id": "08-glob-doublestar",
+  "allowed_files": [
+    "apps/studio/src/bun/agent-tools.ts",
+    "apps/studio/src/bun/agent-tools.glob.test.ts"
+  ],
+  "source_files": [
+    "apps/studio/src/bun/agent-tools.ts"
+  ],
+  "test_files": [
+    "apps/studio/src/bun/agent-tools.glob.test.ts"
+  ],
+  "max_source_lines": 25,
+  "banned_patterns": [
+    "@ts-ignore",
+    "@ts-expect-error",
+    "\\.skip\\(",
+    "\\.todo\\(",
+    "^\\+export function globToRegExp"
+  ],
+  "mutations": [
+    {
+      "name": "把 (?:.*/)? 换成朴素的 .*（会错误匹配 src/ab.ts）",
+      "file": "apps/studio/src/bun/agent-tools.ts",
+      "find": "re += \"(?:.*/)?\";",
+      "replace": "re += \".*\";"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, realpathSync, statSync, unlinkSync, writeFileSync } from "fs";
 import path from "path";
 import { Type } from "typebox";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@earendil-works/pi-agent-core";
@@ -62,6 +62,7 @@ export type ToolContext = {
     description: string;
     prompt: string;
     subagentType: string;
+    signal?: AbortSignal;
   }) => Promise<string>;
   /** 登记产出物（agent.ts 注入）。 */
   recordArtifact?: (filePath: string, tool: string) => void;
@@ -139,6 +140,16 @@ const NO_MATCH_HINT =
 
 const MAX_FILE_CHARS = 60_000;
 const COMMAND_TIMEOUT_MS = 120_000;
+/** 模型可以要求的最长超时：再长就该换成后台任务，别把一个回合挂在这里。 */
+const MAX_COMMAND_TIMEOUT_MS = 600_000;
+
+/** bash 超时的取值链：模型参数 > ToolContext 覆盖 > 默认 120 秒；参数夹在 [1000, 600000]。 */
+export function resolveCommandTimeout(requested: unknown, ctxTimeout?: number): number {
+  if (typeof requested === "number" && Number.isFinite(requested) && requested > 0) {
+    return Math.min(Math.max(requested, 1000), MAX_COMMAND_TIMEOUT_MS);
+  }
+  return ctxTimeout ?? COMMAND_TIMEOUT_MS;
+}
 /** 直接子进程退出后，再给管道多少时间把末尾输出读干净。 */
 const PIPE_DRAIN_GRACE_MS = 200;
 
@@ -209,9 +220,36 @@ const SECRET_PATH_PATTERNS: RegExp[] = [
   /Library\/Keychains(\/|$)/,
 ];
 
+/**
+ * 解开软链之后判断 target 是不是在 root 底下。
+ *
+ * 必须解软链：工作区里放一个指向区外的软链，字面路径仍在区内，凭据黑名单与
+ * 区外授权会一起被跳过，而 bash 工具自己就能建这个软链。
+ * （`agent-spill.ts` 的 isSpillPath 对转存目录用的是同一套判据。）
+ */
+function isReallyUnder(root: string, target: string): boolean {
+  const r = path.resolve(root);
+  const t = path.resolve(target);
+  if (t !== r && !t.startsWith(r + path.sep)) return false;
+  try {
+    if (!existsSync(r)) return false;
+    const realRoot = realpathSync(r);
+    let probe = t;
+    while (!existsSync(probe)) {
+      const parent = path.dirname(probe);
+      if (parent === probe) return false;
+      probe = parent;
+    }
+    const realProbe = realpathSync(probe);
+    return realProbe === realRoot || realProbe.startsWith(realRoot + path.sep);
+  } catch {
+    return false;
+  }
+}
+
 function assertNotSecret(workspace: string, target: string): void {
   const root = path.resolve(workspace);
-  if (target === root || target.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, target)) return;
   // 工具输出的转存目录开一个口子：那是应用自己写出来的文件（模型本来就在工具结果里
   // 看过它的前半段），不放开就谈不上"截断之后还能读回来"。数据目录的其余部分
   // （设置表里存着全部云端 API Key）照旧拦死。
@@ -228,7 +266,7 @@ function assertNotSecret(workspace: string, target: string): void {
 /** 写操作必须落在工作区内（或已授权的目录里）。 */
 export function assertInsideWorkspace(workspace: string, target: string) {
   const root = path.resolve(workspace);
-  if (target !== root && !target.startsWith(root + path.sep)) {
+  if (!isReallyUnder(root, target)) {
     throw new Error(`Path outside workspace is not writable: ${target}`);
   }
 }
@@ -265,7 +303,7 @@ function underAny(target: string, folders: string[]): boolean {
 export function assertReadable(ctx: ToolContext, target: string): void {
   const root = path.resolve(ctx.workspace);
   const abs = path.resolve(target);
-  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, abs)) return;
   if (isSpillPath(abs)) return;
   if (underAny(abs, authorizedFoldersOf(ctx))) return;
   throw new Error(
@@ -278,7 +316,7 @@ export function assertReadable(ctx: ToolContext, target: string): void {
 export function assertWritable(ctx: ToolContext, target: string): void {
   const root = path.resolve(ctx.workspace);
   const abs = path.resolve(target);
-  if (abs === root || abs.startsWith(root + path.sep)) return;
+  if (isReallyUnder(root, abs)) return;
   if (underAny(abs, authorizedFoldersOf(ctx))) return;
   throw new Error(`Path outside workspace is not writable without permission: ${abs}`);
 }
@@ -345,8 +383,15 @@ function globToRegExp(pattern: string): RegExp {
     const ch = pattern[i]!;
     if (ch === "*") {
       if (pattern[i + 1] === "*") {
-        re += ".*";
-        i++;
+        // `**/` = 零层或多层目录前缀（`**/*.ts` 要能匹配根层的文件）；
+        // 不带 `/` 的单独 `**` 照旧表示「任意字符，可跨目录」。
+        if (pattern[i + 2] === "/") {
+          re += "(?:.*/)?";
+          i += 2;
+        } else {
+          re += ".*";
+          i++;
+        }
       } else {
         re += "[^/]*";
       }
@@ -555,6 +600,7 @@ function createEditFile(ctx: ToolContext): BuiltTool {
         const target = resolvePath(ctx.workspace, params.path);
         assertWritable(ctx, target);
         if (!existsSync(target)) return errorResult(`File not found: ${target}${NOT_FOUND_HINT}`);
+        if (!params.old_str) return errorResult(`old_str 不能为空（空字符串会毁掉整个文件）`);
         const original = readFileSync(target, "utf8");
         const occurrences = original.split(params.old_str).length - 1;
         if (occurrences === 0) return errorResult(`old_str not found in ${target}${EDIT_MISMATCH_HINT}`);
@@ -566,7 +612,10 @@ function createEditFile(ctx: ToolContext): BuiltTool {
         }
         const next = params.replace_all
           ? original.split(params.old_str).join(params.new_str)
-          : original.replace(params.old_str, params.new_str);
+          : (() => {
+              const idx = original.indexOf(params.old_str);
+              return original.slice(0, idx) + params.new_str + original.slice(idx + params.old_str.length);
+            })();
         writeFileSync(target, next, "utf8");
         ctx.recordArtifact?.(target, "edit_file");
         return textResult(
@@ -765,11 +814,19 @@ function createBash(ctx: ToolContext): BuiltTool {
     label: "Run command",
     description:
       "Run a shell command inside the workspace and return stdout+stderr. " +
-      "Use for builds, tests, git, and package managers. Long-running or interactive commands are not suitable.",
+      "Use for builds, tests, git, and package managers. Long-running or interactive commands are not suitable. " +
+      "For full test suites, dependency installs, or long builds, raise timeout_ms (max 600000) instead of letting the command die at the default 120s.",
     parameters: Type.Object({
       command: Type.String({ description: "Shell command to execute." }),
+      timeout_ms: Type.Optional(
+        Type.Number({ description: "Milliseconds before the command is killed. Default 120000, max 600000. Raise it for full test suites, installs, and builds." }),
+      ),
     }),
-    execute: async (_toolCallId, params: { command: string }, signal?: AbortSignal) => {
+    execute: async (
+      _toolCallId,
+      params: { command: string; timeout_ms?: number },
+      signal?: AbortSignal,
+    ) => {
       if (!ctx.allowShell) {
         return errorResult(
           "Shell access is disabled. Enable it in the Agent workspace settings to allow commands.",
@@ -781,7 +838,8 @@ function createBash(ctx: ToolContext): BuiltTool {
       // 执行过的每条命令都入库留痕：模型可能被注入内容诱导执行破坏性命令，
       // 出事后要能查到"谁在什么时候跑了什么"。
       audit("agent_shell", `${ctx.workspace}: ${params.command}`);
-      const timeoutMs = ctx.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
+      // 模型可以按命令性质调超时（测试套件 / 装依赖 / 编译）；非法值退回原来的链路。
+      const timeoutMs = resolveCommandTimeout(params.timeout_ms, ctx.commandTimeoutMs);
       // 命令沙箱（对齐 Codex 的 workspace-write）：开启后把命令跑在平台沙箱里，
       // 「写到工作区外」与「读凭据目录」由内核拦下，而不是靠命令黑名单。
       const wrapped = wrapShellCommand(params.command, {
@@ -1228,13 +1286,13 @@ function createTaskTool(ctx: ToolContext): BuiltTool {
       signal?: AbortSignal,
     ) => {
       if (!ctx.spawnSubagent) return errorResult("Subagents are not available in this mode.");
-      void signal;
       const subagentType = normalizeSubagentType(params.subagent_type);
       try {
         const summary = await ctx.spawnSubagent({
           description: params.description,
           prompt: params.prompt,
           subagentType,
+          signal,
         });
         return textResult(summary || "(subagent returned no output)");
       } catch (e) {

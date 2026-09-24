@@ -1,0 +1,12 @@
+GATE: id=27-split-external-write mode=self head=c401dca
+GATE: out-of-bounds apps/studio/src/bun/agent-interactions.ts
+GATE: out-of-bounds apps/studio/src/bun/agent-tools.patch.test.ts
+GATE: out-of-bounds apps/studio/src/mainview/app/agent/inline-interactions.tsx
+GATE: out-of-bounds apps/studio/src/shared/i18n.ts
+GATE: size source-lines=28 limit=30
+GATE: banned-pattern none
+GATE: cases-missing none (baseline=91 now=98)
+GATE: typecheck PASS
+GATE: lint PASS
+GATE: tests PASS (82 pass, 0s)
+GATE: RESULT FAIL id=27-split-external-write

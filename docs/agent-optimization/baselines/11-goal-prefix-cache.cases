@@ -1,0 +1,16 @@
+apps/studio/src/bun/agent-goals.test.ts::describe|注入与文案
+apps/studio/src/bun/agent-goals.test.ts::describe|目标状态
+apps/studio/src/bun/agent-goals.test.ts::describe|账本与刹车
+apps/studio/src/bun/agent-goals.test.ts::test|已终结的目标不再记账（完成之后跑的那轮不算目标消耗）
+apps/studio/src/bun/agent-goals.test.ts::test|撞上 token 预算时明确报告（调用方据此停止推进）
+apps/studio/src/bun/agent-goals.test.ts::test|没设验收标准时提示先去对齐，而不是默默跳过
+apps/studio/src/bun/agent-goals.test.ts::test|状态可以人工改（暂停 / 恢复 / 放弃），不存在的目标返回 null
+apps/studio/src/bun/agent-goals.test.ts::test|目标段落带上目标、验收标准与完成标准（终结后不再注入）
+apps/studio/src/bun/agent-goals.test.ts::test|立项后可读回，初始为 active 且计数归零
+apps/studio/src/bun/agent-goals.test.ts::test|累加 token / 秒数，只有续跑轮才计入续跑次数
+apps/studio/src/bun/agent-goals.test.ts::test|终态判定：complete / dropped 不再续跑
+apps/studio/src/bun/agent-goals.test.ts::test|续跑上限可配，默认 6；设 0 = 关掉自动续跑（空值不该被当成 0）
+apps/studio/src/bun/agent-goals.test.ts::test|续跑消息要求「接着推进」而不是复述，并要求给出证据或说明卡点
+apps/studio/src/bun/agent-goals.test.ts::test|进度描述同时给出用量与续跑次数
+apps/studio/src/bun/agent-goals.test.ts::test|重新立项会重置计数（旧目标的消耗不该算到新目标头上）
+apps/studio/src/bun/agent-goals.test.ts::test|默认不设 token 预算（本地消耗量级差太大，拍一个数反而误导）

@@ -35,6 +35,14 @@ describe("realtimeBaseUrlForProvider", () => {
     expect(STEPFUN_REALTIME_BASE_URL).toBe("wss://api.stepfun.com/v1/realtime");
   });
 
+  test("百炼国际站（qwencloud.com）推出国际站端点，而不是国内那条", () => {
+    // 主机原样带过去：两者路径相同但**主机不同**，写死国内等于把国际站用户挡在
+    // "必须手填 wss 地址"那一档 —— 而那边的 Key 在国内端点上根本用不了。
+    expect(realtimeBaseUrlForProvider("https://dashscope-intl.aliyuncs.com/compatible-mode/v1")).toBe(
+      "wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime",
+    );
+  });
+
   test("认不出的主机不猜：自建中转 / 第三方聚合保持用户填的值", () => {
     expect(realtimeBaseUrlForProvider("https://api.siliconflow.cn/v1")).toBeNull();
     expect(realtimeBaseUrlForProvider("http://127.0.0.1:11434/v1")).toBeNull();
@@ -79,6 +87,13 @@ describe("isPresetRealtimeEndpoint", () => {
   test("两家的预设端点都算预设（切换厂商时要能跟着换）", () => {
     expect(isPresetRealtimeEndpoint(DEFAULT_REALTIME_BASE_URL)).toBe(true);
     expect(isPresetRealtimeEndpoint(STEPFUN_REALTIME_BASE_URL)).toBe(true);
+    // 国际站同属百炼系：从国际站切走时地址也要跟着换，不能当成"用户自填"留下来。
+    expect(isPresetRealtimeEndpoint("wss://dashscope-intl.aliyuncs.com/api-ws/v1/realtime")).toBe(true);
+  });
+
+  test("形状对但路径不对的不算（那是用户自己改过的地址）", () => {
+    expect(isPresetRealtimeEndpoint("wss://dashscope.aliyuncs.com/api-ws/v1/other")).toBe(false);
+    expect(isPresetRealtimeEndpoint("wss://relay.example/api-ws/v1/realtime")).toBe(false);
   });
 
   test("自建中转的地址不算：那是用户改过的值，不能被厂商推导覆盖", () => {
@@ -105,5 +120,15 @@ describe("isRealtimeModelId", () => {
     // `stepaudio-3-tts` 里的 audio 是拼在词里的，不是独立一段：它是 TTS，不是实时语音。
     expect(isRealtimeModelId("stepaudio-3-tts")).toBe(false);
     expect(isRealtimeModelId("stepaudio-3-asr-max")).toBe(false);
+  });
+
+  test("非实时的 omni 挡掉：它是走 Chat Completions 的对话模型，不是实时语音", () => {
+    // `omni` 曾经是无条件放行的，结果 `qwen3.8-omni-flash` 会同时出现在实时下拉里
+    // （选了连不上）和从对话模型清单里消失（被当成实时模型过滤掉）。
+    expect(isRealtimeModelId("qwen3.8-omni-flash")).toBe(false);
+    expect(isRealtimeModelId("qwen3.5-omni-plus")).toBe(false);
+    // 实时的那族名字里都带 realtime，所以收紧之后一个都没漏掉。
+    expect(isRealtimeModelId("qwen3.5-omni-plus-realtime")).toBe(true);
+    expect(isRealtimeModelId("qwen3-omni-flash-realtime")).toBe(true);
   });
 });

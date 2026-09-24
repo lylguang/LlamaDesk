@@ -1,0 +1,27 @@
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/goal 回车切模式
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/goal 点发送按钮同样切模式（旧行为会把 
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/init 回车把预置提示词发出去
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/omni-doctor 回车：把排障任务书发给模型（技能正文由模型 read_skill 取）
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|/omni-doctor 带现象：现象原样带进任务书，不让用户再打一遍
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|命令后面带参数但没声明 takesArgs：当成普通消息发出去，不静默吞话
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|在补全面板里输入 omni-do 能看到 /omni-doctor
+apps/studio/src/mainview/app/agent/composer-slash.test.tsx::test|点发送按钮跑 /omni-doctor：走的是命令，不是把命令当消息发出去
+apps/studio/src/mainview/app/agent/message.test.tsx::test|产物：不是最后一条助手消息时只画自己的卡片，不带「查看所有产物」入口
+apps/studio/src/mainview/app/agent/message.test.tsx::test|产物：会话里一个产物都没有时，不出现空的产物区
+apps/studio/src/mainview/app/agent/message.test.tsx::test|产物：卡片挂在消息底部，点一下交给「在右侧打开预览」的回调
+apps/studio/src/mainview/app/agent/message.test.tsx::test|产物：这条消息没有卡片时，仍然留「查看所有产物」入口（点了开右侧页签）
+apps/studio/src/mainview/app/agent/message.test.tsx::test|分组行：点开是每一次调用，各自还能再展开看细节
+apps/studio/src/mainview/app/agent/message.test.tsx::test|分组行：相邻的读取 / 搜索收成一行，报出「2 文件, 1 搜索」
+apps/studio/src/mainview/app/agent/message.test.tsx::test|分组行：跑动中只要还有一次调用没结果，就还在转圈
+apps/studio/src/mainview/app/agent/message.test.tsx::test|单独一次调用不成组：那一行仍带参数（读到哪个文件）
+apps/studio/src/mainview/app/agent/message.test.tsx::test|回合刚开跑（无正文无事件）：也有「处理中 · N 秒」和转圈行，秒数自己在走
+apps/studio/src/mainview/app/agent/message.test.tsx::test|子智能体一行：类型与描述分格，不把 
+apps/studio/src/mainview/app/agent/message.test.tsx::test|子智能体一行：老记录没有结构化参数时，从 
+apps/studio/src/mainview/app/agent/message.test.tsx::test|工具自己那行在转圈时，不再叠加一条（同一时刻只有一处动画）
+apps/studio/src/mainview/app/agent/message.test.tsx::test|时间轴：正文 → 工具 → 正文，按发生顺序排（不再工具全在上、正文全在下）
+apps/studio/src/mainview/app/agent/message.test.tsx::test|时间轴：老消息没有 text 事件时，整条正文照旧渲染（不受混排改动影响）
+apps/studio/src/mainview/app/agent/message.test.tsx::test|时间轴：还没落成事件的正文当尾巴渲染，且不与事件里的那段重复
+apps/studio/src/mainview/app/agent/message.test.tsx::test|没有工具在跑：轨迹末尾有一条「正在工作中」的转圈行
+apps/studio/src/mainview/app/agent/message.test.tsx::test|状态行：跑完显示「已处理 · N 秒」与工具调用次数，工具行按发生顺序在时间轴上
+apps/studio/src/mainview/app/agent/message.test.tsx::test|跑动中标题报「处理中 · N 秒」，静默期里秒数自己往前走
+apps/studio/src/mainview/app/agent/message.test.tsx::test|跑完：标题变「已处理 · N 秒」，转圈全部消失

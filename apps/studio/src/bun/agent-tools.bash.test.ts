@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildAgentTools } from "./agent-tools";
+import { buildAgentTools, resolveCommandTimeout } from "./agent-tools";
 
 function bashTool(opts?: { commandTimeoutMs?: number }) {
   const tools = buildAgentTools({
@@ -66,5 +66,32 @@ describe("bash 工具", () => {
     const text = textOf(result);
     expect(text).toContain("hello");
     expect(text).toContain("[exit 3]");
+  });
+
+  test("传了 timeout_ms 就按它来，不再写死 120 秒", async () => {
+    const tool = bashTool();
+    const started = Date.now();
+    const result = await tool.execute(
+      "t5",
+      { command: "sleep 5", timeout_ms: 300 },
+      undefined,
+    );
+    const elapsed = Date.now() - started;
+
+    expect(elapsed).toBeLessThan(3000);
+    expect(textOf(result)).toContain("已连同子进程一起终止");
+    expect(textOf(result)).toContain("超过 1 秒");
+  });
+
+  test("resolveCommandTimeout：参数夹在 [1000, 600000]，非法值退回 ctx / 默认", () => {
+    expect(resolveCommandTimeout(999_999_999, undefined)).toBe(600_000);
+    expect(resolveCommandTimeout(300, undefined)).toBe(1_000);
+    expect(resolveCommandTimeout(0, 4_000)).toBe(4_000);
+    expect(resolveCommandTimeout(-5, undefined)).toBe(120_000);
+    expect(resolveCommandTimeout(Number.NaN, undefined)).toBe(120_000);
+    expect(resolveCommandTimeout(Number.POSITIVE_INFINITY, undefined)).toBe(120_000);
+    expect(resolveCommandTimeout(undefined, undefined)).toBe(120_000);
+    expect(resolveCommandTimeout(undefined, 4_000)).toBe(4_000);
+    expect(resolveCommandTimeout(30_000, 4_000)).toBe(30_000);
   });
 });

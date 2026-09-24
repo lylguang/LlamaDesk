@@ -74,10 +74,14 @@ const OLD_FAKE_MUSIC_0039_WHEN = 1790095000012;
 const OLD_FAKE_MUSIC_0040_WHEN = 1790095000013;
 
 /** 子进程加载 ./db（模拟应用重启），失败时把输出带进断言信息便于诊断。 */
-function relaunchApp(dbPath: string, dataDir: string): { exitCode: number; output: string } {
+function relaunchApp(
+  dbPath: string,
+  dataDir: string,
+  extraEnv: Record<string, string> = {},
+): { exitCode: number; output: string } {
   const proc = Bun.spawnSync({
     cmd: [process.execPath, "run", reimport, dbPath],
-    env: { ...process.env, OMNI_DB_PATH: dbPath, OMNI_DATA_DIR: dataDir },
+    env: { ...process.env, OMNI_DB_PATH: dbPath, OMNI_DATA_DIR: dataDir, ...extraEnv },
     stdout: "pipe",
     stderr: "pipe",
   });
@@ -276,5 +280,46 @@ describe("迁移时间戳自愈", () => {
     expect(rows).toContain(CORRECTED_TIRED_WHEN);
     expect(rows.every((v) => v <= CORRECTED_MUSIC_0040_WHEN)).toBe(true);
     healed.close();
+  });
+
+  /**
+   * 只读进程（`omi` 的本地兜底）必须**原样离开**这份库。
+   *
+   * 这一条钉的是线上事故的另一半：同一个库会被安装版和仓库里的源码分别打开，两份构建的
+   * journal 时间戳不一致，于是"谁跑一次迁移，另一方下次启动就重跑建表并崩在 table
+   * already exists"（用户看到的"更新完 / 跑过 omi 之后再也打不开"）。
+   * `src/cli/db.ts` 现在用 OMNI_SKIP_MIGRATIONS=1 打开，这里就钉住它的语义：
+   * 不补迁移、不改时间戳，也不因为"库是中毒状态"而报错退出。
+   */
+  test("只读进程（OMNI_SKIP_MIGRATIONS=1）不迁移、不自愈，也不因中毒库而失败", () => {
+    const dataDir = mkdtempSync(join(tmpdir(), "db-ts-readonly-"));
+    const dbPath = join(dataDir, "readonly.db");
+
+    const first = relaunchApp(dbPath, dataDir);
+    if (first.exitCode !== 0) console.error(first.output);
+    expect(first.exitCode).toBe(0);
+
+    // 摆回中毒状态：六列撤掉、0028 换回伪造的未来时间戳
+    const poison = new Database(dbPath);
+    stripMultimodal(poison);
+    poison.run("UPDATE __drizzle_migrations SET created_at = ? WHERE created_at = ?", [
+      CORRECTED_0028_WHEN,
+      OLD_FAKE_0028_WHEN,
+    ]);
+    const beforeRows = createdAts(poison);
+    const beforeHasEmbed = columnsOf(poison, "knowledge_bases").includes("embed_image");
+    poison.close();
+
+    const readonly = relaunchApp(dbPath, dataDir, { OMNI_SKIP_MIGRATIONS: "1" });
+    if (readonly.exitCode !== 0) console.error(readonly.output);
+    expect(readonly.exitCode).toBe(0);
+
+    const after = new Database(dbPath);
+    // 时间戳一个都没动（自愈没跑）
+    expect(createdAts(after)).toEqual(beforeRows);
+    // 迁移也没跑：六列仍然是缺的
+    expect(columnsOf(after, "knowledge_bases").includes("embed_image")).toBe(beforeHasEmbed);
+    expect(columnsOf(after, "knowledge_bases")).not.toContain("embed_image");
+    after.close();
   });
 });

@@ -27,35 +27,6 @@
 
 ---
 
-## 📸 界面预览
-
-<table>
-  <tr>
-    <th align="center">模型云服务</th>
-    <th align="center">集成 · 编码工具</th>
-  </tr>
-  <tr>
-    <td><img src="docs/images/screenshot-cloud-service.png" alt="模型云服务" width="100%"/></td>
-    <td><img src="docs/images/screenshot-integrations.png" alt="编码工具集成" width="100%"/></td>
-  </tr>
-  <tr>
-    <th align="center">语音 · 实时对话</th>
-    <th align="center">语音合成 TTS</th>
-  </tr>
-  <tr>
-    <td><img src="docs/images/screenshot-voice.png" alt="语音实时对话" width="100%"/></td>
-    <td><img src="docs/images/screenshot-tts.png" alt="语音合成 TTS" width="100%"/></td>
-  </tr>
-  <tr>
-    <th align="center" colspan="2">模型选择 · 引导向导</th>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/screenshot-model-chooser.png" alt="模型选择引导向导" width="100%" style="max-width:640px; margin:0 auto; display:block;"/></td>
-  </tr>
-</table>
-
----
-
 ## ✨ 功能特性
 
 ### 模型市集

@@ -27,35 +27,6 @@
 
 ---
 
-## 📸 Screenshots
-
-<table>
-  <tr>
-    <th align="center">Cloud Models</th>
-    <th align="center">CLI Integrations</th>
-  </tr>
-  <tr>
-    <td><img src="docs/images/screenshot-cloud-service.png" alt="Cloud model providers" width="100%"/></td>
-    <td><img src="docs/images/screenshot-integrations.png" alt="Coding tool integrations" width="100%"/></td>
-  </tr>
-  <tr>
-    <th align="center">Voice · Live Talk</th>
-    <th align="center">Text-to-Speech</th>
-  </tr>
-  <tr>
-    <td><img src="docs/images/screenshot-voice.png" alt="Live voice conversation" width="100%"/></td>
-    <td><img src="docs/images/screenshot-tts.png" alt="Text-to-speech" width="100%"/></td>
-  </tr>
-  <tr>
-    <th align="center" colspan="2">Model Picker · Setup Wizard</th>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/screenshot-model-chooser.png" alt="Model picker setup wizard" width="100%" style="max-width:640px; margin:0 auto; display:block;"/></td>
-  </tr>
-</table>
-
----
-
 ## ✨ Features
 
 ### Model Hub

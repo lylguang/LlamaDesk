@@ -1,5 +1,5 @@
-import { useCallback, type ReactNode } from "react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
 import {
   MessageCircleDashedIcon,
   SquareTerminalIcon,
@@ -23,6 +23,7 @@ import {
 
 import { rpcClient } from "@lib/rpc";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@ui/tooltip";
+import { useQueryClient } from "@tanstack/react-query";
 import { useRouter } from "@stores/router";
 import { useAppStore, type AppId } from "@stores/app";
 import { useChatStore } from "@stores/chat";
@@ -36,7 +37,7 @@ import {
   visibleRailEntries,
 } from "@/shared/app-rail";
 
-/** 侧边栏展开/收起的切换按钮（放在左上角拖拽区，macOS 窗口控制按钮右侧）。 */
+/** 侧边栏展开/收起的切换按钮（放在内容区 header 左侧，避开 macOS 窗口控制按钮）。 */
 export function RailToggleButton() {
   const t = useT();
   const queryClient = useQueryClient();
@@ -46,12 +47,12 @@ export function RailToggleButton() {
   });
   const expanded = data?.settings?.[APP_RAIL_EXPANDED_KEY] === "1";
 
-  const toggle = useCallback(() => {
+  const toggle = () => {
     const next = expanded ? "" : "1";
     rpcClient.updateSettings({ settings: { [APP_RAIL_EXPANDED_KEY]: next } }).then(() => {
       queryClient.invalidateQueries({ queryKey: ["settings"] });
     });
-  }, [expanded, queryClient]);
+  };
 
   return (
     <Tooltip>
@@ -60,7 +61,7 @@ export function RailToggleButton() {
           type="button"
           aria-label={t("nav.toggleRail")}
           onClick={toggle}
-          className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          className="flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
         >
           {expanded ? (
             <PanelLeftCloseIcon className="size-4" />
@@ -146,7 +147,6 @@ export function AppRail() {
   const setRoute = useRouter((s) => s.setRoute);
   const activeApp = useAppStore((s) => s.activeApp);
   const setActiveApp = useAppStore((s) => s.setActiveApp);
-  const queryClient = useQueryClient();
 
   // 顺序与显示 / 隐藏由「设置 → 外观 → 左侧一级菜单」决定（`APP_RAIL_LAYOUT`）。
   // 设置页改完 invalidate 这个 query，菜单立刻跟着变，不需要重启。
@@ -170,13 +170,6 @@ export function AppRail() {
     setRoute({ path: "index" });
   };
 
-  const toggleExpanded = useCallback(() => {
-    const next = expanded ? "" : "1";
-    rpcClient.updateSettings({ settings: { [APP_RAIL_EXPANDED_KEY]: next } }).then(() => {
-      queryClient.invalidateQueries({ queryKey: ["settings"] });
-    });
-  }, [expanded, queryClient]);
-
   return (
     <TooltipProvider delayDuration={300}>
       <nav
@@ -186,20 +179,7 @@ export function AppRail() {
           expanded ? "w-[200px] px-2" : "w-12 px-0",
         )}
       >
-        <div className="electrobun-webkit-app-region-drag flex h-10 w-full shrink-0 items-center justify-end pr-2">
-          <button
-            type="button"
-            aria-label={t("nav.toggleRail")}
-            onClick={toggleExpanded}
-            className="flex size-8 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
-          >
-            {expanded ? (
-              <PanelLeftCloseIcon className="size-4" />
-            ) : (
-              <PanelLeftIcon className="size-4" />
-            )}
-          </button>
-        </div>
+        <div className="electrobun-webkit-app-region-drag h-10 w-full shrink-0" />
         {items.map(({ id: app }) => (
           <RailButton
             key={app}

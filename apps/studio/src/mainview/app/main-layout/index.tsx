@@ -3,7 +3,7 @@ import { useQuery } from "@tanstack/react-query";
 import { ChevronLeftIcon } from "lucide-react";
 import { DocumentView } from "./document-view";
 
-import { AppRail } from "./app-rail";
+import { AppRail, RailToggleButton } from "./app-rail";
 import { AppSidebar } from "./app-sidebar";
 import { SidebarInset, SidebarProvider } from "@ui/sidebar";
 import { rpcClient } from "@lib/rpc";
@@ -138,6 +138,7 @@ export function MainLayout() {
       {showSidebar && <AppSidebar />}
       <SidebarInset className="min-w-0 overflow-hidden">
         <header className="electrobun-webkit-app-region-drag flex shrink-0 items-center gap-2 px-4 pt-4 pb-2">
+          <RailToggleButton />
           {!showSidebar && (
             <button
               type="button"

@@ -105,9 +105,9 @@ async function renderRail() {
   await act(async () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
-  const labels = [...document.querySelectorAll('nav[aria-label="App rail"] button[aria-label]')]
-    .map((button) => button.getAttribute("aria-label"))
-    .filter((label) => label !== null && label !== zh("nav.toggleRail"));
+  const labels = [...document.querySelectorAll('nav[aria-label="App rail"] button[aria-label]')].map(
+    (button) => button.getAttribute("aria-label"),
+  );
   return {
     labels,
     cleanup: async () => {
